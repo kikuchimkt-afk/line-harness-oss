@@ -75,7 +75,7 @@ export function UpdateBanner() {
 
   if (status.kind === 'fork') {
     return (
-      <div className="bg-amber-100 text-amber-900 px-4 py-2 border-b text-sm">
+      <div className="bg-amber-100 text-amber-900 px-4 py-2 border-b text-sm backdrop-blur">
         改造を検知しました (v{status.version}, {status.reason}).{' '}
         <a
           className="underline"
@@ -90,7 +90,7 @@ export function UpdateBanner() {
   }
 
   return (
-    <div className="bg-blue-50 text-blue-900 px-4 py-2 border-b flex items-center gap-3 text-sm">
+    <div className="bg-blue-50 text-blue-900 px-4 py-2 border-b flex items-center gap-3 text-sm backdrop-blur">
       <div>
         <strong>v{status.target.version}</strong> が利用可能（現 v
         {status.current}）

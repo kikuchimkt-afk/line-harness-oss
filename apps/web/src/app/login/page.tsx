@@ -66,10 +66,10 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: '#06C755' }}>
-      <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm">
+    <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="glass-panel rounded-lg p-8 w-full max-w-sm">
         <div className="text-center mb-6">
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-3" style={{ backgroundColor: '#06C755' }}>
+          <div className="lh-gradient-button w-12 h-12 rounded-lg flex items-center justify-center font-bold text-lg mx-auto mb-3">
             H
           </div>
           <h1 className="text-xl font-bold text-gray-900">L Harness</h1>
@@ -96,8 +96,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading || !apiKey}
-            className="w-full py-3 text-white font-medium rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
-            style={{ backgroundColor: '#06C755' }}
+            className="lh-gradient-button w-full py-3 font-medium rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {loading ? 'ログイン中...' : 'ログイン'}
           </button>

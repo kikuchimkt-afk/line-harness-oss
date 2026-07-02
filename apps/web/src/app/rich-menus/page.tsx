@@ -7,6 +7,10 @@ import { useAccount } from '@/contexts/account-context'
 import { api } from '@/lib/api'
 import { ApplyToTagModal } from '@/components/rich-menus/apply-to-tag-modal'
 
+const RICH_MENU_BUILDER_URL =
+  process.env.NEXT_PUBLIC_RICH_MENU_BUILDER_URL ||
+  'https://line-rich-menu-builder.vercel.app'
+
 type RichMenuGroupListItem = {
   id: string
   name: string
@@ -172,6 +176,17 @@ export default function RichMenusListPage() {
           </Link>
         }
       />
+
+      <div className="mb-5">
+        <a
+          href={RICH_MENU_BUILDER_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity hover:opacity-90 border border-pink-200 text-rose-700 bg-white/70"
+        >
+          下書きアプリを開く
+        </a>
+      </div>
 
       {!selectedAccount && (
         <div className="text-sm text-gray-500">

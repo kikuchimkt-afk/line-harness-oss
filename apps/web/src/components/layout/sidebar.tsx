@@ -274,12 +274,23 @@ export default function Sidebar() {
                   href={item.href}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                     active
-                      ? 'text-white'
+                      ? isDanger
+                        ? 'text-white'
+                        : 'text-rose-900 border border-pink-200 shadow-sm'
                       : isDanger
                         ? 'text-red-500 hover:bg-red-50'
                         : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                   }`}
-                  style={active ? { backgroundColor: isDanger ? '#EF4444' : '#06C755' } : {}}
+                  style={
+                    active
+                      ? {
+                          background: isDanger
+                            ? '#EF4444'
+                            : 'linear-gradient(135deg, rgba(255, 240, 247, 0.94), rgba(252, 231, 243, 0.86))',
+                          color: isDanger ? '#fff' : '#6f254d',
+                        }
+                      : {}
+                  }
                 >
                   <NavIcon d={item.icon} />
                   <span className="flex-1">{item.label}</span>
