@@ -5,7 +5,18 @@ import { fetchApi } from '@/lib/api'
 import type { ApiResponse } from '@line-crm/shared'
 import type { StaffMember } from '@line-crm/shared'
 
-type NewApiKey = { apiKey: string; staffId: string }
+type StaffRole = 'owner' | 'admin' | 'staff'
+type NewApiKey = {
+  apiKey: string
+  staffId: string
+  staffName: string
+  role: StaffRole
+  kind: 'created' | 'regenerated'
+}
+
+function getRoleLabel(role: string) {
+  return role === 'owner' ? 'オーナー' : role === 'admin' ? '管理者' : 'スタッフ'
+}
 
 function RoleBadge({ role }: { role: string }) {
   const styles =
@@ -14,8 +25,7 @@ function RoleBadge({ role }: { role: string }) {
       : role === 'admin'
         ? 'bg-blue-100 text-blue-800'
         : 'bg-gray-100 text-gray-600'
-  const label =
-    role === 'owner' ? 'オーナー' : role === 'admin' ? '管理者' : 'スタッフ'
+  const label = getRoleLabel(role)
   return (
     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${styles}`}>
       {label}
@@ -36,6 +46,7 @@ export default function StaffPage() {
   // New API key banner
   const [newKey, setNewKey] = useState<NewApiKey | null>(null)
   const [copied, setCopied] = useState(false)
+  const [guideCopied, setGuideCopied] = useState(false)
 
   // Create form
   const [showForm, setShowForm] = useState(false)
@@ -83,7 +94,13 @@ export default function StaffPage() {
       })
       if (res.success) {
         if (res.data.apiKey) {
-          setNewKey({ apiKey: res.data.apiKey, staffId: res.data.id })
+          setNewKey({
+            apiKey: res.data.apiKey,
+            staffId: res.data.id,
+            staffName: res.data.name,
+            role: res.data.role as StaffRole,
+            kind: 'created',
+          })
         }
         setFormName('')
         setFormEmail('')
@@ -119,7 +136,13 @@ export default function StaffPage() {
         method: 'POST',
       })
       if (res.success) {
-        setNewKey({ apiKey: res.data.apiKey, staffId: member.id })
+        setNewKey({
+          apiKey: res.data.apiKey,
+          staffId: member.id,
+          staffName: member.name,
+          role: member.role as StaffRole,
+          kind: 'regenerated',
+        })
       } else {
         setError(res.error ?? 'キー再生成に失敗しました')
       }
@@ -145,6 +168,41 @@ export default function StaffPage() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const buildStaffGuideText = () => {
+    if (!newKey) return ''
+    const adminUrl = typeof window !== 'undefined' ? window.location.origin : ''
+    return [
+      `${newKey.staffName}さん`,
+      '',
+      newKey.kind === 'regenerated'
+        ? 'L Harnessのスタッフ用APIキーを再発行しました。'
+        : 'L Harnessのスタッフ用ログイン情報です。',
+      newKey.kind === 'regenerated' ? '以前のAPIキーは使えません。' : '',
+      '',
+      `管理画面URL：${adminUrl}`,
+      `権限：${getRoleLabel(newKey.role)}`,
+      '',
+      'APIキー：',
+      newKey.apiKey,
+      '',
+      '使い方：',
+      '1. 管理画面URLを開く',
+      '2. ログイン画面でAPIキーを貼り付ける',
+      '3. ログイン後、必要なメニューを操作する',
+      '',
+      '※このAPIキーは管理画面に入るための大切な情報です。',
+      '※外部には共有せず、必要なスタッフだけで管理してください。',
+    ].join('\n')
+  }
+
+  const handleCopyGuide = async () => {
+    const text = buildStaffGuideText()
+    if (!text) return
+    await navigator.clipboard.writeText(text)
+    setGuideCopied(true)
+    setTimeout(() => setGuideCopied(false), 2000)
+  }
+
   return (
     <div>
       <Header
@@ -164,24 +222,39 @@ export default function StaffPage() {
       {newKey && (
         <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
           <p className="text-sm font-medium text-green-800 mb-2">
-            APIキーが発行されました。このキーは一度しか表示されません。
+            {newKey.kind === 'regenerated' ? 'APIキーが再発行されました。' : 'APIキーが発行されました。'}
+            このキーは一度しか表示されません。
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <code className="flex-1 text-xs bg-white border border-green-200 rounded px-3 py-2 font-mono break-all">
               {newKey.apiKey}
             </code>
-            <button
-              onClick={handleCopy}
-              className="shrink-0 px-3 py-2 text-xs font-medium text-green-700 bg-white border border-green-300 rounded-lg hover:bg-green-50 transition-colors"
-            >
-              {copied ? 'コピー済み' : 'コピー'}
-            </button>
-            <button
-              onClick={() => setNewKey(null)}
-              className="shrink-0 px-3 py-2 text-xs font-medium text-gray-500 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              閉じる
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleCopyGuide}
+                className="shrink-0 px-3 py-2 text-xs font-medium text-rose-700 bg-white border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors"
+              >
+                {guideCopied ? '案内文コピー済み' : 'LINE用案内文をコピー'}
+              </button>
+              <button
+                onClick={handleCopy}
+                className="shrink-0 px-3 py-2 text-xs font-medium text-green-700 bg-white border border-green-300 rounded-lg hover:bg-green-50 transition-colors"
+              >
+                {copied ? 'キーコピー済み' : 'APIキーだけコピー'}
+              </button>
+              <button
+                onClick={() => setNewKey(null)}
+                className="shrink-0 px-3 py-2 text-xs font-medium text-gray-500 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 rounded-lg border border-green-100 bg-white/80 p-3 text-xs text-gray-600">
+            <p className="mb-2 font-medium text-gray-700">LINEで送る内容の下書き</p>
+            <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-sans leading-relaxed">
+              {buildStaffGuideText()}
+            </pre>
           </div>
         </div>
       )}
