@@ -1,14 +1,20 @@
 'use client'
 
 import { useState } from 'react'
+import type { Tag } from '@line-crm/shared'
 import type { FriendListItem } from '@/lib/api'
 import { api, type FriendProfileInput } from '@/lib/api'
+import TagBadge from './tag-badge'
 
 interface Props {
   friend: FriendListItem
+  allTags: Tag[]
   onClose: () => void
   onSaved: () => void | Promise<void>
+  onTagsChanged?: () => void | Promise<void>
 }
+
+const TAG_COLORS = ['#F9A8D4', '#FBCFE8', '#FCA5A5', '#FDE68A', '#86EFAC', '#93C5FD', '#C4B5FD']
 
 const PROFILE_TYPES = [
   '未設定',
@@ -35,7 +41,7 @@ function metaString(friend: FriendListItem, key: keyof FriendProfileInput): stri
   return typeof value === 'string' ? value : ''
 }
 
-export default function FriendProfileModal({ friend, onClose, onSaved }: Props) {
+export default function FriendProfileModal({ friend, allTags, onClose, onSaved, onTagsChanged }: Props) {
   const [form, setForm] = useState<ProfileForm>({
     harnessDisplayName: friend.harnessDisplayName ?? metaString(friend, 'harnessDisplayName'),
     profileType: metaString(friend, 'profileType'),
@@ -45,11 +51,17 @@ export default function FriendProfileModal({ friend, onClose, onSaved }: Props) 
     email: metaString(friend, 'email'),
     memo: metaString(friend, 'memo'),
   })
+  const [assignedTags, setAssignedTags] = useState<Tag[]>(friend.tags ?? [])
+  const [selectedTagId, setSelectedTagId] = useState('')
+  const [newTagName, setNewTagName] = useState('')
+  const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0])
   const [saving, setSaving] = useState(false)
+  const [tagSaving, setTagSaving] = useState(false)
   const [error, setError] = useState('')
 
   const lineDisplayName = friend.lineDisplayName || friend.displayName || '名前なし'
   const effectiveName = form.harnessDisplayName.trim() || lineDisplayName
+  const availableTags = allTags.filter((tag) => !assignedTags.some((assigned) => assigned.id === tag.id))
 
   const setField = (key: keyof ProfileForm, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }))
@@ -71,6 +83,72 @@ export default function FriendProfileModal({ friend, onClose, onSaved }: Props) 
       setError('プロフィールを保存できませんでした。時間をおいてもう一度お試しください。')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const refreshTags = async () => {
+    if (onTagsChanged) {
+      await onTagsChanged()
+    } else {
+      await onSaved()
+    }
+  }
+
+  const handleAddTag = async () => {
+    if (!selectedTagId || tagSaving) return
+    const tag = allTags.find((item) => item.id === selectedTagId)
+    if (!tag) return
+    setTagSaving(true)
+    setError('')
+    try {
+      await api.friends.addTag(friend.id, selectedTagId)
+      setAssignedTags((prev) => (prev.some((item) => item.id === tag.id) ? prev : [...prev, tag]))
+      setSelectedTagId('')
+      await refreshTags()
+    } catch {
+      setError('タグを追加できませんでした。時間をおいてもう一度お試しください。')
+    } finally {
+      setTagSaving(false)
+    }
+  }
+
+  const handleCreateAndAddTag = async () => {
+    const name = newTagName.trim()
+    if (!name || tagSaving) return
+    setTagSaving(true)
+    setError('')
+    try {
+      const created = await api.tags.create({ name, color: newTagColor })
+      if (!created.success) {
+        setError(created.error || 'タグを作成できませんでした。')
+        return
+      }
+      await api.friends.addTag(friend.id, created.data.id)
+      setAssignedTags((prev) => [...prev, created.data])
+      setNewTagName('')
+      setNewTagColor(TAG_COLORS[0])
+      await refreshTags()
+    } catch {
+      setError('タグを作成できませんでした。時間をおいてもう一度お試しください。')
+    } finally {
+      setTagSaving(false)
+    }
+  }
+
+  const handleRemoveTag = async (tagId: string) => {
+    if (tagSaving) return
+    const previous = assignedTags
+    setTagSaving(true)
+    setError('')
+    setAssignedTags((prev) => prev.filter((tag) => tag.id !== tagId))
+    try {
+      await api.friends.removeTag(friend.id, tagId)
+      await refreshTags()
+    } catch {
+      setAssignedTags(previous)
+      setError('タグを外せませんでした。時間をおいてもう一度お試しください。')
+    } finally {
+      setTagSaving(false)
     }
   }
 
@@ -186,6 +264,94 @@ export default function FriendProfileModal({ friend, onClose, onSaved }: Props) 
                 placeholder="対応メモ、兄弟姉妹、注意点など"
                 className="w-full rounded-lg border border-pink-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
               />
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-pink-100 bg-white/80 p-4">
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">タグ</h3>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  この友だちに付けるタグを、プロフィール編集の中で整理できます。
+                </p>
+              </div>
+              {tagSaving && <span className="text-xs font-medium text-pink-700">更新中...</span>}
+            </div>
+
+            {assignedTags.length > 0 ? (
+              <div className="mb-4 flex flex-wrap gap-1.5">
+                {assignedTags.map((tag) => (
+                  <TagBadge key={tag.id} tag={tag} onRemove={() => handleRemoveTag(tag.id)} />
+                ))}
+              </div>
+            ) : (
+              <p className="mb-4 rounded-lg border border-dashed border-pink-100 bg-pink-50/50 px-3 py-2 text-xs text-pink-900/60">
+                まだタグが付いていません。
+              </p>
+            )}
+
+            <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+              <select
+                className="rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
+                value={selectedTagId}
+                onChange={(e) => setSelectedTagId(e.target.value)}
+                disabled={tagSaving || availableTags.length === 0}
+              >
+                <option value="">既存タグを選んで追加</option>
+                {availableTags.map((tag) => (
+                  <option key={tag.id} value={tag.id}>{tag.name}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleAddTag}
+                disabled={!selectedTagId || tagSaving}
+                className="rounded-lg border border-pink-200 bg-pink-50 px-4 py-2 text-sm font-semibold text-pink-800 transition hover:bg-pink-100 disabled:opacity-50"
+              >
+                追加
+              </button>
+            </div>
+
+            {availableTags.length === 0 && allTags.length > 0 && (
+              <p className="mt-2 text-xs text-gray-400">作成済みのタグはすべて付いています。</p>
+            )}
+
+            <div className="mt-4 rounded-lg border border-pink-50 bg-pink-50/40 p-3">
+              <label className="mb-1 block text-xs font-semibold text-gray-600">新しいタグを作って付ける</label>
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                <input
+                  value={newTagName}
+                  onChange={(e) => setNewTagName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      handleCreateAndAddTag()
+                    }
+                  }}
+                  placeholder="例：講師 / 体験希望 / 要確認"
+                  className="rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateAndAddTag}
+                  disabled={!newTagName.trim() || tagSaving}
+                  className="rounded-lg border border-pink-200 bg-white px-4 py-2 text-sm font-semibold text-pink-800 transition hover:bg-pink-100 disabled:opacity-50"
+                >
+                  作成して追加
+                </button>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {TAG_COLORS.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    onClick={() => setNewTagColor(color)}
+                    className={`h-6 w-6 rounded-full border-2 ${newTagColor === color ? 'border-gray-900' : 'border-white shadow-sm'}`}
+                    style={{ backgroundColor: color }}
+                    aria-label={`タグ色 ${color}`}
+                  />
+                ))}
+              </div>
             </div>
           </section>
 

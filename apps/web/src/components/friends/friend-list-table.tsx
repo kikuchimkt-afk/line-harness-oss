@@ -249,8 +249,10 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
       {profileFriend && (
         <FriendProfileModal
           friend={profileFriend}
+          allTags={allTags}
           onClose={() => setProfileFriend(null)}
           onSaved={onRefresh}
+          onTagsChanged={onTagsChanged ?? onRefresh}
         />
       )}
     </div>
