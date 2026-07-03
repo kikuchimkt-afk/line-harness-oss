@@ -29,6 +29,44 @@ function parseStringArray(value: unknown): string[] {
   }
 }
 
+async function touchBroadcastChats(
+  db: D1Database,
+  recipients: Array<{ id: string }>,
+  lineAccountId: string | null,
+  lastMessageAt: string,
+): Promise<void> {
+  if (!lineAccountId || recipients.length === 0) return;
+
+  const now = jstNow();
+  const insertStmts = recipients.map((friend) =>
+    db
+      .prepare(
+        `INSERT INTO chats (id, friend_id, line_account_id, status, last_message_at, created_at, updated_at)
+         SELECT ?, ?, ?, 'resolved', ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM chats WHERE friend_id = ? AND line_account_id = ?
+         )`,
+      )
+      .bind(crypto.randomUUID(), friend.id, lineAccountId, lastMessageAt, now, now, friend.id, lineAccountId),
+  );
+  await db.batch(insertStmts);
+
+  const updateStmts = recipients.map((friend) =>
+    db
+      .prepare(
+        `UPDATE chats
+         SET last_message_at = CASE
+             WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+             ELSE last_message_at
+           END,
+           updated_at = ?
+         WHERE friend_id = ? AND line_account_id = ?`,
+      )
+      .bind(lastMessageAt, lastMessageAt, now, friend.id, lineAccountId),
+  );
+  await db.batch(updateStmts);
+}
+
 export async function processBroadcastSend(
   db: D1Database,
   lineClient: LineClient,
@@ -114,6 +152,7 @@ export async function processBroadcastSend(
             ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
           );
           await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
         } catch (err) {
           console.error(`Broadcast all batch ${batchIndex} failed:`, err);
         }
@@ -170,6 +209,7 @@ export async function processBroadcastSend(
             ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
           );
           await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
         } catch (err) {
           console.error(`Selected-friend broadcast batch ${batchIndex} failed:`, err);
         }
@@ -224,6 +264,7 @@ export async function processBroadcastSend(
             ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
           );
           await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
         } catch (err) {
           console.error(`Multicast batch ${i / MULTICAST_BATCH_SIZE} failed:`, err);
           // Continue with next batch; failed batch is not logged
@@ -482,6 +523,7 @@ async function processQueuedBroadcastBatches(
         ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcast.id, queuedBroadcastAccount, now),
       );
       await db.batch(stmts);
+      await touchBroadcastChats(db, batch, queuedBroadcastAccount, now);
     } catch (logErr) {
       console.error(`Queued broadcast batch ${batchIndex} log failed (messages already sent):`, logErr);
     }
