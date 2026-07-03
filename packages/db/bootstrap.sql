@@ -420,7 +420,7 @@ CREATE TABLE friend_tags (
 
 CREATE TABLE friends (
   id               TEXT PRIMARY KEY,
-  line_user_id     TEXT UNIQUE NOT NULL,
+  line_user_id     TEXT NOT NULL,
   display_name     TEXT,
   picture_url      TEXT,
   status_message   TEXT,
@@ -430,7 +430,7 @@ CREATE TABLE friends (
   score            INTEGER NOT NULL DEFAULT 0,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
-, ref_code TEXT, metadata TEXT NOT NULL DEFAULT '{}', line_account_id TEXT REFERENCES line_accounts(id), first_tracked_link_id TEXT REFERENCES tracked_links (id) ON DELETE SET NULL);
+, ref_code TEXT, metadata TEXT NOT NULL DEFAULT '{}', line_account_id TEXT REFERENCES line_accounts(id), first_tracked_link_id TEXT REFERENCES tracked_links (id) ON DELETE SET NULL, UNIQUE(line_account_id, line_user_id));
 
 CREATE TABLE google_calendar_connections (
   id            TEXT PRIMARY KEY,

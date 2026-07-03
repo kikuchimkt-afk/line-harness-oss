@@ -274,6 +274,7 @@ describe('POST /webhook — first-contact existing friends', () => {
       displayName: 'Existing Friend',
       pictureUrl: 'https://example.com/profile.jpg',
       statusMessage: 'hello',
+      lineAccountId: null,
     });
     expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1', null);
     expect(fireEvent).toHaveBeenCalledWith(

@@ -715,6 +715,9 @@ liffRoutes.get('/auth/callback', async (c) => {
 
     const db = c.env.DB;
     const lineUserId = verified.sub;
+    const matchedLineAccountId = accountParam
+      ? (await getLineAccountByChannelId(db, accountParam))?.id ?? null
+      : null;
 
     // Upsert friend (may not exist yet if webhook hasn't fired)
     const friend = await upsertFriend(db, {
@@ -722,6 +725,7 @@ liffRoutes.get('/auth/callback', async (c) => {
       displayName,
       pictureUrl,
       statusMessage: null,
+      lineAccountId: matchedLineAccountId,
     });
 
     // IG cross-platform UUID linkage (OAuth path — new friends & returning users
@@ -858,9 +862,7 @@ liffRoutes.get('/auth/callback', async (c) => {
       const { buildMessage, expandVariables } = await import('../services/step-delivery.js');
 
       // Resolve which account this friend belongs to
-      const matchedAccountId = accountParam
-        ? (await getLineAccountByChannelId(db, accountParam))?.id ?? null
-        : null;
+      const matchedAccountId = matchedLineAccountId;
 
       // Get access token for this account
       let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;

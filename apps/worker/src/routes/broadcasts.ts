@@ -129,14 +129,16 @@ broadcasts.get('/api/broadcasts/:id/preview-count', async (c) => {
       count = active;
       perAccount = breakdown;
     } else if (broadcast.target_type === 'tag' && broadcast.target_tag_id) {
-      // 注: ここは inline send パス (broadcast.ts:61 getFriendsByTag) が
-      // line_account_id でフィルタしないので、preview もアカウント横断で数える。
-      // 実際の送信先と modal 表示を一致させるための整合性。
-      const row = await c.env.DB.prepare(
-        `SELECT COUNT(*) AS cnt FROM friends f
-           INNER JOIN friend_tags ft ON ft.friend_id = f.id
-           WHERE ft.tag_id = ? AND f.is_following = 1`,
-      ).bind(broadcast.target_tag_id).first<{ cnt: number }>();
+      const accountId = (raw.line_account_id as string | null) || null;
+      const sql = accountId
+        ? `SELECT COUNT(*) AS cnt FROM friends f
+             INNER JOIN friend_tags ft ON ft.friend_id = f.id
+            WHERE ft.tag_id = ? AND f.is_following = 1 AND f.line_account_id = ?`
+        : `SELECT COUNT(*) AS cnt FROM friends f
+             INNER JOIN friend_tags ft ON ft.friend_id = f.id
+            WHERE ft.tag_id = ? AND f.is_following = 1`;
+      const binds: unknown[] = accountId ? [broadcast.target_tag_id, accountId] : [broadcast.target_tag_id];
+      const row = await c.env.DB.prepare(sql).bind(...binds).first<{ cnt: number }>();
       count = row?.cnt ?? 0;
     } else if (broadcast.target_type === 'all') {
       const accountId = (raw.line_account_id as string | null) || null;
@@ -496,7 +498,8 @@ broadcasts.post('/api/broadcasts/:id/send', async (c) => {
     // target_type='tag' で対象が多い場合はキュー方式
     if (existing.target_type === 'tag' && existing.target_tag_id) {
       const { getFriendsByTag } = await import('@line-crm/db');
-      const friends = await getFriendsByTag(c.env.DB, existing.target_tag_id);
+      const accountId = (existing as unknown as Record<string, unknown>).line_account_id as string | null;
+      const friends = await getFriendsByTag(c.env.DB, existing.target_tag_id, accountId);
       const followingCount = friends.filter(f => f.is_following).length;
 
       if (followingCount > 500) {
