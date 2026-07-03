@@ -55,6 +55,7 @@ function serializeBroadcast(row: DbBroadcast) {
     lineAccountId: r.line_account_id || null,
     accountIds: parseJsonArray(r.account_ids),
     dedupPriority: parseJsonArray(r.dedup_priority),
+    targetFriendIds: parseJsonArray(r.target_friend_ids),
     failedAccountIds: parseJsonArray(r.failed_account_ids),
     createdAt: row.created_at,
   };
@@ -140,6 +141,20 @@ broadcasts.get('/api/broadcasts/:id/preview-count', async (c) => {
       const binds: unknown[] = accountId ? [broadcast.target_tag_id, accountId] : [broadcast.target_tag_id];
       const row = await c.env.DB.prepare(sql).bind(...binds).first<{ cnt: number }>();
       count = row?.cnt ?? 0;
+    } else if (broadcast.target_type === 'friends') {
+      const friendIds = parseJsonArray(raw.target_friend_ids) ?? [];
+      if (friendIds.length > 0) {
+        const accountId = (raw.line_account_id as string | null) || null;
+        const placeholders = friendIds.map(() => '?').join(',');
+        const sql = accountId
+          ? `SELECT COUNT(*) AS cnt FROM friends
+              WHERE id IN (${placeholders}) AND is_following = 1 AND line_account_id = ?`
+          : `SELECT COUNT(*) AS cnt FROM friends
+              WHERE id IN (${placeholders}) AND is_following = 1`;
+        const binds: unknown[] = accountId ? [...friendIds, accountId] : friendIds;
+        const row = await c.env.DB.prepare(sql).bind(...binds).first<{ cnt: number }>();
+        count = row?.cnt ?? 0;
+      }
     } else if (broadcast.target_type === 'all') {
       const accountId = (raw.line_account_id as string | null) || null;
       const sql = accountId
@@ -272,6 +287,7 @@ broadcasts.post('/api/broadcasts', async (c) => {
       altText?: string | null;
       accountIds?: string[];
       dedupPriority?: string[];
+      targetFriendIds?: string[];
     }>();
 
     if (!body.title || !body.messageType || !body.messageContent || !body.targetType) {
@@ -300,6 +316,16 @@ broadcasts.post('/api/broadcasts', async (c) => {
         typeof id === 'string' && body.accountIds!.includes(id));
     }
 
+    if (body.targetType === 'friends') {
+      const targetFriendIds = Array.isArray(body.targetFriendIds)
+        ? Array.from(new Set(body.targetFriendIds.filter((id): id is string => typeof id === 'string' && id.length > 0)))
+        : [];
+      if (targetFriendIds.length === 0) {
+        return c.json({ success: false, error: 'targetFriendIds (length >= 1) required when targetType is "friends"' }, 400);
+      }
+      body.targetFriendIds = targetFriendIds;
+    }
+
     const broadcast = await createBroadcast(c.env.DB, {
       title: body.title,
       messageType: body.messageType,
@@ -309,6 +335,7 @@ broadcasts.post('/api/broadcasts', async (c) => {
       scheduledAt: body.scheduledAt ?? null,
       accountIds: body.accountIds,
       dedupPriority: body.dedupPriority,
+      targetFriendIds: body.targetFriendIds,
     });
 
     // Save line_account_id and alt_text if provided
@@ -349,6 +376,7 @@ broadcasts.put('/api/broadcasts/:id', async (c) => {
       messageContent?: string;
       targetType?: BroadcastTargetType;
       targetTagId?: string | null;
+      targetFriendIds?: string[] | null;
       scheduledAt?: string | null;
     }>();
 
@@ -364,6 +392,7 @@ broadcasts.put('/api/broadcasts/:id', async (c) => {
       message_content: body.messageContent,
       target_type: body.targetType,
       target_tag_id: body.targetTagId,
+      target_friend_ids: body.targetFriendIds === undefined ? undefined : JSON.stringify(body.targetFriendIds ?? []),
       scheduled_at: body.scheduledAt,
       ...(statusUpdate !== undefined ? { status: statusUpdate } : {}),
     });

@@ -184,7 +184,7 @@ CREATE TABLE "broadcasts" (
   title              TEXT NOT NULL,
   message_type       TEXT NOT NULL CHECK (message_type IN ('text', 'image', 'flex')),
   message_content    TEXT NOT NULL,
-  target_type        TEXT NOT NULL CHECK (target_type IN ('all', 'tag', 'segment', 'multi-account-dedup')) DEFAULT 'all',
+  target_type        TEXT NOT NULL CHECK (target_type IN ('all', 'tag', 'friends', 'segment', 'multi-account-dedup')) DEFAULT 'all',
   target_tag_id      TEXT REFERENCES tags (id) ON DELETE SET NULL,
   status             TEXT NOT NULL CHECK (status IN ('draft', 'scheduled', 'sending', 'sent')) DEFAULT 'draft',
   scheduled_at       TEXT,
@@ -200,6 +200,7 @@ CREATE TABLE "broadcasts" (
   segment_conditions TEXT,
   account_ids        TEXT CHECK (account_ids IS NULL OR json_valid(account_ids)),
   dedup_priority     TEXT CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)),
+  target_friend_ids  TEXT CHECK (target_friend_ids IS NULL OR json_valid(target_friend_ids)),
   failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids))
 , dedup_progress TEXT, batch_lock_at TEXT);
 

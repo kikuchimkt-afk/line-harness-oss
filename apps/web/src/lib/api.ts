@@ -39,6 +39,7 @@ export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
   targetType: BroadcastTargetType;
   accountIds: string[] | null;
   dedupPriority: string[] | null;
+  targetFriendIds: string[] | null;
   failedAccountIds: string[] | null;
 };
 
@@ -360,6 +361,7 @@ export const api = {
       lineAccountId?: string | null
       accountIds?: string[]
       dedupPriority?: string[]
+      targetFriendIds?: string[]
     }) =>
       fetchApi<ApiResponse<ApiBroadcast>>('/api/broadcasts', {
         method: 'POST',
@@ -373,6 +375,7 @@ export const api = {
         messageContent?: string
         targetType?: ApiBroadcast['targetType']
         targetTagId?: string | null
+        targetFriendIds?: string[] | null
         scheduledAt?: string | null
       }
     ) =>

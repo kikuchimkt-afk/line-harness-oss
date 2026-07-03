@@ -262,6 +262,7 @@ function BroadcastList() {
                 const statusInfo = statusConfig[broadcast.status]
                 const tagName = getTagName(broadcast.targetTagId)
                 const isDedup = broadcast.targetType === 'multi-account-dedup'
+                const isSelectedFriends = broadcast.targetType === 'friends'
 
                 return (
                   <tr key={broadcast.id} className="hover:bg-gray-50 transition-colors">
@@ -275,6 +276,11 @@ function BroadcastList() {
                           {isDedup && (
                             <span className="inline-flex items-center px-1.5 py-0 rounded text-[10px] font-medium bg-purple-100 text-purple-700">
                               複アカ
+                            </span>
+                          )}
+                          {isSelectedFriends && (
+                            <span className="inline-flex items-center px-1.5 py-0 rounded text-[10px] font-medium bg-pink-100 text-pink-700">
+                              個別
                             </span>
                           )}
                         </div>
@@ -295,6 +301,8 @@ function BroadcastList() {
                     <td className="px-4 py-3 text-sm text-gray-600">
                       {isDedup ? (
                         <span className="text-purple-700">重複除外{tagName ? `: ${tagName}` : ''}</span>
+                      ) : isSelectedFriends ? (
+                        <span className="text-pink-700">個別選択</span>
                       ) : broadcast.targetType === 'all' ? (
                         '全員'
                       ) : tagName ? (

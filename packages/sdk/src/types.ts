@@ -217,8 +217,9 @@ export interface Broadcast {
   title: string
   messageType: MessageType
   messageContent: string
-  targetType: 'all' | 'tag'
+  targetType: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId: string | null
+  targetFriendIds?: string[] | null
   status: BroadcastStatus
   scheduledAt: string | null
   sentAt: string | null
@@ -252,8 +253,9 @@ export interface CreateBroadcastInput {
   title: string
   messageType: MessageType
   messageContent: string
-  targetType: 'all' | 'tag'
+  targetType: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId?: string
+  targetFriendIds?: string[]
   scheduledAt?: string
   altText?: string
 }
@@ -262,8 +264,9 @@ export interface UpdateBroadcastInput {
   title?: string
   messageType?: MessageType
   messageContent?: string
-  targetType?: 'all' | 'tag'
+  targetType?: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId?: string | null
+  targetFriendIds?: string[] | null
   scheduledAt?: string | null
 }
 

@@ -237,7 +237,7 @@ export interface FriendScenario {
 // -----------------------------------------------------------------------------
 
 /** 配信対象種別 */
-export type BroadcastTargetType = "all" | "tag" | "segment" | "multi-account-dedup";
+export type BroadcastTargetType = "all" | "tag" | "friends" | "segment" | "multi-account-dedup";
 
 /** 配信ステータス */
 export type BroadcastStatus = "draft" | "scheduled" | "sending" | "sent";
@@ -255,6 +255,8 @@ export interface Broadcast {
   targetType: BroadcastTargetType;
   /** 対象タグID (targetType が 'tag' の場合のみ使用) */
   targetTagId: string | null;
+  /** 個別選択した友だちID (targetType が 'friends' の場合のみ使用) */
+  targetFriendIds?: string[] | null;
   /** 配信ステータス */
   status: BroadcastStatus;
   /** 予約配信日時 (ISO 8601、即時配信の場合は null) */

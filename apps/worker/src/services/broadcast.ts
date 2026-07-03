@@ -17,6 +17,18 @@ import { calculateStaggerDelay, sleep, addMessageVariation } from './stealth.js'
 
 const MULTICAST_BATCH_SIZE = 500;
 
+function parseStringArray(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function processBroadcastSend(
   db: D1Database,
   lineClient: LineClient,
@@ -108,6 +120,62 @@ export async function processBroadcastSend(
       }
       if (totalCount > 0 && successCount === 0) {
         throw new Error(`Broadcast ${broadcast.id} failed for all ${totalCount} recipients`);
+      }
+      await updateBroadcastLineRequestId(db, broadcast.id, null, unit);
+    } else if (broadcast.target_type === 'friends') {
+      const selectedFriendIds = parseStringArray((broadcast as unknown as Record<string, unknown>).target_friend_ids);
+      if (selectedFriendIds.length === 0) {
+        throw new Error('target_friend_ids is required for selected-friend broadcasts');
+      }
+
+      const broadcastAccount = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
+      const placeholders = selectedFriendIds.map(() => '?').join(',');
+      const friendsResult = broadcastAccount
+        ? await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${placeholders}) AND line_account_id = ? AND is_following = 1`)
+          .bind(...selectedFriendIds, broadcastAccount)
+          .all<{ id: string; line_user_id: string }>()
+        : await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${placeholders}) AND is_following = 1`)
+          .bind(...selectedFriendIds)
+          .all<{ id: string; line_user_id: string }>();
+      const selectedFriends = friendsResult.results ?? [];
+      totalCount = selectedFriends.length;
+
+      const now = jstNow();
+      const totalBatches = Math.ceil(selectedFriends.length / MULTICAST_BATCH_SIZE);
+      const unit = `bcast_${broadcast.id.slice(0, 8)}`;
+      for (let i = 0; i < selectedFriends.length; i += MULTICAST_BATCH_SIZE) {
+        const batchIndex = Math.floor(i / MULTICAST_BATCH_SIZE);
+        const batch = selectedFriends.slice(i, i + MULTICAST_BATCH_SIZE);
+        const lineUserIds = batch.map((f) => f.line_user_id);
+
+        if (batchIndex > 0) {
+          const delay = calculateStaggerDelay(selectedFriends.length, batchIndex);
+          await sleep(delay);
+        }
+
+        let batchMessage = message;
+        if (message.type === 'text' && totalBatches > 1) {
+          batchMessage = { ...message, text: addMessageVariation(message.text, batchIndex) };
+        }
+
+        try {
+          await lineClient.multicast(lineUserIds, [batchMessage], [unit]);
+          successCount += batch.length;
+          const logStmts = batch.map(friend =>
+            db.prepare(
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+               VALUES (?, ?, 'outgoing', ?, ?, ?, NULL, 'broadcast', ?, ?)`,
+            ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
+          );
+          await db.batch(logStmts);
+        } catch (err) {
+          console.error(`Selected-friend broadcast batch ${batchIndex} failed:`, err);
+        }
+      }
+      if (totalCount > 0 && successCount === 0) {
+        throw new Error(`Broadcast ${broadcast.id} failed for all ${totalCount} selected recipients`);
       }
       await updateBroadcastLineRequestId(db, broadcast.id, null, unit);
     } else if (broadcast.target_type === 'tag') {
