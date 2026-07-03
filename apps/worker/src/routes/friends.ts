@@ -13,6 +13,12 @@ import {
 import type { Friend as DbFriend, Tag as DbTag } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage } from '../services/step-delivery.js';
+import {
+  getHarnessDisplayName,
+  mergeFriendProfile,
+  parseFriendMetadata,
+  resolveFriendDisplayName,
+} from '../utils/friend-profile.js';
 import type { Env } from '../index.js';
 
 const friends = new Hono<Env>();
@@ -27,14 +33,18 @@ const friends = new Hono<Env>();
  * chatStatus from the JOINed query.
  */
 function serializeFriend(row: DbFriend) {
+  const metadata = parseFriendMetadata(row.metadata);
+  const harnessDisplayName = getHarnessDisplayName(metadata);
   return {
     id: row.id,
     lineUserId: row.line_user_id,
-    displayName: row.display_name,
+    displayName: resolveFriendDisplayName(row.display_name, metadata),
+    lineDisplayName: row.display_name,
+    harnessDisplayName,
     pictureUrl: row.picture_url,
     statusMessage: row.status_message,
     isFollowing: Boolean(row.is_following),
-    metadata: JSON.parse(row.metadata || '{}'),
+    metadata,
     refCode: (row as unknown as Record<string, unknown>).ref_code as string | null,
     userId: row.user_id,
     createdAt: row.created_at,
@@ -122,9 +132,10 @@ friends.get('/api/friends', async (c) => {
       conditions.push('f.line_account_id = ?');
       binds.push(lineAccountId);
     }
+    const displayNameExpr = `COALESCE(NULLIF(TRIM(json_extract(f.metadata, '$.harnessDisplayName')), ''), f.display_name, '')`;
     if (search) {
-      conditions.push('f.display_name LIKE ?');
-      binds.push(`%${search}%`);
+      conditions.push(`(${displayNameExpr} LIKE ? OR f.display_name LIKE ?)`);
+      binds.push(`%${search}%`, `%${search}%`);
     }
     // Unhandled filter: chats.status === 'unread'.
     //
@@ -214,16 +225,31 @@ friends.get('/api/friends', async (c) => {
       listStmt = db.prepare(
         `SELECT ${baseSelect},
                 CASE
-                  WHEN f.display_name LIKE ? THEN 0
-                  WHEN f.display_name LIKE ? THEN 1
-                  WHEN f.display_name LIKE ? OR f.display_name LIKE ? THEN 2
-                  ELSE 3
+                  WHEN ${displayNameExpr} LIKE ? THEN 0
+                  WHEN ${displayNameExpr} LIKE ? THEN 1
+                  WHEN ${displayNameExpr} LIKE ? OR ${displayNameExpr} LIKE ? THEN 2
+                  WHEN f.display_name LIKE ? THEN 3
+                  WHEN f.display_name LIKE ? THEN 4
+                  WHEN f.display_name LIKE ? OR f.display_name LIKE ? THEN 5
+                  ELSE 6
                 END AS match_score
          ${baseFrom} ${where}
          ORDER BY match_score ASC, f.created_at ${createdOrder}
          LIMIT ? OFFSET ?`,
       );
-      listBinds = [exactPattern, prefixPattern, wordStartAscii, wordStartFullWidth, ...binds, limit, offset];
+      listBinds = [
+        exactPattern,
+        prefixPattern,
+        wordStartAscii,
+        wordStartFullWidth,
+        exactPattern,
+        prefixPattern,
+        wordStartAscii,
+        wordStartFullWidth,
+        ...binds,
+        limit,
+        offset,
+      ];
     } else {
       listStmt = db.prepare(
         `SELECT ${baseSelect} ${baseFrom} ${where} ORDER BY f.created_at ${createdOrder} LIMIT ? OFFSET ?`,
@@ -472,6 +498,43 @@ friends.delete('/api/friends/:id/tags/:tagId', async (c) => {
   }
 });
 
+// PUT /api/friends/:id/profile - update Harness-only profile fields
+friends.put('/api/friends/:id/profile', async (c) => {
+  try {
+    const friendId = c.req.param('id');
+    const db = c.env.DB;
+
+    const friend = await getFriendById(db, friendId);
+    if (!friend) {
+      return c.json({ success: false, error: 'Friend not found' }, 404);
+    }
+
+    const body = await c.req.json<Record<string, unknown>>();
+    const existing = parseFriendMetadata(friend.metadata);
+    const merged = mergeFriendProfile(existing, body);
+    const now = jstNow();
+
+    await db
+      .prepare('UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?')
+      .bind(JSON.stringify(merged), now, friendId)
+      .run();
+
+    const updated = await getFriendById(db, friendId);
+    const tags = await getFriendTags(db, friendId);
+
+    return c.json({
+      success: true,
+      data: {
+        ...serializeFriend(updated!),
+        tags: tags.map(serializeTag),
+      },
+    });
+  } catch (err) {
+    console.error('PUT /api/friends/:id/profile error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 // PUT /api/friends/:id/metadata - merge metadata fields
 friends.put('/api/friends/:id/metadata', async (c) => {
   try {
@@ -484,7 +547,7 @@ friends.put('/api/friends/:id/metadata', async (c) => {
     }
 
     const body = await c.req.json<Record<string, unknown>>();
-    const existing = JSON.parse(friend.metadata || '{}');
+    const existing = parseFriendMetadata(friend.metadata);
     const merged = { ...existing, ...body };
     const now = jstNow();
 

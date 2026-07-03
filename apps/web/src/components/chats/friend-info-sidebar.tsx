@@ -6,6 +6,8 @@ import { api } from '@/lib/api'
 interface FriendDetail {
   id: string
   displayName: string | null
+  lineDisplayName?: string | null
+  harnessDisplayName?: string | null
   pictureUrl: string | null
   isFollowing: boolean
   metadata: Record<string, unknown>
@@ -13,6 +15,18 @@ interface FriendDetail {
   createdAt: string
   tags: Array<{ id: string; name: string; color: string }>
 }
+
+const profileFieldLabels: Record<string, string> = {
+  harnessDisplayName: 'L Harness表示名',
+  profileType: '区分',
+  kana: 'ふりがな',
+  schoolGrade: '学年・所属',
+  phone: '電話番号',
+  email: 'メール',
+  memo: 'メモ',
+}
+
+const profileFieldOrder = ['profileType', 'kana', 'schoolGrade', 'phone', 'email', 'memo']
 
 interface ChatStatusInfo {
   status: 'unread' | 'in_progress' | 'resolved' | null
@@ -111,6 +125,17 @@ export default function FriendInfoSidebar({ friendId, chatStatus, operatorName }
 
   if (!friendId) return null
 
+  const splitProfileMetadata = (metadata: Record<string, unknown>) => {
+    const profileEntries = profileFieldOrder
+      .map((key) => [key, metadata[key]] as const)
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    const otherEntries = Object.entries(metadata).filter(([key, value]) => {
+      if (key in profileFieldLabels) return false
+      return value !== undefined && value !== null && value !== ''
+    })
+    return { profileEntries, otherEntries }
+  }
+
   return (
     <div className="w-full lg:w-80 lg:flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
@@ -143,6 +168,11 @@ export default function FriendInfoSidebar({ friendId, chatStatus, operatorName }
               )}
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-gray-900 truncate">{friend.displayName || '名前なし'}</p>
+                {friend.lineDisplayName && friend.lineDisplayName !== friend.displayName && (
+                  <p className="text-[11px] text-gray-400 mt-0.5 truncate">
+                    LINE名: {friend.lineDisplayName}
+                  </p>
+                )}
                 <p className="text-[11px] text-gray-400 mt-0.5">
                   登録日: {formatDate(friend.createdAt)}
                 </p>
@@ -153,6 +183,20 @@ export default function FriendInfoSidebar({ friendId, chatStatus, operatorName }
                 )}
               </div>
             </div>
+
+            {friend.metadata && splitProfileMetadata(friend.metadata).profileEntries.length > 0 && (
+              <div className="p-4">
+                <h4 className="text-[11px] font-medium text-gray-500 mb-2">プロフィール</h4>
+                <dl className="space-y-2 text-xs">
+                  {splitProfileMetadata(friend.metadata).profileEntries.map(([key, value]) => (
+                    <div key={key}>
+                      <dt className="text-[10px] text-gray-400">{profileFieldLabels[key]}</dt>
+                      <dd className="text-gray-700 mt-0.5 whitespace-pre-wrap break-words">{renderValue(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            )}
 
             {/* Status / Operator */}
             {(chatStatus?.status || operatorName) && (
@@ -227,11 +271,11 @@ export default function FriendInfoSidebar({ friendId, chatStatus, operatorName }
             </div>
 
             {/* Metadata custom fields */}
-            {friend.metadata && Object.keys(friend.metadata).length > 0 && (
+            {friend.metadata && splitProfileMetadata(friend.metadata).otherEntries.length > 0 && (
               <div className="p-4">
                 <h4 className="text-[11px] font-medium text-gray-500 mb-2">友だち情報</h4>
                 <dl className="space-y-2 text-xs">
-                  {Object.entries(friend.metadata).map(([key, value]) => (
+                  {splitProfileMetadata(friend.metadata).otherEntries.map(([key, value]) => (
                     <div key={key}>
                       <dt className="text-[10px] text-gray-400 uppercase tracking-wide">{key}</dt>
                       <dd className="text-gray-700 mt-0.5 whitespace-pre-wrap break-words">{renderValue(value)}</dd>

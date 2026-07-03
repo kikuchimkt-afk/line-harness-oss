@@ -15,6 +15,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { parseFriendMetadata, resolveFriendDisplayName } from '../utils/friend-profile.js';
 
 const chats = new Hono<Env>();
 
@@ -299,6 +300,7 @@ chats.get('/api/chats', async (c) => {
         f.id AS id,
         f.id AS friend_id,
         f.display_name,
+        f.metadata,
         f.picture_url,
         f.line_user_id,
         f.line_account_id,
@@ -351,7 +353,10 @@ chats.get('/api/chats', async (c) => {
     let data = result.results.map((ch: Record<string, unknown>) => ({
       id: ch.id as string,
       friendId: ch.friend_id,
-      friendName: ch.display_name || '名前なし',
+      friendName: resolveFriendDisplayName(
+        ch.display_name as string | null,
+        parseFriendMetadata(ch.metadata as string | null),
+      ),
       friendPictureUrl: ch.picture_url || null,
       operatorId: ch.operator_id,
       status: ch.status,
@@ -411,9 +416,9 @@ chats.get('/api/chats/:id', async (c) => {
     const createdAt = chatRow?.created_at ?? null;
 
     const friend = await c.env.DB
-      .prepare(`SELECT display_name, picture_url, line_user_id FROM friends WHERE id = ?`)
+      .prepare(`SELECT display_name, metadata, picture_url, line_user_id FROM friends WHERE id = ?`)
       .bind(resolvedFriendId)
-      .first<{ display_name: string | null; picture_url: string | null; line_user_id: string }>();
+      .first<{ display_name: string | null; metadata: string | null; picture_url: string | null; line_user_id: string }>();
 
     // 新しい1000件を取って昇順に戻す。LIMIT 200 ASC だと古い200件だけで broadcast/scenario 等の
     // 新しい push が欠落していた（Shu で 481件中 281件欠落のバグあり）。一覧側と同様に test 配信は除外。
@@ -438,7 +443,9 @@ chats.get('/api/chats/:id', async (c) => {
       data: {
         id: responseId,
         friendId: resolvedFriendId,
-        friendName: friend?.display_name || '名前なし',
+        friendName: friend
+          ? resolveFriendDisplayName(friend.display_name, parseFriendMetadata(friend.metadata))
+          : '名前なし',
         friendPictureUrl: friend?.picture_url || null,
         operatorId,
         status,

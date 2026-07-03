@@ -17,6 +17,10 @@ export interface Friend {
   lineUserId: string;
   /** 表示名 */
   displayName: string;
+  /** LINEから取得した元の表示名。L Harness表示名がある場合も残す */
+  lineDisplayName?: string | null;
+  /** L Harness内だけで使う表示名 */
+  harnessDisplayName?: string | null;
   /** プロフィール画像URL */
   pictureUrl: string | null;
   /** ステータスメッセージ */

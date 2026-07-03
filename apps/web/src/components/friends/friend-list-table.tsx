@@ -5,6 +5,7 @@ import type { Tag } from '@line-crm/shared'
 import type { FriendListItem } from '@/lib/api'
 import { api } from '@/lib/api'
 import FriendListRow from './friend-list-row'
+import FriendProfileModal from './friend-profile-modal'
 import TagBadge from './tag-badge'
 
 interface Props {
@@ -21,6 +22,7 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
   const [selectedTagId, setSelectedTagId] = useState('')
   const [newTagName, setNewTagName] = useState('')
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0])
+  const [profileFriend, setProfileFriend] = useState<FriendListItem | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -128,6 +130,7 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
                   friend={friend}
                   onTagEditClick={() => toggleExpand(friend.id)}
                   tagEditorOpen={isExpanded}
+                  onProfileEditClick={() => setProfileFriend(friend)}
                 />
 
                 {isExpanded && (
@@ -242,6 +245,14 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
           })}
         </div>
       </div>
+
+      {profileFriend && (
+        <FriendProfileModal
+          friend={profileFriend}
+          onClose={() => setProfileFriend(null)}
+          onSaved={onRefresh}
+        />
+      )}
     </div>
   )
 }

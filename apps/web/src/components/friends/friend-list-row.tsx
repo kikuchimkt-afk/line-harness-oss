@@ -8,13 +8,16 @@ interface Props {
   friend: FriendListItem
   onTagEditClick?: () => void
   tagEditorOpen?: boolean
+  onProfileEditClick?: () => void
 }
 
-export default function FriendListRow({ friend, onTagEditClick, tagEditorOpen }: Props) {
+export default function FriendListRow({ friend, onTagEditClick, tagEditorOpen, onProfileEditClick }: Props) {
   const router = useRouter()
   const navigateToChat = () => router.push(`/chats?friend=${friend.id}`)
   const incoming = friend.latestIncomingMessage
   const scenario = friend.activeScenario
+  const lineDisplayName = friend.lineDisplayName || friend.displayName
+  const showLineName = Boolean(friend.harnessDisplayName && lineDisplayName && lineDisplayName !== friend.displayName)
 
   return (
     <div
@@ -48,9 +51,24 @@ export default function FriendListRow({ friend, onTagEditClick, tagEditorOpen }:
         )}
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-gray-900">{friend.displayName}</p>
+          {showLineName && (
+            <p className="mt-0.5 truncate text-[10px] text-gray-400">LINE名: {lineDisplayName}</p>
+          )}
           <p className="mt-0.5 text-[10px] text-gray-400">登録: {formatJstDate(friend.createdAt)}</p>
           {!friend.isFollowing && (
             <p className="mt-0.5 text-[10px] text-red-400">ブロック / 退出</p>
+          )}
+          {onProfileEditClick && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onProfileEditClick()
+              }}
+              className="mt-1 rounded-full border border-pink-100 bg-white px-2 py-0.5 text-[10px] font-semibold text-pink-700 hover:bg-pink-50"
+            >
+              プロフィール
+            </button>
           )}
         </div>
       </div>

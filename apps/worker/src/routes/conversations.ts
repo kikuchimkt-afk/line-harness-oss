@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Env } from '../index.js';
+import { parseFriendMetadata, resolveFriendDisplayName } from '../utils/friend-profile.js';
 
 const conversations = new Hono<Env>();
 
@@ -53,6 +54,7 @@ conversations.get('/api/conversations', async (c) => {
         f.id AS friend_id,
         f.line_user_id,
         f.display_name,
+        f.metadata,
         f.line_account_id,
         la.name AS line_account_name,
         li.at AS last_incoming_at,
@@ -131,6 +133,7 @@ conversations.get('/api/conversations', async (c) => {
         friend_id: string;
         line_user_id: string;
         display_name: string | null;
+        metadata: string | null;
         line_account_id: string | null;
         line_account_name: string | null;
         last_incoming_at: string;
@@ -141,7 +144,7 @@ conversations.get('/api/conversations', async (c) => {
       return {
         friendId: row.friend_id,
         lineUserId: row.line_user_id,
-        displayName: row.display_name,
+        displayName: resolveFriendDisplayName(row.display_name, parseFriendMetadata(row.metadata)),
         lineAccountId: row.line_account_id,
         lineAccountName: row.line_account_name,
         lastIncomingAt: row.last_incoming_at,
@@ -168,7 +171,7 @@ conversations.get('/api/conversations/:friendId', async (c) => {
     const before = url.searchParams.get('before');
 
     const friend = await c.env.DB.prepare(
-      `SELECT f.id, f.line_user_id, f.display_name, f.is_following, f.line_account_id, la.name AS line_account_name
+      `SELECT f.id, f.line_user_id, f.display_name, f.metadata, f.is_following, f.line_account_id, la.name AS line_account_name
        FROM friends f LEFT JOIN line_accounts la ON la.id = f.line_account_id WHERE f.id = ?`,
     )
       .bind(friendId)
@@ -176,6 +179,7 @@ conversations.get('/api/conversations/:friendId', async (c) => {
         id: string;
         line_user_id: string;
         display_name: string | null;
+        metadata: string | null;
         is_following: number;
         line_account_id: string | null;
         line_account_name: string | null;
@@ -245,7 +249,7 @@ conversations.get('/api/conversations/:friendId', async (c) => {
         friend: {
           friendId: friend.id,
           lineUserId: friend.line_user_id,
-          displayName: friend.display_name,
+          displayName: resolveFriendDisplayName(friend.display_name, parseFriendMetadata(friend.metadata)),
           lineAccountId: friend.line_account_id,
           lineAccountName: friend.line_account_name,
           isFollowing: friend.is_following === 1,

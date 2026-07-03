@@ -180,6 +180,15 @@ export type FriendListParams = {
 }
 
 export type FriendWithTags = Friend & { tags: Tag[] }
+export type FriendProfileInput = Partial<{
+  harnessDisplayName: string
+  profileType: string
+  kana: string
+  schoolGrade: string
+  phone: string
+  email: string
+  memo: string
+}>
 /** Friend list items, optionally hydrated with chat status (when ?includeChatStatus=true) */
 export type FriendListItem = FriendWithTags & Partial<{
   latestIncomingMessage: { content: string; messageType: string; createdAt: string } | null
@@ -207,6 +216,11 @@ export const api = {
     },
     get: (id: string) =>
       fetchApi<ApiResponse<FriendWithTags>>(`/api/friends/${id}`),
+    updateProfile: (id: string, data: FriendProfileInput) =>
+      fetchApi<ApiResponse<FriendWithTags>>(`/api/friends/${id}/profile`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
     count: (params?: { accountId?: string }) => {
       const query = params?.accountId ? '?lineAccountId=' + params.accountId : ''
       return fetchApi<ApiResponse<{ count: number }>>('/api/friends/count' + query)
