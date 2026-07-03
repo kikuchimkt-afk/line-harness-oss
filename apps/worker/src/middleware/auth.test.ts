@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { authMiddleware } from './auth.js';
@@ -6,9 +6,13 @@ import { resolveCorsOrigin } from './admin-auth-config.js';
 import { adminAuth } from '../routes/admin-auth.js';
 import type { Env } from '../index.js';
 
+const authMockState = vi.hoisted(() => ({
+  currentStaffApiKey: 'staff-key',
+}));
+
 vi.mock('@line-crm/db', () => ({
   getStaffByApiKey: vi.fn(async (_db: unknown, token: string) => {
-    if (token !== 'staff-key') return null;
+    if (token !== authMockState.currentStaffApiKey) return null;
     return { id: 'staff-1', name: 'Staff One', role: 'admin' };
   }),
 }));
@@ -62,6 +66,10 @@ function cookieFor(res: Response, name: string): string | undefined {
   return setCookies(res).find((c) => c.startsWith(`${name}=`));
 }
 
+beforeEach(() => {
+  authMockState.currentStaffApiKey = 'staff-key';
+});
+
 describe('admin login cookie attributes', () => {
   test('cross-site login sets HttpOnly Secure SameSite=None session + readable CSRF cookie', async () => {
     const res = await app().request('/api/auth/login', {
@@ -107,6 +115,26 @@ describe('admin login cookie attributes', () => {
     }, crossSiteEnv());
     expect(res.status).toBe(401);
     expect(cookieFor(res, 'lh_admin_session')).toBeUndefined();
+  });
+
+  test('accepts the regenerated key after the DB key changes', async () => {
+    authMockState.currentStaffApiKey = 'new-staff-key';
+
+    const oldKeyRes = await app().request('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ apiKey: 'staff-key' }),
+      headers: { 'Content-Type': 'application/json' },
+    }, crossSiteEnv());
+    expect(oldKeyRes.status).toBe(401);
+
+    const newKeyRes = await app().request('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ apiKey: 'new-staff-key' }),
+      headers: { 'Content-Type': 'application/json' },
+    }, crossSiteEnv());
+    expect(newKeyRes.status).toBe(200);
+    const body = await newKeyRes.json() as { success: boolean; data: { id: string } };
+    expect(body).toMatchObject({ success: true, data: { id: 'staff-1' } });
   });
 });
 

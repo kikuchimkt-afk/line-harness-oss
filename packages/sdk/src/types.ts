@@ -486,6 +486,7 @@ export interface StaffMember {
    * The full key is only returned once — on create or regenerate-key responses.
    */
   apiKey: string
+  lineAccountIds: string[]
   isActive: boolean
   createdAt: string
   updatedAt: string
@@ -502,6 +503,7 @@ export interface CreateStaffInput {
   name: string
   email?: string
   role: 'admin' | 'staff'
+  lineAccountIds?: string[]
 }
 
 export interface UpdateStaffInput {
@@ -509,6 +511,7 @@ export interface UpdateStaffInput {
   email?: string | null
   role?: StaffRole
   isActive?: boolean
+  lineAccountIds?: string[]
 }
 
 // ─── High-Level ─────────────────────────────────────────

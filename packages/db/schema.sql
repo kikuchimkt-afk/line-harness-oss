@@ -626,6 +626,16 @@ CREATE TABLE IF NOT EXISTS staff_members (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_members_api_key ON staff_members(api_key);
 CREATE INDEX IF NOT EXISTS idx_staff_members_role ON staff_members(role);
 
+CREATE TABLE IF NOT EXISTS staff_account_permissions (
+  staff_id        TEXT NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+  line_account_id TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  PRIMARY KEY (staff_id, line_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_staff_account_permissions_account
+  ON staff_account_permissions(line_account_id);
+
 -- Reusable message templates (text or Flex) for reward messages in campaigns
 CREATE TABLE IF NOT EXISTS message_templates (
   id TEXT PRIMARY KEY,

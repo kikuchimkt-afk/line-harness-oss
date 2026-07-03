@@ -13,10 +13,11 @@ export function registerManageStaff(server: McpServer): void {
       name: z.string().optional().describe("Staff name (for 'create' action)"),
       email: z.string().nullable().optional().describe("Staff email (optional, null to clear)"),
       role: z.enum(["admin", "staff"]).optional().describe("Staff role (for 'create'/'update')"),
+      lineAccountIds: z.array(z.string()).optional().describe("LINE account IDs this staff can manage (for 'create'/'update')"),
       staffId: z.string().optional().describe("Staff ID (for 'get','update','delete','regenerate_key')"),
       isActive: z.boolean().optional().describe("Activate/deactivate (for 'update')"),
     },
-    async ({ action, name, email, role, staffId, isActive }) => {
+    async ({ action, name, email, role, lineAccountIds, staffId, isActive }) => {
       try {
         const client = getClient();
 
@@ -37,7 +38,10 @@ export function registerManageStaff(server: McpServer): void {
         if (action === "create") {
           if (!name) throw new Error("name is required for create action");
           if (!role) throw new Error("role is required for create action");
-          const member = await client.staff.create({ name, email, role });
+          if (!lineAccountIds || lineAccountIds.length === 0) {
+            throw new Error("lineAccountIds is required for create action");
+          }
+          const member = await client.staff.create({ name, email, role, lineAccountIds });
           return {
             content: [{
               type: "text" as const,
@@ -63,6 +67,7 @@ export function registerManageStaff(server: McpServer): void {
           if (name !== undefined) updates.name = name;
           if (email !== undefined) updates.email = email;
           if (role !== undefined) updates.role = role;
+          if (lineAccountIds !== undefined) updates.lineAccountIds = lineAccountIds;
           if (isActive !== undefined) updates.isActive = isActive;
           const member = await client.staff.update(staffId, updates);
           return {

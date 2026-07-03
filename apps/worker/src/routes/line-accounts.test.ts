@@ -13,6 +13,8 @@ const dbMocks = {
   updateLineAccountFields: vi.fn(),
   updateLineAccountOrder: vi.fn(),
   deleteLineAccount: vi.fn(),
+  getStaffAccountIds: vi.fn(),
+  staffCanAccessLineAccount: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -79,6 +81,39 @@ const fakeAccount = {
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
   lineClientMocks.getFollowersInsight.mockReset();
+  dbMocks.getStaffAccountIds.mockResolvedValue([]);
+  dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+});
+
+describe('account access scoping', () => {
+  test('GET /api/line-accounts only returns accounts assigned to restricted admins', async () => {
+    const secondAccount = { ...fakeAccount, id: 'acc-2', name: '暗誦大会' };
+    dbMocks.getLineAccounts.mockResolvedValue([fakeAccount, secondAccount]);
+    dbMocks.getStaffAccountIds.mockResolvedValue(['acc-2']);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+
+    const app = setupApp('admin');
+    const res = await app.request('/api/line-accounts');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: Array<{ id: string; name: string }> };
+    expect(body.success).toBe(true);
+    expect(body.data.map((account) => account.id)).toEqual(['acc-2']);
+    vi.unstubAllGlobals();
+  });
+
+  test('GET /api/line-accounts/:id rejects assigned-out accounts', async () => {
+    dbMocks.getLineAccountById.mockResolvedValue(fakeAccount);
+    dbMocks.staffCanAccessLineAccount.mockResolvedValue(false);
+
+    const app = setupApp('admin');
+    const res = await app.request('/api/line-accounts/acc-1');
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('権限');
+  });
 });
 
 describe('GET /api/line-accounts/:id/follower-insight', () => {

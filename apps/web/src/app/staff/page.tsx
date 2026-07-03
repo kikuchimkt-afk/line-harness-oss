@@ -4,13 +4,20 @@ import Header from '@/components/layout/header'
 import { fetchApi } from '@/lib/api'
 import type { ApiResponse } from '@line-crm/shared'
 import type { StaffMember } from '@line-crm/shared'
+import type { LineAccount } from '@line-crm/shared'
 
 type StaffRole = 'owner' | 'admin' | 'staff'
+type AccountOption = LineAccount & {
+  displayName?: string | null
+  basicId?: string | null
+  pictureUrl?: string | null
+}
 type NewApiKey = {
   apiKey: string
   staffId: string
   staffName: string
   role: StaffRole
+  lineAccountIds: string[]
   kind: 'created' | 'regenerated'
 }
 
@@ -40,6 +47,7 @@ function maskKey(key: string): string {
 
 export default function StaffPage() {
   const [members, setMembers] = useState<StaffMember[]>([])
+  const [accounts, setAccounts] = useState<AccountOption[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -53,8 +61,21 @@ export default function StaffPage() {
   const [formName, setFormName] = useState('')
   const [formEmail, setFormEmail] = useState('')
   const [formRole, setFormRole] = useState<'admin' | 'staff'>('staff')
+  const [formAccountIds, setFormAccountIds] = useState<string[]>([])
   const [formLoading, setFormLoading] = useState(false)
   const [formError, setFormError] = useState('')
+
+  const accountNameById = new Map(accounts.map((account) => [
+    account.id,
+    account.displayName || account.name,
+  ]))
+
+  const accountNamesFor = (lineAccountIds: string[]) => {
+    if (lineAccountIds.length === 0) return 'すべてのアカウント'
+    return lineAccountIds
+      .map((id) => accountNameById.get(id) ?? id.slice(0, 8))
+      .join('、')
+  }
 
   const loadMembers = async () => {
     setLoading(true)
@@ -73,8 +94,24 @@ export default function StaffPage() {
     }
   }
 
+  const loadAccounts = async () => {
+    try {
+      const res = await fetchApi<ApiResponse<AccountOption[]>>('/api/line-accounts')
+      if (res.success) {
+        setAccounts(res.data)
+        setFormAccountIds((current) => {
+          const validIds = new Set(res.data.map((account) => account.id))
+          return current.filter((id) => validIds.has(id))
+        })
+      }
+    } catch {
+      // Staff creation still shows a validation error if accounts cannot load.
+    }
+  }
+
   useEffect(() => {
     loadMembers()
+    loadAccounts()
   }, [])
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -82,9 +119,14 @@ export default function StaffPage() {
     setFormLoading(true)
     setFormError('')
     try {
-      const body: { name: string; role: 'admin' | 'staff'; email?: string } = {
+      if (formAccountIds.length === 0) {
+        setFormError('担当するLINEアカウントを1つ以上選択してください')
+        return
+      }
+      const body: { name: string; role: 'admin' | 'staff'; email?: string; lineAccountIds: string[] } = {
         name: formName,
         role: formRole,
+        lineAccountIds: formAccountIds,
       }
       if (formEmail) body.email = formEmail
 
@@ -99,12 +141,14 @@ export default function StaffPage() {
             staffId: res.data.id,
             staffName: res.data.name,
             role: res.data.role as StaffRole,
+            lineAccountIds: res.data.lineAccountIds ?? formAccountIds,
             kind: 'created',
           })
         }
         setFormName('')
         setFormEmail('')
         setFormRole('staff')
+        setFormAccountIds([])
         setShowForm(false)
         await loadMembers()
       } else {
@@ -141,8 +185,10 @@ export default function StaffPage() {
           staffId: member.id,
           staffName: member.name,
           role: member.role as StaffRole,
+          lineAccountIds: member.lineAccountIds ?? [],
           kind: 'regenerated',
         })
+        await loadMembers()
       } else {
         setError(res.error ?? 'キー再生成に失敗しました')
       }
@@ -181,6 +227,7 @@ export default function StaffPage() {
       '',
       `管理画面URL：${adminUrl}`,
       `権限：${getRoleLabel(newKey.role)}`,
+      `担当アカウント：${accountNamesFor(newKey.lineAccountIds)}`,
       '',
       'APIキー：',
       newKey.apiKey,
@@ -189,6 +236,9 @@ export default function StaffPage() {
       '1. 管理画面URLを開く',
       '2. ログイン画面でAPIキーを貼り付ける',
       '3. ログイン後、必要なメニューを操作する',
+      newKey.kind === 'regenerated'
+        ? '※すでにログイン中の場合は、一度ログアウトしてから新しいAPIキーで入り直してください。'
+        : '',
       '',
       '※このAPIキーは管理画面に入るための大切な情報です。',
       '※外部には共有せず、必要なスタッフだけで管理してください。',
@@ -298,13 +348,89 @@ export default function StaffPage() {
                 </select>
               </div>
             </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700">担当アカウント *</label>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    このスタッフが管理できるLINE公式アカウントを選びます。複数選択できます。
+                  </p>
+                </div>
+                {accounts.length > 0 && (
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFormAccountIds(accounts.map((account) => account.id))}
+                      className="px-2.5 py-1 text-xs font-medium text-rose-700 bg-white border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors"
+                    >
+                      全て選択
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormAccountIds([])}
+                      className="px-2.5 py-1 text-xs font-medium text-gray-500 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                    >
+                      解除
+                    </button>
+                  </div>
+                )}
+              </div>
+              {accounts.length === 0 ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  LINEアカウントを読み込めませんでした。画面を再読み込みしてください。
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {accounts.map((account) => {
+                    const checked = formAccountIds.includes(account.id)
+                    const displayName = account.displayName || account.name
+                    return (
+                      <label
+                        key={account.id}
+                        className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                          checked
+                            ? 'border-rose-300 bg-rose-50 text-rose-900'
+                            : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            setFormAccountIds((current) =>
+                              e.target.checked
+                                ? [...current, account.id]
+                                : current.filter((id) => id !== account.id),
+                            )
+                          }}
+                          className="h-4 w-4 rounded border-gray-300 text-rose-500 focus:ring-rose-400"
+                        />
+                        {account.pictureUrl && (
+                          <img
+                            src={account.pictureUrl}
+                            alt=""
+                            className="h-6 w-6 rounded-full object-cover"
+                          />
+                        )}
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">{displayName}</span>
+                          {account.basicId && (
+                            <span className="block truncate text-xs text-gray-400">{account.basicId}</span>
+                          )}
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
             {formError && (
               <p className="text-sm text-red-600">{formError}</p>
             )}
             <div className="flex items-center gap-3">
               <button
                 type="submit"
-                disabled={formLoading || !formName}
+                disabled={formLoading || !formName || formAccountIds.length === 0}
                 className="px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-opacity hover:opacity-90"
                 style={{ backgroundColor: '#06C755' }}
               >
@@ -356,6 +482,7 @@ export default function StaffPage() {
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">名前</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider hidden sm:table-cell">メール</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">ロール</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider hidden lg:table-cell">担当アカウント</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider hidden md:table-cell">APIキー</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">状態</th>
                 <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">操作</th>
@@ -368,6 +495,11 @@ export default function StaffPage() {
                   <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{member.email ?? '—'}</td>
                   <td className="px-4 py-3">
                     <RoleBadge role={member.role} />
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 hidden lg:table-cell">
+                    <span className="line-clamp-2 text-xs">
+                      {accountNamesFor(member.lineAccountIds ?? [])}
+                    </span>
                   </td>
                   <td className="px-4 py-3 text-gray-400 font-mono text-xs hidden md:table-cell">
                     {maskKey(member.apiKey ?? '')}

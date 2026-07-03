@@ -11,6 +11,10 @@ import {
 } from '@line-crm/db';
 import type { LineAccount as DbLineAccount } from '@line-crm/db';
 import { requireRole } from '../middleware/role-guard.js';
+import {
+  denyIfCannotAccessLineAccount,
+  filterAccessibleLineAccounts,
+} from '../middleware/account-access.js';
 import type { Env } from '../index.js';
 
 const lineAccounts = new Hono<Env>();
@@ -64,7 +68,8 @@ async function fetchBotProfile(accessToken: string): Promise<{ displayName?: str
 lineAccounts.get('/api/line-accounts', async (c) => {
   try {
     const db = c.env.DB;
-    const items = await getLineAccounts(db);
+    const allItems = await getLineAccounts(db);
+    const items = await filterAccessibleLineAccounts(c, allItems);
 
     // Get stats for all accounts in parallel
     const results = await Promise.all(
@@ -115,6 +120,8 @@ lineAccounts.get('/api/line-accounts/:id', async (c) => {
     if (!account) {
       return c.json({ success: false, error: 'LINE account not found' }, 404);
     }
+    const denied = await denyIfCannotAccessLineAccount(c, account.id);
+    if (denied) return denied;
     const staff = c.get('staff');
     const data = staff?.role === 'staff'
       ? serializeLineAccount(account)
@@ -138,6 +145,8 @@ lineAccounts.get('/api/line-accounts/:id/follower-insight', async (c) => {
     if (!account) {
       return c.json({ success: false, error: 'LINE account not found' }, 404);
     }
+    const denied = await denyIfCannotAccessLineAccount(c, account.id);
+    if (denied) return denied;
 
     const client = new LineClient(account.channel_access_token);
     const insight = await client.getFollowersInsight(date);
@@ -366,6 +375,8 @@ lineAccounts.patch(
             400,
           );
         }
+        const denied = await denyIfCannotAccessLineAccount(c, item.id);
+        if (denied) return denied;
       }
 
       await updateLineAccountOrder(c.env.DB, body.ordered);
@@ -393,6 +404,8 @@ lineAccounts.patch(
   async (c) => {
     try {
       const id = c.req.param('id')!;
+      const denied = await denyIfCannotAccessLineAccount(c, id);
+      if (denied) return denied;
       const body = await c.req.json<{
         name?: string;
         isActive?: boolean;

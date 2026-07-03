@@ -11,6 +11,12 @@ export interface StaffMember {
   updated_at: string;
 }
 
+export interface StaffAccountPermission {
+  staff_id: string;
+  line_account_id: string;
+  created_at: string;
+}
+
 export interface CreateStaffInput {
   name: string;
   email?: string | null;
@@ -56,6 +62,86 @@ export async function getStaffById(
     .prepare('SELECT * FROM staff_members WHERE id = ?')
     .bind(id)
     .first<StaffMember>();
+}
+
+function uniqueAccountIds(lineAccountIds: readonly string[] = []): string[] {
+  return [...new Set(lineAccountIds.map((id) => id.trim()).filter(Boolean))];
+}
+
+export async function getStaffAccountIds(
+  db: D1Database,
+  staffId: string,
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT line_account_id
+       FROM staff_account_permissions
+       WHERE staff_id = ?
+       ORDER BY created_at ASC`,
+    )
+    .bind(staffId)
+    .all<{ line_account_id: string }>();
+  return result.results.map((row) => row.line_account_id);
+}
+
+export async function getStaffAccountIdsMap(
+  db: D1Database,
+  staffIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const ids = uniqueAccountIds(staffIds);
+  const map = new Map<string, string[]>();
+  ids.forEach((id) => map.set(id, []));
+  if (ids.length === 0) return map;
+
+  const placeholders = ids.map(() => '?').join(',');
+  const result = await db
+    .prepare(
+      `SELECT staff_id, line_account_id
+       FROM staff_account_permissions
+       WHERE staff_id IN (${placeholders})
+       ORDER BY created_at ASC`,
+    )
+    .bind(...ids)
+    .all<{ staff_id: string; line_account_id: string }>();
+
+  for (const row of result.results) {
+    const list = map.get(row.staff_id) ?? [];
+    list.push(row.line_account_id);
+    map.set(row.staff_id, list);
+  }
+  return map;
+}
+
+export async function setStaffAccountIds(
+  db: D1Database,
+  staffId: string,
+  lineAccountIds: readonly string[],
+): Promise<void> {
+  const ids = uniqueAccountIds(lineAccountIds);
+  const now = jstNow();
+  const statements = [
+    db.prepare('DELETE FROM staff_account_permissions WHERE staff_id = ?').bind(staffId),
+    ...ids.map((lineAccountId) =>
+      db
+        .prepare(
+          `INSERT INTO staff_account_permissions (staff_id, line_account_id, created_at)
+           VALUES (?, ?, ?)`,
+        )
+        .bind(staffId, lineAccountId, now),
+    ),
+  ];
+  await db.batch(statements);
+}
+
+export async function staffCanAccessLineAccount(
+  db: D1Database,
+  staff: { id: string; role: 'owner' | 'admin' | 'staff' },
+  lineAccountId: string,
+): Promise<boolean> {
+  if (staff.role === 'owner' || staff.id === 'env-owner') return true;
+  const accountIds = await getStaffAccountIds(db, staff.id);
+  if (accountIds.length === 0) return true; // Legacy unrestricted staff/admin.
+  return accountIds.includes(lineAccountId);
 }
 
 export async function createStaffMember(

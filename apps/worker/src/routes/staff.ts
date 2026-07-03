@@ -7,6 +7,9 @@ import {
   deleteStaffMember,
   regenerateStaffApiKey,
   countActiveStaffByRole,
+  getStaffAccountIds,
+  getStaffAccountIdsMap,
+  setStaffAccountIds,
 } from '@line-crm/db';
 import type { StaffMember } from '@line-crm/db';
 import { requireRole } from '../middleware/role-guard.js';
@@ -18,17 +21,23 @@ function maskApiKey(key: string): string {
   return `lh_****${key.slice(-4)}`;
 }
 
-function serializeStaff(row: StaffMember, masked = true) {
+function serializeStaff(row: StaffMember, masked = true, lineAccountIds: string[] = []) {
   return {
     id: row.id,
     name: row.name,
     email: row.email,
     role: row.role,
     apiKey: masked ? maskApiKey(row.api_key) : row.api_key,
+    lineAccountIds,
     isActive: Boolean(row.is_active),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeLineAccountIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === 'string').map((id) => id.trim()).filter(Boolean))];
 }
 
 // GET /api/staff/me — any authenticated user (MUST be before /:id)
@@ -73,7 +82,11 @@ staff.get('/api/staff/me', async (c) => {
 staff.get('/api/staff', requireRole('owner'), async (c) => {
   try {
     const members = await getStaffMembers(c.env.DB);
-    return c.json({ success: true, data: members.map((m) => serializeStaff(m, true)) });
+    const accountMap = await getStaffAccountIdsMap(c.env.DB, members.map((m) => m.id));
+    return c.json({
+      success: true,
+      data: members.map((m) => serializeStaff(m, true, accountMap.get(m.id) ?? [])),
+    });
   } catch (err) {
     console.error('GET /api/staff error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -88,7 +101,8 @@ staff.get('/api/staff/:id', requireRole('owner'), async (c) => {
     if (!member) {
       return c.json({ success: false, error: 'Staff member not found' }, 404);
     }
-    return c.json({ success: true, data: serializeStaff(member, true) });
+    const lineAccountIds = await getStaffAccountIds(c.env.DB, member.id);
+    return c.json({ success: true, data: serializeStaff(member, true, lineAccountIds) });
   } catch (err) {
     console.error('GET /api/staff/:id error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -98,7 +112,7 @@ staff.get('/api/staff/:id', requireRole('owner'), async (c) => {
 // POST /api/staff — owner only. Create staff. Returns full API key (one-time visible).
 staff.post('/api/staff', requireRole('owner'), async (c) => {
   try {
-    const body = await c.req.json<{ name: string; email?: string; role: string }>();
+    const body = await c.req.json<{ name: string; email?: string; role: string; lineAccountIds?: unknown }>();
 
     if (!body.name) {
       return c.json({ success: false, error: 'name is required' }, 400);
@@ -108,15 +122,22 @@ staff.post('/api/staff', requireRole('owner'), async (c) => {
     if (!body.role || !validRoles.includes(body.role as (typeof validRoles)[number])) {
       return c.json({ success: false, error: 'role must be owner, admin, or staff' }, 400);
     }
+    const lineAccountIds = normalizeLineAccountIds(body.lineAccountIds);
+    if (body.role !== 'owner' && lineAccountIds.length === 0) {
+      return c.json({ success: false, error: '担当するLINEアカウントを1つ以上選択してください' }, 400);
+    }
 
     const member = await createStaffMember(c.env.DB, {
       name: body.name,
       email: body.email ?? null,
       role: body.role as 'owner' | 'admin' | 'staff',
     });
+    if (lineAccountIds.length > 0) {
+      await setStaffAccountIds(c.env.DB, member.id, lineAccountIds);
+    }
 
     // Return full (unmasked) API key one-time
-    return c.json({ success: true, data: serializeStaff(member, false) }, 201);
+    return c.json({ success: true, data: serializeStaff(member, false, lineAccountIds) }, 201);
   } catch (err) {
     console.error('POST /api/staff error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -132,6 +153,7 @@ staff.patch('/api/staff/:id', requireRole('owner'), async (c) => {
       email?: string | null;
       role?: string;
       isActive?: boolean;
+      lineAccountIds?: unknown;
     }>();
 
     const validRoles = ['owner', 'admin', 'staff'] as const;
@@ -156,6 +178,14 @@ staff.patch('/api/staff/:id', requireRole('owner'), async (c) => {
       }
     }
 
+    const nextRole = (body.role ?? target.role) as 'owner' | 'admin' | 'staff';
+    const lineAccountIds = Array.isArray(body.lineAccountIds)
+      ? normalizeLineAccountIds(body.lineAccountIds)
+      : await getStaffAccountIds(c.env.DB, id);
+    if (Array.isArray(body.lineAccountIds) && nextRole !== 'owner' && lineAccountIds.length === 0) {
+      return c.json({ success: false, error: '担当するLINEアカウントを1つ以上選択してください' }, 400);
+    }
+
     const updated = await updateStaffMember(c.env.DB, id, {
       name: body.name,
       email: body.email,
@@ -167,7 +197,11 @@ staff.patch('/api/staff/:id', requireRole('owner'), async (c) => {
       return c.json({ success: false, error: 'Staff member not found' }, 404);
     }
 
-    return c.json({ success: true, data: serializeStaff(updated, true) });
+    if (Array.isArray(body.lineAccountIds)) {
+      await setStaffAccountIds(c.env.DB, id, lineAccountIds);
+    }
+
+    return c.json({ success: true, data: serializeStaff(updated, true, lineAccountIds) });
   } catch (err) {
     console.error('PATCH /api/staff/:id error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
