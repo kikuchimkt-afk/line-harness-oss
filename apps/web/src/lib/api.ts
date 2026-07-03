@@ -71,35 +71,86 @@ if (!API_URL) {
  * cached here.
  */
 export const CSRF_STORAGE_KEY = 'lh_csrf'
+export const SESSION_API_KEY_STORAGE_KEY = 'lh_session_api_key'
 
 export function getCsrfToken(): string {
   if (typeof window === 'undefined') return ''
-  return localStorage.getItem(CSRF_STORAGE_KEY) || ''
+  try {
+    return localStorage.getItem(CSRF_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
 }
 
 export function setCsrfToken(token: string | undefined | null): void {
   if (typeof window === 'undefined' || !token) return
-  localStorage.setItem(CSRF_STORAGE_KEY, token)
+  try {
+    localStorage.setItem(CSRF_STORAGE_KEY, token)
+  } catch {
+    // Best-effort cache only.
+  }
+}
+
+export function clearCsrfToken(): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.removeItem(CSRF_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+export function getSessionApiKey(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return sessionStorage.getItem(SESSION_API_KEY_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setSessionApiKey(apiKey: string): boolean {
+  if (typeof window === 'undefined' || !apiKey) return false
+  try {
+    sessionStorage.setItem(SESSION_API_KEY_STORAGE_KEY, apiKey)
+    return sessionStorage.getItem(SESSION_API_KEY_STORAGE_KEY) === apiKey
+  } catch {
+    return false
+  }
+}
+
+export function clearSessionApiKey(): void {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.removeItem(SESSION_API_KEY_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup only.
+  }
 }
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method ?? 'GET').toUpperCase()
-  const csrfHeaders: Record<string, string> = {}
-  if (MUTATING_METHODS.has(method)) {
+  const sessionApiKey = getSessionApiKey()
+  const headers = new Headers(options?.headers)
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (sessionApiKey) {
+    headers.set('Authorization', `Bearer ${sessionApiKey}`)
+  }
+  if (MUTATING_METHODS.has(method) && !sessionApiKey) {
     const token = getCsrfToken()
-    if (token) csrfHeaders['X-CSRF-Token'] = token
+    if (token) headers.set('X-CSRF-Token', token)
   }
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
-    // Send the HttpOnly session cookie with every request.
+    // Send the HttpOnly session cookie when the browser supports it. LINE's
+    // in-app browser may drop cross-site cookies, so a sessionStorage-scoped
+    // Bearer fallback is also supported after staff login.
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...csrfHeaders,
-      ...options?.headers,
-    },
+    headers,
   })
   if (!res.ok) throw new Error(`API error: ${res.status}`)
   if (res.status === 204) return undefined as T
@@ -1096,6 +1147,7 @@ export const api = {
     // 画像 upload は Content-Type を image/* で送るので fetchApi を使わず直接 fetch。
     uploadImage: async (groupId: string, pageId: string, file: File) => {
       const csrf = getCsrfToken();
+      const sessionApiKey = getSessionApiKey();
       const res = await fetch(
         `${API_URL}/api/rich-menu-groups/${groupId}/pages/${pageId}/image`,
         {
@@ -1103,7 +1155,11 @@ export const api = {
           credentials: 'include',
           headers: {
             'Content-Type': file.type,
-            ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+            ...(sessionApiKey
+              ? { Authorization: `Bearer ${sessionApiKey}` }
+              : csrf
+                ? { 'X-CSRF-Token': csrf }
+                : {}),
           },
           body: file,
         },

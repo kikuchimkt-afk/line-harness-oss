@@ -1,6 +1,48 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  clearSessionApiKey,
+  setCsrfToken,
+  setSessionApiKey,
+} from '@/lib/api'
+
+type LoginResponse = {
+  success?: boolean
+  data?: {
+    name?: string
+    role?: string
+  }
+  csrfToken?: string
+  error?: string
+}
+
+function extractApiKey(input: string): string {
+  const match = input.match(/\blh_[A-Za-z0-9]+\b/)
+  return (match?.[0] ?? input).trim()
+}
+
+function cacheStaffProfile(data: LoginResponse | null | undefined): void {
+  if (typeof window === 'undefined' || !data) return
+  try {
+    if (data.success && data.data) {
+      if (data.data.name) localStorage.setItem('lh_staff_name', data.data.name)
+      if (data.data.role) localStorage.setItem('lh_staff_role', data.data.role)
+    }
+  } catch {
+    // Profile caching is best-effort.
+  }
+  if (data.csrfToken) setCsrfToken(data.csrfToken)
+}
+
+async function verifyCookieSession(apiUrl: string): Promise<boolean> {
+  const res = await fetch(`${apiUrl}/api/auth/session`, { credentials: 'include' })
+  if (!res.ok) return false
+  const data = (await res.json().catch(() => null)) as LoginResponse | null
+  if (!data?.success || !data.data) return false
+  cacheStaffProfile(data)
+  return true
+}
 
 export default function LoginPage() {
   const [apiKey, setApiKey] = useState('')
@@ -20,31 +62,53 @@ export default function LoginPage() {
         setLoading(false)
         return
       }
+
+      const normalizedApiKey = extractApiKey(apiKey)
+      if (!normalizedApiKey) {
+        setError('LINEの案内文、または lh_ から始まるAPIキーを貼り付けてください')
+        return
+      }
+
       // Exchange the API key for an HttpOnly session cookie. The key is never
-      // stored in localStorage (removes the XSS-exposed credential).
+      // stored in localStorage (removes the XSS-exposed credential). Some
+      // mobile in-app browsers drop cross-site cookies, so we verify the
+      // session before entering the app and fall back to a tab-scoped Bearer
+      // session when needed.
       const res = await fetch(`${apiUrl}/api/auth/login`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ apiKey: normalizedApiKey }),
       })
 
       if (res.ok) {
-        localStorage.removeItem('lh_api_key')
         try {
-          const loginData = await res.json()
-          if (loginData.success && loginData.data) {
-            localStorage.setItem('lh_staff_name', loginData.data.name)
-            localStorage.setItem('lh_staff_role', loginData.data.role)
-          }
-          // Cache the CSRF token for mutating requests (double-submit).
-          if (loginData.csrfToken) {
-            localStorage.setItem('lh_csrf', loginData.csrfToken)
-          }
+          localStorage.removeItem('lh_api_key')
+        } catch {
+          // Legacy credential cleanup is best-effort.
+        }
+        clearSessionApiKey()
+        let loginData: LoginResponse | null = null
+        try {
+          loginData = await res.json()
+          cacheStaffProfile(loginData)
         } catch {
           // Profile / CSRF caching is best-effort.
         }
-        router.push('/')
+
+        if (await verifyCookieSession(apiUrl).catch(() => false)) {
+          router.replace('/')
+          return
+        }
+
+        if (setSessionApiKey(normalizedApiKey)) {
+          router.replace('/')
+          return
+        }
+
+        setError(
+          'ログイン情報をこのブラウザに保存できませんでした。LINE内ブラウザではなく、Safari / Chromeで管理画面URLを開いてからもう一度ログインしてください。',
+        )
       } else if (res.status === 401) {
         setError('APIキーが正しくありません')
       } else {
@@ -73,20 +137,25 @@ export default function LoginPage() {
             H
           </div>
           <h1 className="text-xl font-bold text-gray-900">L Harness</h1>
-          <p className="text-sm text-gray-500 mt-1">管理画面にログイン</p>
+          <p className="text-sm text-gray-500 mt-1">スタッフ用ログイン</p>
         </div>
 
         <form onSubmit={handleLogin}>
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
-            <input
-              type="password"
+            <label className="block text-sm font-medium text-gray-700 mb-1">APIキー / LINE案内文</label>
+            <textarea
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder="APIキーを入力"
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              placeholder="lh_... またはLINEで届いた案内文をそのまま貼り付け"
+              className="w-full min-h-28 px-4 py-3 border border-pink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-pink-300 focus:border-transparent bg-white/80"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               autoFocus
             />
+            <p className="text-xs text-gray-500 mt-2">
+              案内文を丸ごと貼っても、lh_ から始まるAPIキーだけを自動で読み取ります。
+            </p>
           </div>
 
           {error && (
@@ -95,7 +164,7 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading || !apiKey}
+            disabled={loading || !apiKey.trim()}
             className="lh-gradient-button w-full py-3 font-medium rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {loading ? 'ログイン中...' : 'ログイン'}

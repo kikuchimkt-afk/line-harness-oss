@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { useAccount } from '@/contexts/account-context'
 import type { AccountWithStats } from '@/contexts/account-context'
 import { countryFlag } from '@/lib/country-flag'
+import { clearCsrfToken, clearSessionApiKey, getSessionApiKey } from '@/lib/api'
 
 const appVersion = process.env.APP_VERSION || '0.0.0'
 const appCommitSha = process.env.APP_COMMIT_SHA || 'local'
@@ -336,18 +337,25 @@ export default function Sidebar() {
             try {
               const apiUrl = process.env.NEXT_PUBLIC_API_URL
               if (apiUrl) {
+                const sessionApiKey = getSessionApiKey()
                 await fetch(`${apiUrl}/api/auth/logout`, {
                   method: 'POST',
                   credentials: 'include',
+                  headers: sessionApiKey ? { Authorization: `Bearer ${sessionApiKey}` } : undefined,
                 })
               }
             } catch {
               // Local cleanup still logs the browser out if the network call fails.
             }
-            localStorage.removeItem('lh_api_key')
-            localStorage.removeItem('lh_csrf')
-            localStorage.removeItem('lh_staff_name')
-            localStorage.removeItem('lh_staff_role')
+            try {
+              localStorage.removeItem('lh_api_key')
+              localStorage.removeItem('lh_staff_name')
+              localStorage.removeItem('lh_staff_role')
+            } catch {
+              // Best-effort cleanup only.
+            }
+            clearCsrfToken()
+            clearSessionApiKey()
             window.location.href = '/login'
           }}
           className="flex items-center gap-2 text-xs text-gray-400 hover:text-red-500 transition-colors"
