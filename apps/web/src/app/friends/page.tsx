@@ -1,11 +1,13 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import type { FormEvent } from 'react'
 import type { Tag } from '@line-crm/shared'
 import { api } from '@/lib/api'
 import type { FriendListItem } from '@/lib/api'
 import Header from '@/components/layout/header'
 import FriendListTable from '@/components/friends/friend-list-table'
+import TagManagerModal from '@/components/friends/tag-manager-modal'
 import CcPromptButton from '@/components/cc-prompt-button'
 import { useAccount } from '@/contexts/account-context'
 
@@ -45,6 +47,7 @@ export default function FriendsPage() {
   const [searchSubmitted, setSearchSubmitted] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('recent')
   const [responseFilter, setResponseFilter] = useState<ResponseFilter>('all')
+  const [showTagManager, setShowTagManager] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -53,7 +56,7 @@ export default function FriendsPage() {
       const res = await api.tags.list()
       if (res.success) setAllTags(res.data)
     } catch {
-      // Non-blocking — tags used for filter
+      // Tag loading should not block the friends list.
     }
   }, [])
 
@@ -89,11 +92,6 @@ export default function FriendsPage() {
     loadTags()
   }, [loadTags])
 
-  // Reset the URL-style account context to page 1 in a separate effect.
-  // For user-driven filter changes (search/sort/handled/tag) we reset
-  // page synchronously inside the handlers below — that avoids the
-  // double-fetch race where the old `page` request resolves after the
-  // new `page=1` request and overwrites the correct page-1 rows.
   useEffect(() => {
     setPage(1)
   }, [selectedAccountId])
@@ -102,72 +100,78 @@ export default function FriendsPage() {
     loadFriends()
   }, [loadFriends])
 
-  // Fan-out helpers: changing a filter also resets pagination synchronously,
-  // so React batches both state updates into one re-render and `loadFriends`
-  // fires exactly once with the new filter + page=1.
   const updateAndResetPage = (cb: () => void) => {
     cb()
     setPage(1)
   }
-  const handleSearchSubmit = (e: React.FormEvent) => {
+
+  const handleSearchSubmit = (e: FormEvent) => {
     e.preventDefault()
     updateAndResetPage(() => setSearchSubmitted(searchInput.trim()))
   }
-  // Clearing the input clears the active search even if the user doesn't
-  // press 検索 again. Without this, "search Alice → clear input → change
-  // tag" would keep filtering by Alice while the input box looks empty —
-  // see codex feedback. Keeping a non-empty input that doesn't match
-  // searchSubmitted is fine: the user is mid-edit, hasn't applied yet.
+
   const handleSearchInputChange = (v: string) => {
     setSearchInput(v)
     if (v.trim() === '' && searchSubmitted !== '') {
       updateAndResetPage(() => setSearchSubmitted(''))
     }
   }
+
   const handleSortChange = (v: SortMode) => updateAndResetPage(() => setSortMode(v))
   const handleResponseFilterChange = (v: ResponseFilter) => updateAndResetPage(() => setResponseFilter(v))
   const handleTagFilterChange = (v: string) => updateAndResetPage(() => setSelectedTagId(v))
+
+  const refreshAfterTagChange = async () => {
+    await loadTags()
+    await loadFriends()
+  }
 
   return (
     <div>
       <Header
         title="友だちリスト"
-        description="友だちの検索や、詳細情報の確認ができます。"
+        description="友だちの検索、対応状況、タグの確認と整理ができます。"
+        action={(
+          <button
+            type="button"
+            onClick={() => setShowTagManager(true)}
+            className="rounded-lg border border-pink-200 bg-white/80 px-4 py-2 text-sm font-semibold text-pink-700 shadow-sm transition hover:bg-pink-50"
+          >
+            タグを作成・整理
+          </button>
+        )}
       />
 
-      {/* Search + sort bar — L-step style */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+      <div className="mb-4 rounded-lg border border-pink-100 bg-white/80 p-4 shadow-sm backdrop-blur">
         <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <input
             type="text"
             value={searchInput}
             onChange={(e) => handleSearchInputChange(e.target.value)}
             placeholder="友だち名を検索"
-            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="flex-1 rounded-lg border border-pink-200 bg-white/80 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
           />
           <select
             value={sortMode}
             onChange={(e) => handleSortChange(e.target.value as SortMode)}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="rounded-lg border border-pink-200 bg-white/80 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
           >
             <option value="recent">友だち追加の新しい順</option>
             <option value="oldest">友だち追加の古い順</option>
           </select>
           <button
             type="submit"
-            className="px-4 py-2 rounded-lg text-white text-sm font-medium"
-            style={{ backgroundColor: '#06C755' }}
+            className="rounded-lg bg-pink-300 px-4 py-2 text-sm font-semibold text-pink-950 transition hover:bg-pink-200"
           >
             検索
           </button>
         </form>
 
-        {/* Secondary filters — タグ + 対応マーク */}
-        <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+        <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-pink-100 pt-3">
           <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-600 font-medium whitespace-nowrap">タグ:</label>
+            <label className="whitespace-nowrap text-xs font-medium text-pink-900/70">タグ:</label>
             <select
-              className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
+              className="rounded-lg border border-pink-200 bg-white/80 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-pink-200"
               value={selectedTagId}
               onChange={(e) => handleTagFilterChange(e.target.value)}
             >
@@ -178,9 +182,9 @@ export default function FriendsPage() {
             </select>
           </div>
           <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-600 font-medium whitespace-nowrap">対応マーク:</label>
+            <label className="whitespace-nowrap text-xs font-medium text-pink-900/70">対応マーク:</label>
             <select
-              className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
+              className="rounded-lg border border-pink-200 bg-white/80 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-pink-200"
               value={responseFilter}
               onChange={(e) => handleResponseFilterChange(e.target.value as ResponseFilter)}
             >
@@ -188,58 +192,63 @@ export default function FriendsPage() {
               <option value="unhandled">未対応のみ</option>
             </select>
           </div>
-          <span className="text-xs text-gray-500 ml-auto">
-            {loading ? '読み込み中...' : `${total.toLocaleString('ja-JP')} 件`}
+          <span className="ml-auto text-xs text-pink-900/60">
+            {loading ? '読み込み中...' : `${total.toLocaleString('ja-JP')}件`}
           </span>
         </div>
       </div>
 
       {error && (
-        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}
         </div>
       )}
 
       {loading ? (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="overflow-hidden rounded-lg border border-pink-100 bg-white/80 shadow-sm">
           {[...Array(5)].map((_, i) => (
-            <div key={i} className="px-4 py-4 border-b border-gray-100 grid grid-cols-[80px_220px_120px_1fr_280px] gap-3 animate-pulse">
-              <div className="h-5 bg-gray-100 rounded w-16" />
+            <div key={i} className="grid animate-pulse grid-cols-[80px_220px_120px_1fr_280px] gap-3 border-b border-pink-50 px-4 py-4">
+              <div className="h-5 w-16 rounded bg-pink-50" />
               <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-full bg-gray-200" />
-                <div className="h-3 bg-gray-200 rounded w-24" />
+                <div className="h-9 w-9 rounded-full bg-pink-100" />
+                <div className="h-3 w-24 rounded bg-pink-100" />
               </div>
-              <div className="h-3 bg-gray-100 rounded w-20" />
+              <div className="h-3 w-20 rounded bg-pink-50" />
               <div className="space-y-2">
-                <div className="h-3 bg-gray-100 rounded w-3/4" />
-                <div className="h-2 bg-gray-100 rounded w-20" />
+                <div className="h-3 w-3/4 rounded bg-pink-50" />
+                <div className="h-2 w-20 rounded bg-pink-50" />
               </div>
-              <div className="h-5 bg-gray-100 rounded w-32" />
+              <div className="h-5 w-32 rounded bg-pink-50" />
             </div>
           ))}
         </div>
       ) : (
-        <FriendListTable friends={friends} allTags={allTags} onRefresh={loadFriends} />
+        <FriendListTable
+          friends={friends}
+          allTags={allTags}
+          onRefresh={loadFriends}
+          onTagsChanged={refreshAfterTagChange}
+        />
       )}
 
       {!loading && total > 0 && (
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-4">
-          <p className="text-sm text-gray-500">
-            {((page - 1) * PAGE_SIZE) + 1}〜{Math.min(page * PAGE_SIZE, total)} 件 / 全{total.toLocaleString('ja-JP')}件
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-pink-900/60">
+            {((page - 1) * PAGE_SIZE) + 1}〜{Math.min(page * PAGE_SIZE, total)}件 / 全{total.toLocaleString('ja-JP')}件
           </p>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
-              className="px-3 py-2 min-h-[44px] text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="min-h-[44px] rounded-lg border border-pink-200 bg-white/80 px-3 py-2 text-sm transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-40"
             >
               前へ
             </button>
-            <span className="text-sm text-gray-600 px-1">{page} ページ</span>
+            <span className="px-1 text-sm text-pink-900/70">{page}ページ</span>
             <button
               onClick={() => setPage((p) => p + 1)}
               disabled={!hasNextPage}
-              className="px-3 py-2 min-h-[44px] text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="min-h-[44px] rounded-lg border border-pink-200 bg-white/80 px-3 py-2 text-sm transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-40"
             >
               次へ
             </button>
@@ -248,6 +257,14 @@ export default function FriendsPage() {
       )}
 
       <CcPromptButton prompts={ccPrompts} />
+
+      {showTagManager && (
+        <TagManagerModal
+          tags={allTags}
+          onClose={() => setShowTagManager(false)}
+          onChanged={refreshAfterTagChange}
+        />
+      )}
     </div>
   )
 }

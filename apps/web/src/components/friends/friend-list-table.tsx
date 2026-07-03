@@ -10,52 +10,81 @@ import TagBadge from './tag-badge'
 interface Props {
   friends: FriendListItem[]
   allTags: Tag[]
-  onRefresh: () => void
+  onRefresh: () => void | Promise<void>
+  onTagsChanged?: () => void | Promise<void>
 }
 
-export default function FriendListTable({ friends, allTags, onRefresh }: Props) {
-  // Inline tag-management expander. The row's primary click navigates to
-  // /chats; tag editing stays available here as a secondary action because
-  // the chats page's FriendInfoSidebar currently only displays tags (no
-  // add/remove). Without this expander operators would lose the only path
-  // to mutate friend tags from the admin UI.
+const TAG_COLORS = ['#F9A8D4', '#FBCFE8', '#FCA5A5', '#FDE68A', '#86EFAC', '#93C5FD', '#C4B5FD']
+
+export default function FriendListTable({ friends, allTags, onRefresh, onTagsChanged }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [addingTagForFriend, setAddingTagForFriend] = useState<string | null>(null)
   const [selectedTagId, setSelectedTagId] = useState('')
+  const [newTagName, setNewTagName] = useState('')
+  const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const resetInputs = () => {
+    setSelectedTagId('')
+    setNewTagName('')
+    setNewTagColor(TAG_COLORS[0])
+  }
+
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id)
-    setAddingTagForFriend(null)
-    setSelectedTagId('')
+    resetInputs()
     setError('')
   }
 
   const handleAddTag = async (friendId: string) => {
-    if (!selectedTagId) return
+    if (!selectedTagId || loading) return
     setLoading(true)
     setError('')
     try {
       await api.friends.addTag(friendId, selectedTagId)
-      setAddingTagForFriend(null)
-      setSelectedTagId('')
-      onRefresh()
+      resetInputs()
+      await onRefresh()
     } catch {
-      setError('タグの追加に失敗しました')
+      setError('タグの追加に失敗しました。時間をおいてもう一度お試しください。')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleCreateAndAddTag = async (friendId: string) => {
+    const name = newTagName.trim()
+    if (!name || loading) return
+    setLoading(true)
+    setError('')
+    try {
+      const created = await api.tags.create({ name, color: newTagColor })
+      if (created.success) {
+        await api.friends.addTag(friendId, created.data.id)
+        resetInputs()
+        if (onTagsChanged) {
+          await onTagsChanged()
+        } else {
+          await onRefresh()
+        }
+      } else {
+        setError(created.error || 'タグの作成に失敗しました。')
+      }
+    } catch {
+      setError('タグの作成に失敗しました。時間をおいてもう一度お試しください。')
     } finally {
       setLoading(false)
     }
   }
 
   const handleRemoveTag = async (friendId: string, tagId: string) => {
+    if (loading) return
     setLoading(true)
     setError('')
     try {
       await api.friends.removeTag(friendId, tagId)
-      onRefresh()
+      await onRefresh()
     } catch {
-      setError('タグの削除に失敗しました')
+      setError('タグを外せませんでした。時間をおいてもう一度お試しください。')
     } finally {
       setLoading(false)
     }
@@ -63,38 +92,34 @@ export default function FriendListTable({ friends, allTags, onRefresh }: Props) 
 
   if (friends.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12 text-center">
+      <div className="rounded-lg border border-pink-100 bg-white/80 p-12 text-center shadow-sm">
         <p className="text-gray-500">友だちが見つかりません</p>
       </div>
     )
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+    <div className="overflow-hidden rounded-lg border border-pink-100 bg-white/80 shadow-sm backdrop-blur">
       {error && (
-        <div className="px-4 py-3 bg-red-50 border-b border-red-100 text-red-700 text-sm">
+        <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
-      {/* Header sits inside the same overflow container as the body so the
-          column labels stay aligned with their values when the user scrolls
-          horizontally on narrower viewports (e.g. desktop with sidebar open
-          and the body forced to min-w-[900px]). */}
       <div className="overflow-x-auto">
         <div className="min-w-[900px]">
-          <div className="hidden lg:grid grid-cols-[80px_220px_120px_1fr_280px] gap-3 px-4 py-2 bg-gray-50 border-b border-gray-200 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
-            <div>対応マーク</div>
+          <div className="grid grid-cols-[80px_220px_120px_1fr_280px] gap-3 border-b border-pink-100 bg-pink-50/70 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-gray-600">
+            <div>対応</div>
             <div>名前</div>
             <div>シナリオ</div>
             <div>受信メッセージ</div>
-            <div>★つきタグ・友だち情報</div>
+            <div>タグ・流入元</div>
           </div>
+
           {friends.map((friend) => {
             const isExpanded = expandedId === friend.id
-            const isAddingTag = addingTagForFriend === friend.id
             const availableTags = allTags.filter(
-              (t) => !friend.tags.some((ft) => ft.id === t.id),
+              (tag) => !friend.tags.some((friendTag) => friendTag.id === tag.id),
             )
 
             return (
@@ -102,65 +127,114 @@ export default function FriendListTable({ friends, allTags, onRefresh }: Props) 
                 <FriendListRow
                   friend={friend}
                   onTagEditClick={() => toggleExpand(friend.id)}
+                  tagEditorOpen={isExpanded}
                 />
 
                 {isExpanded && (
-                  <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 space-y-3">
-                    <div>
-                      <p className="text-xs font-semibold text-gray-500 mb-1">LINE ユーザーID</p>
-                      <p className="text-xs text-gray-600 font-mono break-all select-all">{friend.lineUserId}</p>
-                    </div>
-                    <p className="text-xs font-semibold text-gray-500 mb-2">タグ管理</p>
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {friend.tags.map((tag) => (
-                        <TagBadge
-                          key={tag.id}
-                          tag={tag}
-                          onRemove={() => handleRemoveTag(friend.id, tag.id)}
+                  <div className="border-b border-pink-100 bg-pink-50/40 px-6 py-4">
+                    <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
+                      <section className="rounded-lg border border-pink-100 bg-white p-4">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-800">この友だちのタグ</p>
+                            <p className="mt-0.5 text-xs text-gray-500">
+                              いま付いているタグを確認し、不要なものは右側の × で外せます。
+                            </p>
+                          </div>
+                          {loading && <span className="text-xs text-pink-600">保存中...</span>}
+                        </div>
+
+                        {friend.tags.length > 0 ? (
+                          <div className="mb-3 flex flex-wrap gap-1.5">
+                            {friend.tags.map((tag) => (
+                              <TagBadge
+                                key={tag.id}
+                                tag={tag}
+                                onRemove={() => handleRemoveTag(friend.id, tag.id)}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mb-3 text-xs text-gray-400">まだタグが付いていません。</p>
+                        )}
+
+                        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                          <select
+                            className="rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
+                            value={selectedTagId}
+                            onChange={(e) => setSelectedTagId(e.target.value)}
+                          >
+                            <option value="">追加するタグを選ぶ</option>
+                            {availableTags.map((tag) => (
+                              <option key={tag.id} value={tag.id}>{tag.name}</option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleAddTag(friend.id)}
+                            disabled={!selectedTagId || loading}
+                            className="rounded-lg border border-pink-200 bg-pink-100 px-4 py-2 text-sm font-semibold text-pink-800 hover:bg-pink-200 disabled:opacity-50"
+                          >
+                            追加
+                          </button>
+                        </div>
+
+                        {availableTags.length === 0 && allTags.length > 0 && (
+                          <p className="mt-2 text-xs text-gray-400">作成済みのタグはすべて付いています。</p>
+                        )}
+                      </section>
+
+                      <section className="rounded-lg border border-pink-100 bg-white p-4">
+                        <p className="mb-2 text-sm font-semibold text-gray-800">
+                          新しいタグを作って付ける
+                        </p>
+                        <input
+                          value={newTagName}
+                          onChange={(e) => setNewTagName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              handleCreateAndAddTag(friend.id)
+                            }
+                          }}
+                          placeholder="例：体験希望"
+                          className="w-full rounded-lg border border-pink-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
                         />
-                      ))}
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {TAG_COLORS.map((color) => (
+                            <button
+                              key={color}
+                              type="button"
+                              onClick={() => setNewTagColor(color)}
+                              className={`h-6 w-6 rounded-full border-2 ${newTagColor === color ? 'border-gray-900' : 'border-white shadow-sm'}`}
+                              style={{ backgroundColor: color }}
+                              aria-label={`色 ${color}`}
+                            />
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleCreateAndAddTag(friend.id)}
+                          disabled={!newTagName.trim() || loading}
+                          className="mt-3 w-full rounded-lg border border-pink-200 bg-pink-50 px-4 py-2 text-sm font-semibold text-pink-800 hover:bg-pink-100 disabled:opacity-50"
+                        >
+                          作成して追加
+                        </button>
+                      </section>
                     </div>
 
-                    {isAddingTag ? (
-                      <div className="flex items-center gap-2">
-                        <select
-                          className="text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-green-500"
-                          value={selectedTagId}
-                          onChange={(e) => setSelectedTagId(e.target.value)}
-                        >
-                          <option value="">タグを選択...</option>
-                          {availableTags.map((tag) => (
-                            <option key={tag.id} value={tag.id}>{tag.name}</option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={() => handleAddTag(friend.id)}
-                          disabled={!selectedTagId || loading}
-                          className="px-3 py-1 text-xs font-medium rounded-md text-white disabled:opacity-50 transition-opacity"
-                          style={{ backgroundColor: '#06C755' }}
-                        >
-                          追加
-                        </button>
-                        <button
-                          onClick={() => { setAddingTagForFriend(null); setSelectedTagId('') }}
-                          className="px-3 py-1 text-xs font-medium rounded-md text-gray-600 bg-gray-200 hover:bg-gray-300 transition-colors"
-                        >
-                          キャンセル
-                        </button>
-                      </div>
-                    ) : (
-                      availableTags.length > 0 && (
-                        <button
-                          onClick={() => setAddingTagForFriend(friend.id)}
-                          className="text-xs font-medium text-green-600 hover:text-green-700 flex items-center gap-1 transition-colors"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                          </svg>
-                          タグを追加
-                        </button>
-                      )
-                    )}
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <p className="select-all break-all font-mono text-[11px] text-gray-500">
+                        LINEユーザーID：{friend.lineUserId}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => toggleExpand(friend.id)}
+                        className="text-xs text-gray-500 underline hover:text-gray-700"
+                      >
+                        閉じる
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
