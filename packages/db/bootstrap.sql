@@ -847,6 +847,8 @@ CREATE INDEX idx_chats_operator ON chats (operator_id);
 
 CREATE INDEX idx_chats_status ON chats (status);
 
+CREATE INDEX IF NOT EXISTS idx_chats_account_friend_created ON chats (line_account_id, friend_id, created_at);
+
 CREATE INDEX idx_conversion_events_affiliate ON conversion_events (affiliate_code);
 
 CREATE INDEX idx_conversion_events_friend ON conversion_events (friend_id);
@@ -926,6 +928,8 @@ CREATE INDEX idx_messages_log_friend_direction_created ON messages_log (friend_i
 CREATE INDEX idx_messages_log_friend_id ON messages_log (friend_id);
 
 CREATE INDEX idx_messages_log_friend_source ON messages_log (friend_id, source);
+
+CREATE INDEX IF NOT EXISTS idx_messages_log_account_friend_created ON messages_log (line_account_id, friend_id, created_at);
 
 CREATE INDEX idx_notifications_created ON notifications (created_at);
 

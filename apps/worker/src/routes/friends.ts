@@ -513,19 +513,23 @@ friends.put('/api/friends/:id/metadata', async (c) => {
 friends.get('/api/friends/:id/messages', async (c) => {
   try {
     const friendId = c.req.param('id');
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     // Fetch the latest 200 messages (DESC) then reverse to ASC for display.
     // Using ORDER BY ASC LIMIT 200 returns the OLDEST 200 rows, which silently
     // hides recent activity for chatty friends. Exclude delivery_type='test'
     // to stay consistent with /api/chats/:id, so the same friend shows the
     // same history across DirectMessagePanel and the chat panel.
+    const accountSql = lineAccountId ? 'AND line_account_id = ?' : '';
+    const bindings: unknown[] = lineAccountId ? [friendId, lineAccountId] : [friendId];
     const result = await c.env.DB
       .prepare(
         `SELECT id, direction, message_type as messageType, content, created_at as createdAt
          FROM messages_log WHERE friend_id = ?
            AND (delivery_type IS NULL OR delivery_type != 'test')
+           ${accountSql}
          ORDER BY created_at DESC LIMIT 200`,
       )
-      .bind(friendId)
+      .bind(...bindings)
       .all<{ id: string; direction: string; messageType: string; content: string; createdAt: string }>();
     return c.json({ success: true, data: result.results.reverse() });
   } catch (err) {
@@ -538,6 +542,7 @@ friends.get('/api/friends/:id/messages', async (c) => {
 friends.post('/api/friends/:id/messages', async (c) => {
   try {
     const friendId = c.req.param('id');
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const body = await c.req.json<{
       messageType?: string;
       content: string;
@@ -557,9 +562,10 @@ friends.post('/api/friends/:id/messages', async (c) => {
     const { LineClient } = await import('@line-crm/line-sdk');
     // Resolve access token from friend's account (multi-account support)
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
-    if ((friend as unknown as Record<string, unknown>).line_account_id) {
+    const preferredLineAccountId = lineAccountId || ((friend as unknown as Record<string, unknown>).line_account_id as string | undefined);
+    if (preferredLineAccountId) {
       const { getLineAccountById } = await import('@line-crm/db');
-      const account = await getLineAccountById(db, (friend as unknown as Record<string, unknown>).line_account_id as string);
+      const account = await getLineAccountById(db, preferredLineAccountId);
       if (account) accessToken = account.channel_access_token;
     }
     const lineClient = new LineClient(accessToken);
@@ -579,10 +585,10 @@ friends.post('/api/friends/:id/messages', async (c) => {
     const logId = crypto.randomUUID();
     await db
       .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'manual', ?)`,
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'manual', ?, ?)`,
       )
-      .bind(logId, friend.id, messageType, body.content, jstNow())
+      .bind(logId, friend.id, messageType, body.content, preferredLineAccountId ?? null, jstNow())
       .run();
 
     return c.json({ success: true, data: { messageId: logId } });

@@ -32,6 +32,97 @@ const webhook = new Hono<Env>();
 // bursty batched deliveries (~100 events × ~5 KB) while still well below the
 // 128 MB Cloudflare Workers memory ceiling.
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
+const INCOMING_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
+const NOTICE_PREVIEW_MAX_LENGTH = 500;
+
+function truncateNoticeText(text: string): string {
+  if (text.length <= NOTICE_PREVIEW_MAX_LENGTH) return text;
+  return `${text.slice(0, NOTICE_PREVIEW_MAX_LENGTH)}...`;
+}
+
+function incomingMessagePreview(messageType: string, content: string): string {
+  if (messageType === 'text') return truncateNoticeText(content);
+  if (messageType === 'image') return '画像が届きました';
+  if (messageType === 'sticker') return 'スタンプが届きました';
+  if (messageType === 'audio') return '音声が届きました';
+  if (messageType === 'video') return '動画が届きました';
+  if (messageType === 'file') return 'ファイルが届きました';
+  if (messageType === 'location') return '位置情報が届きました';
+  return truncateNoticeText(content || `[${messageType}]`);
+}
+
+async function notifyIncomingMessageRecipients(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    lineAccountId: string | null;
+    senderFriendId: string;
+    senderName: string | null;
+    messageType: string;
+    content: string;
+  },
+): Promise<void> {
+  if (!params.lineAccountId) return;
+
+  try {
+    const setting = await db
+      .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+      .bind(params.lineAccountId, INCOMING_NOTICE_RECIPIENTS_KEY)
+      .first<{ value: string }>();
+    if (!setting?.value) return;
+
+    let recipientIds: string[] = [];
+    try {
+      const parsed = JSON.parse(setting.value);
+      recipientIds = Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === 'string' && id !== params.senderFriendId)
+        : [];
+    } catch {
+      recipientIds = [];
+    }
+    recipientIds = [...new Set(recipientIds)];
+    if (recipientIds.length === 0) return;
+
+    const account = await db
+      .prepare(`SELECT name FROM line_accounts WHERE id = ?`)
+      .bind(params.lineAccountId)
+      .first<{ name: string | null }>();
+
+    const placeholders = recipientIds.map(() => '?').join(',');
+    const recipients = await db
+      .prepare(
+        `SELECT id, line_user_id
+         FROM friends
+         WHERE line_account_id = ?
+           AND is_following = 1
+           AND id IN (${placeholders})`,
+      )
+      .bind(params.lineAccountId, ...recipientIds)
+      .all<{ id: string; line_user_id: string }>();
+
+    if (recipients.results.length === 0) return;
+
+    const text = [
+      '📩 新しいメッセージが届きました',
+      '',
+      `アカウント：${account?.name ?? 'LINE公式アカウント'}`,
+      `送信者：${params.senderName || '名前なし'}`,
+      `内容：${incomingMessagePreview(params.messageType, params.content)}`,
+      '',
+      'L Harnessの個別チャットで確認してください。',
+    ].join('\n');
+
+    for (const recipient of recipients.results) {
+      try {
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[webhook] incoming notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] incoming notice failed', err);
+  }
+}
 
 async function ensureFriendFromWebhookUser(
   db: D1Database,
@@ -295,10 +386,10 @@ async function handleEvent(
                 const wbScenarioPayload = logPayload1(message);
                 await db
                   .prepare(
-                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, template_id_at_send, created_at)
-                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'reply', 'scenario', ?, ?)`,
+                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, template_id_at_send, line_account_id, created_at)
+                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'reply', 'scenario', ?, ?, ?)`,
                   )
-                  .bind(logId, friend.id, wbScenarioPayload.messageType, wbScenarioPayload.content, firstStep.id, resolved.templateIdAtSend, jstNow())
+                  .bind(logId, friend.id, wbScenarioPayload.messageType, wbScenarioPayload.content, firstStep.id, resolved.templateIdAtSend, lineAccountId ?? null, jstNow())
                   .run();
 
                 // Advance or complete the friend_scenario — step 2 のスケジュールも
@@ -511,11 +602,19 @@ async function handleEvent(
 
     await db
       .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-         VALUES (?, ?, 'incoming', ?, ?, NULL, NULL, 'user', ?)`,
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+         VALUES (?, ?, 'incoming', ?, ?, NULL, NULL, 'user', ?, ?)`,
       )
-      .bind(crypto.randomUUID(), friend.id, msg.type, finalContent, jstNow())
+      .bind(crypto.randomUUID(), friend.id, msg.type, finalContent, lineAccountId ?? null, jstNow())
       .run();
+
+    await notifyIncomingMessageRecipients(db, lineClient, {
+      lineAccountId,
+      senderFriendId: friend.id,
+      senderName: friend.display_name,
+      messageType: msg.type,
+      content: finalContent,
+    });
     return;
   }
 
@@ -535,11 +634,19 @@ async function handleEvent(
     // 受信メッセージをログに記録
     await db
       .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-         VALUES (?, ?, 'incoming', 'text', ?, NULL, NULL, 'user', ?)`,
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+         VALUES (?, ?, 'incoming', 'text', ?, NULL, NULL, 'user', ?, ?)`,
       )
-      .bind(logId, friend.id, incomingText, now)
+      .bind(logId, friend.id, incomingText, lineAccountId ?? null, now)
       .run();
+
+    await notifyIncomingMessageRecipients(db, lineClient, {
+      lineAccountId,
+      senderFriendId: friend.id,
+      senderName: friend.display_name,
+      messageType: 'text',
+      content: incomingText,
+    });
 
     // Cross-account trigger: send message from another account via UUID
     if (incomingText === '体験を完了する' && lineAccountId) {
@@ -648,10 +755,10 @@ async function handleEvent(
           const wbAutoReplyPayload = logPayload2(replyMsg);
           await db
             .prepare(
-              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, created_at)
-               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?)`,
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
             )
-            .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, jstNow())
+            .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, lineAccountId ?? null, jstNow())
             .run();
         } catch (err) {
           console.error('Failed to send auto-reply', err);
@@ -664,7 +771,7 @@ async function handleEvent(
 
     // auto_replies にマッチしなかった = 自発メッセージ → unread にする
     if (!matched) {
-      await upsertChatOnMessage(db, friend.id);
+      await upsertChatOnMessage(db, friend.id, lineAccountId);
     }
 
     // イベントバス発火: message_received

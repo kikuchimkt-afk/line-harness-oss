@@ -211,6 +211,7 @@ describe('POST /webhook — first-contact existing friends', () => {
     vi.mocked(upsertChatOnMessage).mockResolvedValue({
       id: 'chat-1',
       friend_id: 'friend-1',
+      line_account_id: null,
       operator_id: null,
       status: 'unread',
       notes: null,
@@ -274,7 +275,7 @@ describe('POST /webhook — first-contact existing friends', () => {
       pictureUrl: 'https://example.com/profile.jpg',
       statusMessage: 'hello',
     });
-    expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1');
+    expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1', null);
     expect(fireEvent).toHaveBeenCalledWith(
       db,
       'message_received',

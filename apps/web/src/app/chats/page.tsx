@@ -137,9 +137,10 @@ interface MessageLog {
   createdAt: string
 }
 
-function DirectMessagePanel({ friendId, friend, onBack, onSent }: {
+function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
   friendId: string
   friend: FriendItem | null
+  accountId?: string
   onBack: () => void
   onSent: () => void
 }) {
@@ -154,22 +155,24 @@ function DirectMessagePanel({ friendId, friend, onBack, onSent }: {
     const loadMessages = async () => {
       setLoadingMessages(true)
       try {
+        const query = accountId ? '?' + new URLSearchParams({ lineAccountId: accountId }) : ''
         const res = await fetchApi<{ success: boolean; data: MessageLog[] }>(
-          `/api/friends/${friendId}/messages`
+          `/api/friends/${friendId}/messages${query}`
         )
         if (res.success) setMessages(res.data)
       } catch { /* silent */ }
       setLoadingMessages(false)
     }
     loadMessages()
-  }, [friendId])
+  }, [friendId, accountId])
 
   const handleSend = async () => {
     if (!message.trim() || sending || sendLockRef.current) return
     sendLockRef.current = true
     setSending(true)
     try {
-      await fetchApi(`/api/friends/${friendId}/messages`, {
+      const query = accountId ? '?' + new URLSearchParams({ lineAccountId: accountId }) : ''
+      await fetchApi(`/api/friends/${friendId}/messages${query}`, {
         method: 'POST',
         body: JSON.stringify({ content: message, messageType: 'text' }),
       })
@@ -409,7 +412,7 @@ export default function ChatsPage() {
     setDetailLoading(true)
     setError('')
     try {
-      const res = await api.chats.get(chatId)
+      const res = await api.chats.get(chatId, { accountId: selectedAccountId || undefined })
       if (res.success) {
         setChatDetail(res.data as unknown as ChatDetail)
         setNotes((res.data as unknown as ChatDetail).notes || '')
@@ -425,7 +428,7 @@ export default function ChatsPage() {
     } finally {
       setDetailLoading(false)
     }
-  }, [])
+  }, [selectedAccountId])
 
   useEffect(() => {
     loadChats()
@@ -536,7 +539,8 @@ export default function ChatsPage() {
     lastLoadingTriggerAtRef.current[chatId] = now
 
     try {
-      await fetchApi<{ success: boolean }>(`/api/chats/${chatId}/loading`, {
+      const query = selectedAccountId ? '?' + new URLSearchParams({ lineAccountId: selectedAccountId }) : ''
+      await fetchApi<{ success: boolean }>(`/api/chats/${chatId}/loading${query}`, {
         method: 'POST',
         body: JSON.stringify({ loadingSeconds }),
       })
@@ -544,7 +548,7 @@ export default function ChatsPage() {
       const detail = err instanceof Error ? err.message : 'unknown'
       setError(`ローディング表示の開始に失敗しました: ${detail}`)
     }
-  }, [showLoadingIndicator, loadingSeconds])
+  }, [showLoadingIndicator, loadingSeconds, selectedAccountId])
 
   const handleSendMessage = async () => {
     if (!selectedChatId || sending || sendLockRef.current) return
@@ -560,7 +564,7 @@ export default function ChatsPage() {
           originalContentUrl: pendingImage.originalContentUrl,
           previewImageUrl: pendingImage.previewImageUrl,
         })
-        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload })
+        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload }, { accountId: selectedAccountId || undefined })
         setPendingImage(null)
         // Optimistic update for image
         setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
@@ -606,7 +610,7 @@ export default function ChatsPage() {
       // --- Text send path (runs independently — both paths execute when both image and text are present) ---
       if (messageContent.trim()) {
         const content = messageContent.trim()
-        await api.chats.send(sendingChatId, { content })
+        await api.chats.send(sendingChatId, { content }, { accountId: selectedAccountId || undefined })
         setMessageContent('')
         // Optimistic update: append message locally instead of refetching (prevents scroll jump / full reload feel)
         // Only mutate chatDetail if it still corresponds to the chat we just sent to
@@ -666,7 +670,7 @@ export default function ChatsPage() {
   const handleStatusUpdate = async (newStatus: Chat['status']) => {
     if (!selectedChatId) return
     try {
-      await api.chats.update(selectedChatId, { status: newStatus })
+      await api.chats.update(selectedChatId, { status: newStatus }, { accountId: selectedAccountId || undefined })
       loadChatDetail(selectedChatId)
       loadChats()
     } catch {
@@ -678,7 +682,7 @@ export default function ChatsPage() {
     if (!selectedChatId) return
     setSavingNotes(true)
     try {
-      await api.chats.update(selectedChatId, { notes })
+      await api.chats.update(selectedChatId, { notes }, { accountId: selectedAccountId || undefined })
       loadChatDetail(selectedChatId)
     } catch {
       setError('メモの保存に失敗しました。')
@@ -837,6 +841,7 @@ export default function ChatsPage() {
             <DirectMessagePanel
               friendId={selectedFriendId}
               friend={allFriends.find((f) => f.id === selectedFriendId) || null}
+              accountId={selectedAccountId || undefined}
               onBack={() => setSelectedFriendId(null)}
               onSent={() => { setSelectedFriendId(null); loadChats(); }}
             />

@@ -228,8 +228,8 @@ async function applyRefAttribution(
       const liffLogPayload = messageToLogPayload(pushedMessage);
       await db
         .prepare(
-          `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, created_at)
-           VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?)`,
+          `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, line_account_id, created_at)
+           VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?, ?)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -238,6 +238,7 @@ async function applyRefAttribution(
           liffLogPayload.content,
           firstStep.id,
           resolved.templateIdAtSend,
+          (fresh as unknown as Record<string, string | null>).line_account_id ?? null,
           nowIso,
         )
         .run();
@@ -911,8 +912,8 @@ liffRoutes.get('/auth/callback', async (c) => {
                   .slice(0, -1) + '+09:00';
                 await db
                   .prepare(
-                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, created_at)
-                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?)`,
+                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, line_account_id, created_at)
+                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?, ?)`,
                   )
                   .bind(
                     crypto.randomUUID(),
@@ -921,6 +922,7 @@ liffRoutes.get('/auth/callback', async (c) => {
                     oauthLogPayload.content,
                     firstStep.id,
                     resolved.templateIdAtSend,
+                    (friend as unknown as Record<string, string | null>).line_account_id ?? null,
                     nowIso,
                   )
                   .run();

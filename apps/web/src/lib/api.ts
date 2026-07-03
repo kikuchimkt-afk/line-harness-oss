@@ -439,6 +439,15 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ accountId, friendIds }),
       }),
+    getNoticeRecipients: (accountId: string) =>
+      fetchApi<{ success: boolean; data: Array<{ id: string; displayName: string; pictureUrl: string | null }> }>(
+        `/api/account-settings/incoming-notice-recipients?accountId=${accountId}`,
+      ),
+    updateNoticeRecipients: (accountId: string, friendIds: string[]) =>
+      fetchApi<{ success: boolean }>('/api/account-settings/incoming-notice-recipients', {
+        method: 'PUT',
+        body: JSON.stringify({ accountId, friendIds }),
+      }),
   },
 
   // ── Round 2 APIs ─────────────────────────────────────────────────────────
@@ -723,25 +732,31 @@ export const api = {
         '/api/chats?' + new URLSearchParams(query),
       )
     },
-    get: (id: string) =>
-      fetchApi<ApiResponse<Chat & { messages?: { id: string; content: string; senderType: string; createdAt: string }[] }>>(
-        `/api/chats/${id}`,
-      ),
+    get: (id: string, params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<Chat & { messages?: { id: string; content: string; senderType: string; createdAt: string }[] }>>(
+        `/api/chats/${id}${query}`,
+      )
+    },
     create: (data: { friendId: string; operatorId?: string | null }) =>
       fetchApi<ApiResponse<Chat>>('/api/chats', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: { operatorId?: string | null; status?: Chat['status']; notes?: string | null }) =>
-      fetchApi<ApiResponse<Chat>>(`/api/chats/${id}`, {
+    update: (id: string, data: { operatorId?: string | null; status?: Chat['status']; notes?: string | null }, params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<Chat>>(`/api/chats/${id}${query}`, {
         method: 'PUT',
         body: JSON.stringify(data),
-      }),
-    send: (id: string, data: { content: string; messageType?: string }) =>
-      fetchApi<ApiResponse<unknown>>(`/api/chats/${id}/send`, {
+      })
+    },
+    send: (id: string, data: { content: string; messageType?: string }, params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<unknown>>(`/api/chats/${id}/send${query}`, {
         method: 'POST',
         body: JSON.stringify(data),
-      }),
+      })
+    },
   },
   reminders: {
     list: (params?: { accountId?: string }) => {
