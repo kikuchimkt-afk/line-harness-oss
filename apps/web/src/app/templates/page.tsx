@@ -69,6 +69,282 @@ const ccPrompts = [
   },
 ]
 
+type ButtonActionType = 'uri' | 'message'
+
+interface TemplateButtonDraft {
+  id: string
+  label: string
+  actionType: ButtonActionType
+  value: string
+}
+
+interface SimpleFlexDraft {
+  title: string
+  body: string
+  buttons: TemplateButtonDraft[]
+}
+
+const MAX_TEMPLATE_BUTTONS = 4
+
+function createButtonDraft(): TemplateButtonDraft {
+  const id =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `button-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return { id, label: '', actionType: 'uri', value: '' }
+}
+
+function createEmptyFlexDraft(): SimpleFlexDraft {
+  return {
+    title: '',
+    body: '',
+    buttons: [createButtonDraft()],
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+function completedButtons(buttons: TemplateButtonDraft[]): TemplateButtonDraft[] {
+  return buttons
+    .map((button) => ({
+      ...button,
+      label: button.label.trim(),
+      value: button.value.trim(),
+    }))
+    .filter((button) => button.label && button.value)
+    .slice(0, MAX_TEMPLATE_BUTTONS)
+}
+
+function validateFlexDraft(draft: SimpleFlexDraft): string | null {
+  if (!draft.title.trim() && !draft.body.trim()) return '見出しまたは本文を入力してください'
+  const startedButtons = draft.buttons.filter((button) => button.label.trim() || button.value.trim())
+  for (const button of startedButtons) {
+    if (!button.label.trim() || !button.value.trim()) return 'ボタン名とリンク先（または送信テキスト）を入力してください'
+    if (button.actionType === 'uri' && !/^https?:\/\//.test(button.value.trim())) {
+      return 'URLボタンは https:// から始まるリンクを入力してください'
+    }
+  }
+  return null
+}
+
+function buildSimpleFlexContent(draft: SimpleFlexDraft, _fallbackTitle = ''): string {
+  const title = draft.title.trim()
+  const body = draft.body.trim()
+  const bodyContents: Record<string, unknown>[] = []
+
+  if (title) {
+    bodyContents.push({
+      type: 'text',
+      text: title,
+      weight: 'bold',
+      size: 'lg',
+      color: '#312033',
+      wrap: true,
+    })
+  }
+
+  if (body) {
+    bodyContents.push({
+      type: 'text',
+      text: body,
+      size: 'sm',
+      color: '#6c5266',
+      wrap: true,
+      margin: title ? 'md' : 'none',
+    })
+  }
+
+  const buttons = completedButtons(draft.buttons)
+  const bubble: Record<string, unknown> = {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      paddingAll: '18px',
+      backgroundColor: '#fff7fb',
+      contents: bodyContents,
+    },
+  }
+
+  if (buttons.length > 0) {
+    bubble.footer = {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      paddingAll: '14px',
+      contents: buttons.map((button) => ({
+        type: 'button',
+        style: 'primary',
+        height: 'sm',
+        color: '#ec6faa',
+        action:
+          button.actionType === 'message'
+            ? { type: 'message', label: button.label, text: button.value }
+            : { type: 'uri', label: button.label, uri: button.value },
+      })),
+    }
+  }
+
+  return JSON.stringify(bubble, null, 2)
+}
+
+function flexDraftFromTemplate(template: Pick<TemplateDetail, 'name' | 'messageType' | 'messageContent'>): SimpleFlexDraft {
+  if (template.messageType !== 'flex') {
+    return {
+      title: template.name,
+      body: template.messageContent,
+      buttons: [createButtonDraft()],
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(template.messageContent) as unknown
+    if (!isRecord(parsed) || parsed.type !== 'bubble') throw new Error('not a bubble')
+
+    const body = isRecord(parsed.body) ? parsed.body : null
+    const bodyContents = body ? recordArray(body.contents) : []
+    const textNodes = bodyContents.filter((node) => node.type === 'text' && typeof node.text === 'string')
+    const titleNode =
+      textNodes.find((node) => node.weight === 'bold' && (node.size === 'lg' || node.size === 'xl')) ?? null
+    const title = typeof titleNode?.text === 'string' ? titleNode.text : template.name
+    const bodyText = textNodes
+      .filter((node) => node !== titleNode)
+      .map((node) => String(node.text ?? ''))
+      .filter(Boolean)
+      .join('\n\n')
+
+    const footer = isRecord(parsed.footer) ? parsed.footer : null
+    const buttonNodes = footer ? recordArray(footer.contents) : []
+    const buttons = buttonNodes
+      .filter((node) => node.type === 'button' && isRecord(node.action))
+      .map((node) => {
+        const action = node.action as Record<string, unknown>
+        const actionType: ButtonActionType = action.type === 'message' ? 'message' : 'uri'
+        return {
+          id: createButtonDraft().id,
+          label: String(action.label ?? ''),
+          actionType,
+          value: actionType === 'message' ? String(action.text ?? '') : String(action.uri ?? ''),
+        }
+      })
+
+    return {
+      title,
+      body: bodyText,
+      buttons: buttons.length > 0 ? buttons : [createButtonDraft()],
+    }
+  } catch {
+    return {
+      title: template.name,
+      body: template.messageContent,
+      buttons: [createButtonDraft()],
+    }
+  }
+}
+
+function SimpleFlexEditor({
+  value,
+  onChange,
+}: {
+  value: SimpleFlexDraft
+  onChange: (next: SimpleFlexDraft) => void
+}) {
+  const updateButton = (id: string, patch: Partial<TemplateButtonDraft>) => {
+    onChange({
+      ...value,
+      buttons: value.buttons.map((button) => (button.id === id ? { ...button, ...patch } : button)),
+    })
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-pink-200 bg-white/70 p-3">
+      <div>
+        <label className="block text-xs font-medium text-gray-600 mb-1">見出し</label>
+        <input
+          type="text"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-300"
+          placeholder="例: 暗誦大会 無料レッスン"
+          value={value.title}
+          onChange={(e) => onChange({ ...value, title: e.target.value })}
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-600 mb-1">本文</label>
+        <textarea
+          rows={6}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-300 resize-y"
+          placeholder="案内文を入力"
+          value={value.body}
+          onChange={(e) => onChange({ ...value, body: e.target.value })}
+        />
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-medium text-gray-600">ボタン</label>
+          <button
+            type="button"
+            onClick={() => onChange({ ...value, buttons: [...value.buttons, createButtonDraft()] })}
+            disabled={value.buttons.length >= MAX_TEMPLATE_BUTTONS}
+            className="px-2.5 py-1 text-xs font-medium rounded-md border border-pink-200 text-rose-700 bg-white/70 disabled:opacity-40"
+          >
+            + 追加
+          </button>
+        </div>
+        {value.buttons.map((button, index) => (
+          <div key={button.id} className="rounded-lg border border-pink-100 bg-white/75 p-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-medium text-gray-500">ボタン {index + 1}</span>
+              {value.buttons.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onChange({ ...value, buttons: value.buttons.filter((item) => item.id !== button.id) })}
+                  className="text-[11px] text-red-500 hover:underline"
+                >
+                  削除
+                </button>
+              )}
+            </div>
+            <input
+              type="text"
+              className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-pink-300"
+              placeholder="例: 無料レッスンを予約する"
+              value={button.label}
+              onChange={(e) => updateButton(button.id, { label: e.target.value })}
+            />
+            <div className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-2">
+              <select
+                className="border border-gray-300 rounded-md px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-pink-300"
+                value={button.actionType}
+                onChange={(e) =>
+                  updateButton(button.id, { actionType: e.target.value as ButtonActionType, value: '' })
+                }
+              >
+                <option value="uri">URLを開く</option>
+                <option value="message">返信させる</option>
+              </select>
+              <input
+                type={button.actionType === 'uri' ? 'url' : 'text'}
+                className="border border-gray-300 rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-pink-300"
+                placeholder={button.actionType === 'uri' ? 'https://...' : '例: 予約したい'}
+                value={button.value}
+                onChange={(e) => updateButton(button.id, { value: e.target.value })}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [loading, setLoading] = useState(true)
@@ -76,6 +352,8 @@ export default function TemplatesPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [form, setForm] = useState({ name: '', category: 'general', messageType: 'text', messageContent: '' })
+  const [formFlexDraft, setFormFlexDraft] = useState<SimpleFlexDraft>(() => createEmptyFlexDraft())
+  const [formFlexMode, setFormFlexMode] = useState<'simple' | 'json'>('simple')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
 
@@ -92,6 +370,7 @@ export default function TemplatesPage() {
   const [drawerError, setDrawerError] = useState<string | null>(null)
   const [editContent, setEditContent] = useState<string | null>(null)
   const [editName, setEditName] = useState<string | null>(null)
+  const [editFlexDraft, setEditFlexDraft] = useState<SimpleFlexDraft | null>(null)
   const [savingEdit, setSavingEdit] = useState(false)
 
   const load = useCallback(async () => {
@@ -144,7 +423,7 @@ export default function TemplatesPage() {
   }, [drawerId])
 
   // reset edits when drawer changes
-  useEffect(() => { setEditContent(null); setEditName(null) }, [drawerId])
+  useEffect(() => { setEditContent(null); setEditName(null); setEditFlexDraft(null) }, [drawerId])
 
   const filteredTemplates = templates.filter((t) => {
     if (typeFilter === 'all') return true
@@ -154,14 +433,22 @@ export default function TemplatesPage() {
 
   const handleCreate = async () => {
     if (!form.name.trim()) { setFormError('テンプレート名を入力してください'); return }
-    if (!form.messageContent.trim()) { setFormError('メッセージ内容を入力してください'); return }
+    const payload = { ...form }
+    if (form.messageType === 'flex' && formFlexMode === 'simple') {
+      const flexError = validateFlexDraft(formFlexDraft)
+      if (flexError) { setFormError(flexError); return }
+      payload.messageContent = buildSimpleFlexContent(formFlexDraft, form.name)
+    }
+    if (!payload.messageContent.trim()) { setFormError('メッセージ内容を入力してください'); return }
     setSaving(true)
     setFormError('')
     try {
-      const res = await api.templates.create(form)
+      const res = await api.templates.create(payload)
       if (res.success) {
         setShowCreate(false)
         setForm({ name: '', category: 'general', messageType: 'text', messageContent: '' })
+        setFormFlexDraft(createEmptyFlexDraft())
+        setFormFlexMode('simple')
         load()
       } else {
         setFormError(res.error)
@@ -170,6 +457,33 @@ export default function TemplatesPage() {
       setFormError('作成に失敗しました')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSaveSimpleFlex = async () => {
+    if (!drawerData) return
+    const draft = editFlexDraft ?? flexDraftFromTemplate(drawerData)
+    const flexError = validateFlexDraft(draft)
+    if (flexError) { setError(flexError); return }
+
+    setSavingEdit(true)
+    try {
+      const updates: Record<string, string> = {
+        messageType: 'flex',
+        messageContent: buildSimpleFlexContent(draft, editName ?? drawerData.name),
+      }
+      if (editName !== null) updates.name = editName
+      await api.templates.update(drawerData.id, updates)
+      const r = await api.templates.get(drawerData.id)
+      if (r.success && r.data) setDrawerData(r.data)
+      setEditContent(null)
+      setEditName(null)
+      setEditFlexDraft(null)
+      load()
+    } catch {
+      setError('更新に失敗しました')
+    } finally {
+      setSavingEdit(false)
     }
   }
 
@@ -288,7 +602,18 @@ export default function TemplatesPage() {
               <select
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
                 value={form.messageType}
-                onChange={(e) => setForm({ ...form, messageType: e.target.value })}
+                onChange={(e) => {
+                  const nextType = e.target.value
+                  if (nextType === 'flex' && form.messageType !== 'flex') {
+                    setFormFlexDraft({
+                      title: form.name,
+                      body: form.messageContent,
+                      buttons: [createButtonDraft()],
+                    })
+                    setFormFlexMode('simple')
+                  }
+                  setForm({ ...form, messageType: nextType })
+                }}
               >
                 <option value="text">テキスト</option>
                 <option value="flex">Flex</option>
@@ -296,7 +621,9 @@ export default function TemplatesPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">内容 / JSON <span className="text-red-500">*</span></label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                {form.messageType === 'flex' ? 'メッセージ内容' : '内容 / JSON'} <span className="text-red-500">*</span>
+              </label>
               {form.messageType === 'image' ? (
                 <ImageUploader
                   mode="line-image"
@@ -325,11 +652,50 @@ export default function TemplatesPage() {
                   }}
                   label="テンプレート画像"
                 />
+              ) : form.messageType === 'flex' ? (
+                <div className="space-y-3">
+                  <div className="inline-flex rounded-full bg-pink-50 p-1 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setFormFlexMode('simple')}
+                      className={`px-3 py-1 rounded-full font-medium ${formFlexMode === 'simple' ? 'bg-white text-rose-700 shadow-sm' : 'text-gray-500'}`}
+                    >
+                      かんたん入力
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormFlexMode('json')}
+                      className={`px-3 py-1 rounded-full font-medium ${formFlexMode === 'json' ? 'bg-white text-rose-700 shadow-sm' : 'text-gray-500'}`}
+                    >
+                      JSON
+                    </button>
+                  </div>
+
+                  {formFlexMode === 'simple' ? (
+                    <>
+                      <SimpleFlexEditor value={formFlexDraft} onChange={setFormFlexDraft} />
+                      <div>
+                        <p className="text-[11px] font-medium text-gray-500 mb-1.5">プレビュー</p>
+                        <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 overflow-x-auto">
+                          <FlexPreviewComponent content={buildSimpleFlexContent(formFlexDraft, form.name)} maxWidth={420} />
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <textarea
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
+                      rows={10}
+                      placeholder='{"type":"bubble","body":...}'
+                      value={form.messageContent}
+                      onChange={(e) => setForm({ ...form, messageContent: e.target.value })}
+                    />
+                  )}
+                </div>
               ) : (
                 <textarea
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
-                  rows={form.messageType === 'flex' ? 10 : 4}
-                  placeholder={form.messageType === 'flex' ? '{"type":"bubble","body":...}' : 'メッセージ内容'}
+                  rows={4}
+                  placeholder="メッセージ内容"
                   value={form.messageContent}
                   onChange={(e) => setForm({ ...form, messageContent: e.target.value })}
                 />
@@ -348,7 +714,12 @@ export default function TemplatesPage() {
                 {saving ? '作成中...' : '作成'}
               </button>
               <button
-                onClick={() => { setShowCreate(false); setFormError('') }}
+                onClick={() => {
+                  setShowCreate(false)
+                  setFormError('')
+                  setFormFlexDraft(createEmptyFlexDraft())
+                  setFormFlexMode('simple')
+                }}
                 className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg"
               >
                 キャンセル
@@ -520,16 +891,59 @@ export default function TemplatesPage() {
                   </div>
                 </div>
 
+                {drawerData.messageType !== 'image' && (
+                  (() => {
+                    const simpleDraft = editFlexDraft ?? flexDraftFromTemplate(drawerData)
+                    const simplePreview = buildSimpleFlexContent(simpleDraft, editName ?? drawerData.name)
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <h4 className="text-[11px] font-medium text-gray-500 uppercase tracking-wide">
+                            かんたんボタン編集
+                          </h4>
+                          {drawerData.messageType !== 'flex' && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-pink-50 text-rose-700">
+                              保存するとFlexになります
+                            </span>
+                          )}
+                        </div>
+                        <SimpleFlexEditor
+                          value={simpleDraft}
+                          onChange={(next) => setEditFlexDraft(next)}
+                        />
+                        <div>
+                          <p className="text-[11px] font-medium text-gray-500 mb-1.5">ボタン付きプレビュー</p>
+                          <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 overflow-x-auto">
+                            <FlexPreviewComponent content={simplePreview} maxWidth={420} />
+                          </div>
+                        </div>
+                        <button
+                          onClick={handleSaveSimpleFlex}
+                          disabled={savingEdit}
+                          className="px-3 py-1.5 text-xs font-medium text-white rounded-md disabled:opacity-50"
+                          style={{ backgroundColor: '#06C755' }}
+                        >
+                          {savingEdit ? '保存中...' : 'ボタン付きで保存'}
+                        </button>
+                      </div>
+                    )
+                  })()
+                )}
+
                 {/* Edit JSON / content */}
-                <div>
-                  <h4 className="text-[11px] font-medium text-gray-500 mb-1.5 uppercase tracking-wide">内容 / JSON 編集</h4>
-                  <textarea
-                    rows={drawerData.messageType === 'flex' ? 12 : 4}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
-                    value={editContent ?? drawerData.messageContent}
-                    onChange={(e) => setEditContent(e.target.value)}
-                  />
-                </div>
+                <details className="rounded-lg border border-gray-200 bg-white/70 p-3">
+                  <summary className="cursor-pointer text-[11px] font-medium text-gray-500 uppercase tracking-wide">
+                    JSONを直接編集
+                  </summary>
+                  <div className="mt-3">
+                    <textarea
+                      rows={drawerData.messageType === 'flex' ? 12 : 4}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
+                      value={editContent ?? drawerData.messageContent}
+                      onChange={(e) => setEditContent(e.target.value)}
+                    />
+                  </div>
+                </details>
 
                 {(editContent !== null || editName !== null) && (
                   <div className="flex gap-2">
