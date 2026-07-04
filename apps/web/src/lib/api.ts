@@ -1230,6 +1230,64 @@ export const api = {
         createdAt: string
         updatedAt: string
       }>>>('/api/message-templates'),
+    create: (data: { name: string; messageType: 'text' | 'flex'; messageContent: string }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        messageType: string
+        messageContent: string
+        createdAt: string
+        updatedAt: string
+      }>>('/api/message-templates', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
+  forms: {
+    list: () =>
+      fetchApi<ApiResponse<Array<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+      }>>>('/api/forms'),
+    create: (data: {
+      name: string
+      description?: string | null
+      fields: unknown[]
+      onSubmitTagId?: string | null
+      onSubmitScenarioId?: string | null
+      onSubmitMessageType?: 'text' | 'flex' | null
+      onSubmitMessageContent?: string | null
+      saveToMetadata?: boolean
+    }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+      }>>('/api/forms', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
   entryRoutes: {
     list: () => fetchApi<ApiResponse<EntryRoute[]>>('/api/entry-routes'),

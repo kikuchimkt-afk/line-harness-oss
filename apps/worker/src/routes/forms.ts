@@ -20,6 +20,9 @@ import type {
 import type { Env } from '../index.js';
 
 const forms = new Hono<Env>();
+const FORM_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
+const FORM_NOTICE_MAX_ANSWERS = 8;
+const FORM_NOTICE_VALUE_MAX_LENGTH = 160;
 
 function serializeForm(
   row: DbForm,
@@ -56,6 +59,119 @@ function serializeSubmission(row: DbFormSubmission & { friend_name?: string | nu
     data: JSON.parse(row.data || '{}') as Record<string, unknown>,
     createdAt: row.created_at,
   };
+}
+
+type FormFieldForNotice = {
+  name: string;
+  label: string;
+};
+
+type FormNoticeRecipient = {
+  id: string;
+  line_user_id: string;
+};
+
+function formatNoticeValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-';
+  const text = Array.isArray(value)
+    ? value.join(', ')
+    : typeof value === 'object'
+      ? JSON.stringify(value)
+      : String(value);
+  return text.length > FORM_NOTICE_VALUE_MAX_LENGTH
+    ? `${text.slice(0, FORM_NOTICE_VALUE_MAX_LENGTH)}...`
+    : text;
+}
+
+async function notifyFormSubmissionRecipients(
+  db: D1Database,
+  defaultAccessToken: string,
+  params: {
+    formName: string;
+    formFields: FormFieldForNotice[];
+    friendId: string;
+    submissionData: Record<string, unknown>;
+  },
+): Promise<void> {
+  try {
+    const friend = await getFriendById(db, params.friendId);
+    if (!friend) return;
+    const lineAccountId = (friend as unknown as { line_account_id?: string | null }).line_account_id;
+    if (!lineAccountId) return;
+
+    const setting = await db
+      .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+      .bind(lineAccountId, FORM_NOTICE_RECIPIENTS_KEY)
+      .first<{ value: string | null }>();
+
+    let recipientIds: string[] = [];
+    if (setting?.value) {
+      try {
+        const parsed = JSON.parse(setting.value);
+        recipientIds = Array.isArray(parsed)
+          ? parsed
+              .filter((id): id is string => typeof id === 'string')
+              .map((id) => id.trim())
+              .filter((id) => id.length > 0 && id !== params.friendId)
+          : [];
+      } catch {
+        recipientIds = [];
+      }
+    }
+    recipientIds = [...new Set(recipientIds)];
+    if (recipientIds.length === 0) return;
+
+    const account = await db
+      .prepare(`SELECT name, channel_access_token FROM line_accounts WHERE id = ?`)
+      .bind(lineAccountId)
+      .first<{ name: string | null; channel_access_token: string | null }>();
+
+    const placeholders = recipientIds.map(() => '?').join(',');
+    const recipients = await db
+      .prepare(
+        `SELECT id, line_user_id
+         FROM friends
+         WHERE line_account_id = ?
+           AND is_following = 1
+           AND id IN (${placeholders})`,
+      )
+      .bind(lineAccountId, ...recipientIds)
+      .all<FormNoticeRecipient>();
+    if (recipients.results.length === 0) return;
+
+    const fieldLabelByName = new Map(params.formFields.map((field) => [field.name, field.label]));
+    const answerLines = Object.entries(params.submissionData)
+      .slice(0, FORM_NOTICE_MAX_ANSWERS)
+      .map(([key, value]) => {
+        const label = fieldLabelByName.get(key) || key;
+        return `・${label}: ${formatNoticeValue(value)}`;
+      });
+
+    const text = [
+      '📝 フォームが送信されました',
+      '',
+      `アカウント：${account?.name ?? 'LINE公式アカウント'}`,
+      `フォーム：${params.formName}`,
+      `回答者：${friend.display_name || '名前なし'}`,
+      '',
+      ...answerLines,
+      '',
+      'L Harnessのフォーム回答で確認してください。',
+    ].join('\n');
+
+    const { LineClient } = await import('@line-crm/line-sdk');
+    const lineClient = new LineClient(account?.channel_access_token || defaultAccessToken);
+
+    for (const recipient of recipients.results) {
+      try {
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[forms] submit notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[forms] submit notice failed', err);
+  }
 }
 
 // GET /api/forms — list all forms (with submission stats + delivering accounts)
@@ -415,6 +531,15 @@ forms.post('/api/forms/:id/submit', async (c) => {
       }
 
       const sideEffects: Promise<unknown>[] = [];
+
+      sideEffects.push(
+        notifyFormSubmissionRecipients(db, c.env.LINE_CHANNEL_ACCESS_TOKEN, {
+          formName: form.name,
+          formFields: fields,
+          friendId,
+          submissionData,
+        }),
+      );
 
       // Save response data to friend's metadata
       if (form.save_to_metadata) {
