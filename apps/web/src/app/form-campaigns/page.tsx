@@ -157,6 +157,57 @@ export default function FormCampaignsPage() {
     () => buildCouponMessage({ couponTitle, couponBody, couponUrl, couponNote }),
     [couponTitle, couponBody, couponUrl, couponNote],
   )
+  const normalizedFields = useMemo(() => normalizeFields(fields), [fields])
+  const invalidChoiceField = useMemo(
+    () =>
+      normalizedFields.find(
+        (field) => ['select', 'radio', 'checkbox'].includes(field.type) && (!field.options || field.options.length === 0),
+      ),
+    [normalizedFields],
+  )
+  const isBasicReady = Boolean(formName.trim() && routeName.trim() && refCode.trim())
+  const isQuestionReady = normalizedFields.length > 0 && !invalidChoiceField
+  const isCouponReady = Boolean(couponPreview.trim())
+  const isReadyToCreate = isBasicReady && isQuestionReady && isCouponReady
+  const guideSteps = [
+    {
+      number: 1,
+      title: '内容を決める',
+      description: 'フォーム名、流入元名、回答後タグを確認します。',
+      href: '#step-basic',
+      done: isBasicReady,
+    },
+    {
+      number: 2,
+      title: '質問を作る',
+      description: '質問文と回答形式を自由に設定します。',
+      href: '#step-questions',
+      done: isQuestionReady,
+    },
+    {
+      number: 3,
+      title: '特典を書く',
+      description: '回答後にLINEで送るクーポン文面を整えます。',
+      href: '#step-coupon',
+      done: isCouponReady,
+    },
+    {
+      number: 4,
+      title: 'URL・QRを配る',
+      description: '作成ボタンを押し、配布用URLとQRを使います。',
+      href: '#step-create',
+      done: Boolean(created),
+    },
+  ]
+  const activeGuideStep = created
+    ? 4
+    : !isBasicReady
+      ? 1
+      : !isQuestionReady
+        ? 2
+        : !isCouponReady
+          ? 3
+          : 4
 
   const setField = (id: string, patch: Partial<DraftField>) => {
     setFields((current) => current.map((field) => (field.id === id ? { ...field, ...patch } : field)))
@@ -214,7 +265,6 @@ export default function FormCampaignsPage() {
     setError('')
     setCreated(null)
 
-    const normalizedFields = normalizeFields(fields)
     if (!formName.trim()) {
       setError('フォーム名を入力してください。')
       return
@@ -223,11 +273,8 @@ export default function FormCampaignsPage() {
       setError('質問項目を1つ以上入力してください。')
       return
     }
-    const invalidChoice = normalizedFields.find(
-      (field) => ['select', 'radio', 'checkbox'].includes(field.type) && (!field.options || field.options.length === 0),
-    )
-    if (invalidChoice) {
-      setError(`「${invalidChoice.label}」の選択肢を入力してください。`)
+    if (invalidChoiceField) {
+      setError(`「${invalidChoiceField.label}」の選択肢を入力してください。`)
       return
     }
     if (!refCode.trim()) {
@@ -284,7 +331,7 @@ export default function FormCampaignsPage() {
     <div>
       <Header
         title="アンケート・クーポン"
-        description="回答後に特典メッセージを送るフォームを作成します。"
+        description="質問作成からURL・QR配布まで、順番に進められます。"
         action={
           <Link
             href="/form-submissions"
@@ -295,6 +342,49 @@ export default function FormCampaignsPage() {
         }
       />
 
+      <section className="glass-panel mb-5 rounded-lg p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-xs font-bold text-rose-700">はじめての方向け</p>
+            <h2 className="mt-1 text-lg font-bold text-gray-900">上から順番に進めるだけで完成します</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+              難しい設定は後回しで大丈夫です。まずは内容、質問、特典メッセージを確認し、最後にURLやQRコードを配布します。
+            </p>
+          </div>
+          <div className="rounded-lg border border-pink-100 bg-white/60 px-4 py-3 text-xs text-gray-600">
+            現在のステップ: <span className="font-bold text-rose-700">{activeGuideStep}</span> / 4
+          </div>
+        </div>
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {guideSteps.map((step) => {
+            const isActive = step.number === activeGuideStep
+            return (
+              <a
+                key={step.number}
+                href={step.href}
+                className={`rounded-lg border p-4 transition-colors ${
+                  step.done
+                    ? 'border-pink-200 bg-pink-50/70'
+                    : isActive
+                      ? 'border-rose-300 bg-white/75'
+                      : 'border-pink-100 bg-white/52'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${
+                    step.done ? 'bg-pink-200 text-rose-800' : 'bg-white text-rose-700 ring-1 ring-pink-200'
+                  }`}>
+                    {step.done ? '✓' : step.number}
+                  </span>
+                  <p className="text-sm font-bold text-gray-900">{step.title}</p>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-gray-500">{step.description}</p>
+              </a>
+            )
+          })}
+        </div>
+      </section>
+
       {error && (
         <div className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
@@ -302,7 +392,14 @@ export default function FormCampaignsPage() {
       )}
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(340px,0.75fr)]">
-        <section className="glass-panel rounded-lg p-5">
+        <section id="step-basic" className="glass-panel scroll-mt-6 rounded-lg p-5">
+          <div className="mb-5">
+            <p className="text-xs font-bold text-rose-700">Step 1</p>
+            <h2 className="mt-1 text-base font-semibold text-gray-900">内容を決める</h2>
+            <p className="mt-1 text-xs leading-5 text-gray-500">
+              ここは管理用の名前です。相手に見せる文章ではないので、あとから分かる名前にしておくと安心です。
+            </p>
+          </div>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <label className="block">
               <span className="mb-1 block text-xs font-semibold text-gray-600">フォーム名</span>
@@ -355,10 +452,18 @@ export default function FormCampaignsPage() {
             </label>
           </div>
 
-          <div className="mt-7 flex items-center justify-between gap-3">
+          <div id="step-questions" className="mt-7 flex scroll-mt-6 items-center justify-between gap-3">
             <div>
-              <h2 className="text-base font-semibold text-gray-900">質問項目</h2>
-              <p className="mt-1 text-xs text-gray-500">質問文、回答形式、必須/任意、選択肢を自由に設定できます。</p>
+              <p className="text-xs font-bold text-rose-700">Step 2</p>
+              <h2 className="mt-1 text-base font-semibold text-gray-900">質問を作る</h2>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                質問文、回答形式、必須/任意、選択肢を自由に設定できます。迷う場合は、最初は3問くらいで十分です。
+              </p>
+              {invalidChoiceField && (
+                <p className="mt-2 text-xs font-medium text-rose-700">
+                  「{invalidChoiceField.label}」は選択肢が未入力です。選択肢を1行に1つずつ入れてください。
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               <button
@@ -467,6 +572,7 @@ export default function FormCampaignsPage() {
                         className="min-h-20 w-full rounded-lg border px-3 py-2 text-sm outline-none"
                         placeholder={'中学1年生\n中学2年生\n中学3年生'}
                       />
+                      <span className="mt-1 block text-[11px] text-gray-500">1行につき1つの選択肢として保存されます。</span>
                     </label>
                   )}
                 </div>
@@ -476,8 +582,12 @@ export default function FormCampaignsPage() {
         </section>
 
         <aside className="space-y-5">
-          <section className="glass-panel rounded-lg p-5">
-            <h2 className="text-base font-semibold text-gray-900">回答後に送るクーポン</h2>
+          <section id="step-coupon" className="glass-panel scroll-mt-6 rounded-lg p-5">
+            <p className="text-xs font-bold text-rose-700">Step 3</p>
+            <h2 className="mt-1 text-base font-semibold text-gray-900">回答後に送る特典メッセージ</h2>
+            <p className="mt-1 text-xs leading-5 text-gray-500">
+              アンケート送信後、相手のLINEへ自動で届く文面です。クーポンURLがなければ、教室で見せてもらう案内として使えます。
+            </p>
             <div className="mt-4 space-y-3">
               <label className="block">
                 <span className="mb-1 block text-xs font-semibold text-gray-600">特典名</span>
@@ -519,25 +629,55 @@ export default function FormCampaignsPage() {
             </div>
           </section>
 
-          <section className="glass-panel rounded-lg p-5">
+          <section id="step-create" className="glass-panel scroll-mt-6 rounded-lg p-5">
+            <p className="text-xs font-bold text-rose-700">Step 4</p>
+            <h2 className="mt-1 text-base font-semibold text-gray-900">作成して配布する</h2>
+            <div className="mt-4 space-y-2 rounded-lg border border-pink-100 bg-white/58 p-3 text-xs">
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${isBasicReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
+                <span className={isBasicReady ? 'text-gray-700' : 'text-gray-500'}>フォーム名・流入元コードが入っている</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${isQuestionReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
+                <span className={isQuestionReady ? 'text-gray-700' : 'text-gray-500'}>質問が1つ以上あり、選択肢も設定済み</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${isCouponReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
+                <span className={isCouponReady ? 'text-gray-700' : 'text-gray-500'}>回答後に送る特典メッセージがある</span>
+              </div>
+            </div>
             <button
               type="button"
               onClick={handleCreate}
-              disabled={loading}
-              className="lh-gradient-button w-full rounded-lg px-4 py-3 text-sm font-bold disabled:opacity-50"
+              disabled={loading || !isReadyToCreate}
+              className="lh-gradient-button mt-4 w-full rounded-lg px-4 py-3 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? '作成中...' : 'アンケートとクーポンを作成'}
+              {loading ? '作成中...' : isReadyToCreate ? 'アンケートとクーポンを作成' : '未入力を確認してください'}
             </button>
             {selectedAccount && (
               <p className="mt-3 text-xs text-gray-500">
                 現在の対象: {selectedAccount.displayName || selectedAccount.name}
               </p>
             )}
+            <p className="mt-3 text-xs leading-5 text-gray-500">
+              作成すると、配布用URL・QRコード・LINEに貼る文面が下に表示されます。
+            </p>
           </section>
 
           {created && (
             <section className="glass-panel rounded-lg p-5">
               <h2 className="text-base font-semibold text-gray-900">作成できました</h2>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                下のURLかQRコードを使えば、友だち追加後にアンケートへ進めます。回答後は特典メッセージが自動で届きます。
+              </p>
+              <div className="mt-4 rounded-lg border border-pink-100 bg-pink-50/60 p-3">
+                <p className="text-xs font-bold text-rose-700">次にやること</p>
+                <ol className="mt-2 space-y-1 text-xs leading-5 text-gray-600">
+                  <li>1. 「文面をコピー」を押してLINE配信や個別チャットに貼る</li>
+                  <li>2. チラシや掲示物に使う場合はQRコードを保存して使う</li>
+                  <li>3. 回答が届いたら「回答一覧」で内容を確認する</li>
+                </ol>
+              </div>
               <div className="mt-4 space-y-4">
                 <div>
                   <p className="text-xs font-semibold text-gray-500">配信用URL</p>
@@ -581,6 +721,17 @@ export default function FormCampaignsPage() {
                 >
                   回答一覧へ
                 </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreated(null)
+                    setRefCode(buildRefCode())
+                    window.location.hash = 'step-basic'
+                  }}
+                  className="ml-2 inline-flex rounded-lg bg-white/70 px-3 py-2 text-xs font-medium text-gray-600 ring-1 ring-pink-100 hover:bg-pink-50"
+                >
+                  別のアンケートを作る
+                </button>
               </div>
             </section>
           )}
