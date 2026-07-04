@@ -35,6 +35,11 @@ const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
 const INCOMING_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
 const NOTICE_PREVIEW_MAX_LENGTH = 500;
 
+type NoticeRecipient = {
+  id: string;
+  line_user_id: string;
+};
+
 function truncateNoticeText(text: string): string {
   if (text.length <= NOTICE_PREVIEW_MAX_LENGTH) return text;
   return `${text.slice(0, NOTICE_PREVIEW_MAX_LENGTH)}...`;
@@ -51,6 +56,59 @@ function incomingMessagePreview(messageType: string, content: string): string {
   return truncateNoticeText(content || `[${messageType}]`);
 }
 
+async function getNoticeRecipients(
+  db: D1Database,
+  lineAccountId: string,
+  excludeFriendId?: string,
+): Promise<{ accountName: string; recipients: NoticeRecipient[] }> {
+  const setting = await db
+    .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+    .bind(lineAccountId, INCOMING_NOTICE_RECIPIENTS_KEY)
+    .first<{ value: string }>();
+
+  let recipientIds: string[] = [];
+  if (setting?.value) {
+    try {
+      const parsed = JSON.parse(setting.value);
+      recipientIds = Array.isArray(parsed)
+        ? parsed
+            .filter((id): id is string => typeof id === 'string')
+            .map((id) => id.trim())
+            .filter((id) => id.length > 0 && id !== excludeFriendId)
+        : [];
+    } catch {
+      recipientIds = [];
+    }
+  }
+  recipientIds = [...new Set(recipientIds)];
+
+  const account = await db
+    .prepare(`SELECT name FROM line_accounts WHERE id = ?`)
+    .bind(lineAccountId)
+    .first<{ name: string | null }>();
+
+  if (recipientIds.length === 0) {
+    return { accountName: account?.name ?? 'LINE公式アカウント', recipients: [] };
+  }
+
+  const placeholders = recipientIds.map(() => '?').join(',');
+  const recipients = await db
+    .prepare(
+      `SELECT id, line_user_id
+       FROM friends
+       WHERE line_account_id = ?
+         AND is_following = 1
+         AND id IN (${placeholders})`,
+    )
+    .bind(lineAccountId, ...recipientIds)
+    .all<NoticeRecipient>();
+
+  return {
+    accountName: account?.name ?? 'LINE公式アカウント',
+    recipients: recipients.results,
+  };
+}
+
 async function notifyIncomingMessageRecipients(
   db: D1Database,
   lineClient: LineClient,
@@ -65,54 +123,20 @@ async function notifyIncomingMessageRecipients(
   if (!params.lineAccountId) return;
 
   try {
-    const setting = await db
-      .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
-      .bind(params.lineAccountId, INCOMING_NOTICE_RECIPIENTS_KEY)
-      .first<{ value: string }>();
-    if (!setting?.value) return;
-
-    let recipientIds: string[] = [];
-    try {
-      const parsed = JSON.parse(setting.value);
-      recipientIds = Array.isArray(parsed)
-        ? parsed.filter((id): id is string => typeof id === 'string' && id !== params.senderFriendId)
-        : [];
-    } catch {
-      recipientIds = [];
-    }
-    recipientIds = [...new Set(recipientIds)];
-    if (recipientIds.length === 0) return;
-
-    const account = await db
-      .prepare(`SELECT name FROM line_accounts WHERE id = ?`)
-      .bind(params.lineAccountId)
-      .first<{ name: string | null }>();
-
-    const placeholders = recipientIds.map(() => '?').join(',');
-    const recipients = await db
-      .prepare(
-        `SELECT id, line_user_id
-         FROM friends
-         WHERE line_account_id = ?
-           AND is_following = 1
-           AND id IN (${placeholders})`,
-      )
-      .bind(params.lineAccountId, ...recipientIds)
-      .all<{ id: string; line_user_id: string }>();
-
-    if (recipients.results.length === 0) return;
+    const { accountName, recipients } = await getNoticeRecipients(db, params.lineAccountId, params.senderFriendId);
+    if (recipients.length === 0) return;
 
     const text = [
       '📩 新しいメッセージが届きました',
       '',
-      `アカウント：${account?.name ?? 'LINE公式アカウント'}`,
+      `アカウント：${accountName}`,
       `送信者：${params.senderName || '名前なし'}`,
       `内容：${incomingMessagePreview(params.messageType, params.content)}`,
       '',
       'L Harnessの個別チャットで確認してください。',
     ].join('\n');
 
-    for (const recipient of recipients.results) {
+    for (const recipient of recipients) {
       try {
         await lineClient.pushTextMessage(recipient.line_user_id, text);
       } catch (err) {
@@ -121,6 +145,52 @@ async function notifyIncomingMessageRecipients(
     }
   } catch (err) {
     console.error('[webhook] incoming notice failed', err);
+  }
+}
+
+async function notifyFriendAddRecipients(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    lineAccountId: string | null;
+    friendId: string;
+    friendName: string | null;
+    referralRouteName?: string | null;
+    refCode?: string | null;
+  },
+): Promise<void> {
+  if (!params.lineAccountId) return;
+
+  try {
+    const { accountName, recipients } = await getNoticeRecipients(db, params.lineAccountId, params.friendId);
+    if (recipients.length === 0) return;
+
+    const routeLine = params.referralRouteName
+      ? `流入元：${params.referralRouteName}`
+      : params.refCode
+        ? `流入元コード：${params.refCode}`
+        : null;
+    const lines = [
+      '👤 新しい友だちが追加されました',
+      '',
+      `アカウント：${accountName}`,
+      `友だち：${params.friendName || '名前なし'}`,
+      routeLine,
+      `登録日時：${jstNow().replace('T', ' ').slice(0, 16)}`,
+      '',
+      'L Harnessの友だち管理で確認してください。',
+    ].filter((line): line is string => line !== null);
+    const text = lines.join('\n');
+
+    for (const recipient of recipients) {
+      try {
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[webhook] friend-add notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] friend-add notice failed', err);
   }
 }
 
@@ -276,6 +346,9 @@ async function handleEvent(
 
     console.log(`[follow] userId=${userId} lineAccountId=${lineAccountId}`);
 
+    const existingBeforeFollow = await getFriendByLineUserId(db, userId, lineAccountId);
+    const shouldNotifyFriendAdd = !existingBeforeFollow || existingBeforeFollow.is_following !== 1;
+
     // プロフィール取得 & 友だち登録/更新
     let profile;
     try {
@@ -320,6 +393,16 @@ async function handleEvent(
       : null;
     const runAccountScenarios =
       !referralRoute || referralRoute.run_account_friend_add_scenarios !== 0;
+
+    if (shouldNotifyFriendAdd) {
+      await notifyFriendAddRecipients(db, lineClient, {
+        lineAccountId,
+        friendId: friend.id,
+        friendName: friend.display_name,
+        referralRouteName: referralRoute?.name ?? null,
+        refCode: friendRefCode,
+      });
+    }
 
     // friend_add シナリオに登録（このアカウントのシナリオのみ）
     // Skip entirely when a referral link explicitly overrides (run_account_friend_add_scenarios=0).

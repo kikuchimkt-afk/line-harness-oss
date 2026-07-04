@@ -93,9 +93,9 @@ export default function NoticeRecipientsSetting({ accountId }: NoticeRecipientsS
   return (
     <div className="mt-3 pt-3 border-t border-pink-100">
       <div className="mb-2">
-        <h4 className="text-xs font-semibold text-gray-700">受信通知先</h4>
+        <h4 className="text-xs font-semibold text-gray-700">管理者LINE通知先</h4>
         <p className="text-[11px] text-gray-500 mt-1">
-          友だちからメッセージが届いたとき、ここで選んだ管理者へLINEで知らせます。
+          新しい友だち追加やメッセージ受信があったとき、ここで選んだ管理者へLINEで知らせます。
         </p>
       </div>
 

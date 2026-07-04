@@ -5,6 +5,7 @@ const lineClientMocks = vi.hoisted(() => ({
   getProfile: vi.fn(),
   replyMessage: vi.fn(),
   pushMessage: vi.fn(),
+  pushTextMessage: vi.fn(),
 }));
 
 // Stub the DB graph — these tests focus on webhook guard behavior and the
@@ -13,6 +14,7 @@ vi.mock('@line-crm/db', () => ({
   upsertFriend: vi.fn(),
   updateFriendFollowStatus: vi.fn(),
   getFriendByLineUserId: vi.fn(),
+  getFriendById: vi.fn(),
   getScenarios: vi.fn(),
   enrollFriendInScenario: vi.fn(),
   getScenarioSteps: vi.fn(),
@@ -54,6 +56,7 @@ import {
   computeNextDeliveryAt,
   enrollFriendInScenario,
   getEntryRouteByRefCode,
+  getFriendById,
   getFriendByLineUserId,
   getLineAccounts,
   getMessageTemplateById,
@@ -184,6 +187,147 @@ describe('POST /webhook — DoS defenses (#104)', () => {
 });
 
 describe('POST /webhook — first-contact existing friends', () => {
+  test('sends a LINE notice to configured recipients on new follow', async () => {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'acc-1',
+        channel_id: '201',
+        name: '講師公式',
+        channel_access_token: 'account-token',
+        channel_secret: 'env-default-secret',
+        is_active: 1,
+        country: null,
+        role: null,
+        display_order: 0,
+        created_at: '2026-07-04T09:00:00.000+09:00',
+        updated_at: '2026-07-04T09:00:00.000+09:00',
+        login_channel_id: null,
+        login_channel_secret: null,
+        liff_id: null,
+        token_expires_at: null,
+        og_site_name: null,
+        og_default_image_url: null,
+        og_default_description: null,
+      },
+    ]);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
+    vi.mocked(jstNow).mockReturnValue('2026-07-04T10:20:00.000+09:00');
+    lineClientMocks.getProfile.mockResolvedValue({
+      userId: 'U-new',
+      displayName: '新規さん',
+      pictureUrl: 'https://example.com/new.jpg',
+      statusMessage: null,
+    });
+    vi.mocked(upsertFriend).mockResolvedValue({
+      id: 'friend-new',
+      line_user_id: 'U-new',
+      display_name: '新規さん',
+      picture_url: 'https://example.com/new.jpg',
+      status_message: null,
+      is_following: 1,
+      user_id: null,
+      line_account_id: 'acc-1',
+      metadata: '{}',
+      first_tracked_link_id: null,
+      created_at: '2026-07-04T10:20:00.000+09:00',
+      updated_at: '2026-07-04T10:20:00.000+09:00',
+      ref_code: 'qr-demo',
+    } as any);
+    vi.mocked(getFriendById).mockResolvedValue(null);
+    vi.mocked(getEntryRouteByRefCode).mockResolvedValue({
+      id: 'route-1',
+      ref_code: 'qr-demo',
+      name: '体験レッスンQR',
+      description: null,
+      pool_id: null,
+      intro_template_id: null,
+      run_account_friend_add_scenarios: 1,
+      scenario_id: null,
+      is_active: 1,
+      created_at: '2026-07-04T09:00:00.000+09:00',
+      updated_at: '2026-07-04T09:00:00.000+09:00',
+    } as any);
+    vi.mocked(getScenarios).mockResolvedValue([]);
+
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const stmt = {
+          bind: vi.fn(() => stmt),
+          first: vi.fn(async () => {
+            if (sql.includes('account_settings')) {
+              return { value: JSON.stringify(['admin-friend']) };
+            }
+            if (sql.includes('line_accounts')) {
+              return { name: '講師公式' };
+            }
+            return null;
+          }),
+          all: vi.fn(async () => {
+            if (sql.includes('FROM friends') && sql.includes('id IN')) {
+              return { results: [{ id: 'admin-friend', line_user_id: 'U-admin' }] };
+            }
+            return { results: [] };
+          }),
+          run: vi.fn().mockResolvedValue({}),
+        };
+        return stmt;
+      }),
+    } as unknown as D1Database;
+
+    const executionCtx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const app = setupApp();
+    const validShapedSignature = 'A'.repeat(43) + '=';
+    const res = await app.request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Line-Signature': validShapedSignature,
+        },
+        body: JSON.stringify({
+          destination: 'bot',
+          events: [
+            {
+              type: 'follow',
+              replyToken: 'reply-token',
+              timestamp: Date.now(),
+              source: { type: 'user', userId: 'U-new' },
+              webhookEventId: 'event-follow-1',
+              deliveryContext: { isRedelivery: false },
+              mode: 'active',
+            },
+          ],
+        }),
+      },
+      { ...baseEnv, DB: db },
+      executionCtx,
+    );
+
+    expect(res.status).toBe(200);
+    const processing = vi.mocked(executionCtx.waitUntil).mock.calls[0]?.[0] as Promise<unknown>;
+    await processing;
+
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('新しい友だちが追加されました'),
+    );
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('友だち：新規さん'),
+    );
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('流入元：体験レッスンQR'),
+    );
+  });
+
   test('auto-registers an unknown text-message sender without firing friend_add handling', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
