@@ -591,20 +591,22 @@ async function handleEvent(
             response_content: rule.response_content,
           });
           const expandedContent = expandVariables(resolved.content, { ...friend, metadata: resolvedMeta } as Parameters<typeof expandVariables>[1], workerUrl);
-          const replyMsg = buildMessage(resolved.messageType, expandedContent);
-          await lineClient.replyMessage(event.replyToken, [replyMsg]);
+          const replyMessages = buildAutoReplyMessages(resolved.messageType, expandedContent);
+          await lineClient.replyMessage(event.replyToken, replyMessages);
 
           // 送信ログ — Rich Menu 経由の Flex 応答もチャット詳細に残るようにする。
           // テキスト auto_reply (line ~390) と同じパターン。
           const { messageToLogPayload: logPayload } = await import('../services/step-delivery.js');
-          const replyPayload = logPayload(replyMsg);
-          await db
-            .prepare(
-              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
-               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
-            )
-            .bind(crypto.randomUUID(), friend.id, replyPayload.messageType, replyPayload.content, lineAccountId ?? null, jstNow())
-            .run();
+          for (const replyMsg of replyMessages) {
+            const replyPayload = logPayload(replyMsg);
+            await db
+              .prepare(
+                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+                 VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
+              )
+              .bind(crypto.randomUUID(), friend.id, replyPayload.messageType, replyPayload.content, lineAccountId ?? null, jstNow())
+              .run();
+          }
         } catch (err) {
           console.error('Failed to send postback reply', err);
         }
@@ -812,23 +814,25 @@ async function handleEvent(
             response_content: rule.response_content,
           });
           const expandedContent = expandVariables(resolved.content, { ...friend, metadata: resolvedMeta2 } as Parameters<typeof expandVariables>[1], workerUrl);
-          const replyMsg = buildMessage(resolved.messageType, expandedContent);
-          await lineClient.replyMessage(event.replyToken, [replyMsg]);
+          const replyMessages = buildAutoReplyMessages(resolved.messageType, expandedContent);
+          await lineClient.replyMessage(event.replyToken, replyMessages);
           replyTokenConsumed = true;
 
           // 送信ログ（replyMessage = 無料）— derive content from the built
           // reply message so any cleanEmptyNodes / parse-failure fallback is
           // reflected in the dashboard.
-          const outLogId = crypto.randomUUID();
           const { messageToLogPayload: logPayload2 } = await import('../services/step-delivery.js');
-          const wbAutoReplyPayload = logPayload2(replyMsg);
-          await db
-            .prepare(
-              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
-               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
-            )
-            .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, lineAccountId ?? null, jstNow())
-            .run();
+          for (const replyMsg of replyMessages) {
+            const outLogId = crypto.randomUUID();
+            const wbAutoReplyPayload = logPayload2(replyMsg);
+            await db
+              .prepare(
+                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+                 VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
+              )
+              .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, lineAccountId ?? null, jstNow())
+              .run();
+          }
         } catch (err) {
           console.error('Failed to send auto-reply', err);
         }
@@ -871,6 +875,44 @@ async function resolveAutoReplyContent(
     }
   }
   return { messageType: rule.response_type, content: rule.response_content };
+}
+
+function buildAutoReplyMessages(
+  messageType: string,
+  messageContent: string,
+): ReturnType<typeof buildMessage>[] {
+  if (messageType !== 'text_image') {
+    return [buildMessage(messageType, messageContent)];
+  }
+
+  try {
+    const parsed = JSON.parse(messageContent) as {
+      text?: unknown;
+      image?: {
+        originalContentUrl?: unknown;
+        previewImageUrl?: unknown;
+      } | null;
+    };
+    const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+    const originalContentUrl = typeof parsed.image?.originalContentUrl === 'string'
+      ? parsed.image.originalContentUrl
+      : '';
+    const previewImageUrl = typeof parsed.image?.previewImageUrl === 'string'
+      ? parsed.image.previewImageUrl
+      : originalContentUrl;
+    const messages: ReturnType<typeof buildMessage>[] = [];
+
+    if (text) {
+      messages.push(buildMessage('text', text));
+    }
+    if (originalContentUrl) {
+      messages.push(buildMessage('image', JSON.stringify({ originalContentUrl, previewImageUrl })));
+    }
+
+    return messages.length > 0 ? messages : [buildMessage('text', messageContent)];
+  } catch {
+    return [buildMessage('text', messageContent)];
+  }
 }
 
 export { webhook };

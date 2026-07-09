@@ -22,13 +22,48 @@ interface Props {
   onSaved: () => void
 }
 
-type ResponseMode = 'silent' | 'template' | 'inline-text' | 'inline-flex' | 'inline-image'
+type ResponseMode = 'silent' | 'template' | 'inline-text' | 'inline-flex' | 'inline-image' | 'inline-text-image'
+
+type TextImageContent = {
+  text: string
+  image: {
+    originalContentUrl: string
+    previewImageUrl: string
+  } | null
+}
+
+function parseTextImageContent(content: string): TextImageContent {
+  try {
+    const parsed = JSON.parse(content) as {
+      text?: unknown
+      image?: {
+        originalContentUrl?: unknown
+        previewImageUrl?: unknown
+      } | null
+    }
+    const originalContentUrl = typeof parsed.image?.originalContentUrl === 'string'
+      ? parsed.image.originalContentUrl
+      : ''
+    const previewImageUrl = typeof parsed.image?.previewImageUrl === 'string'
+      ? parsed.image.previewImageUrl
+      : originalContentUrl
+    return {
+      text: typeof parsed.text === 'string' ? parsed.text : '',
+      image: originalContentUrl
+        ? { originalContentUrl, previewImageUrl }
+        : null,
+    }
+  } catch {
+    return { text: '', image: null }
+  }
+}
 
 function detectMode(d: AutoReplyDraft): ResponseMode {
   if (d.responseType === 'silent') return 'silent'
   if (d.templateId) return 'template'
   if (d.responseType === 'flex') return 'inline-flex'
   if (d.responseType === 'image') return 'inline-image'
+  if (d.responseType === 'text_image') return 'inline-text-image'
   return 'inline-text'
 }
 
@@ -38,6 +73,9 @@ export default function EditDialog({ draft, templates, onClose, onSaved }: Props
   const [mode, setMode] = useState<ResponseMode>(detectMode(draft))
   const [templateId, setTemplateId] = useState<string | null>(draft.templateId)
   const [responseContent, setResponseContent] = useState(draft.responseContent)
+  const initialTextImage = parseTextImageContent(draft.responseType === 'text_image' ? draft.responseContent : '')
+  const [textImageText, setTextImageText] = useState(initialTextImage.text)
+  const [textImageImage, setTextImageImage] = useState<TextImageContent['image']>(initialTextImage.image)
   const [isActive, setIsActive] = useState(draft.isActive)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -52,9 +90,17 @@ export default function EditDialog({ draft, templates, onClose, onSaved }: Props
     if ((mode === 'inline-text' || mode === 'inline-flex' || mode === 'inline-image') && !responseContent.trim()) {
       setError('内容を入力してください'); return
     }
+    if (mode === 'inline-text-image') {
+      if (!textImageText.trim()) { setError('一緒に送るテキストを入力してください'); return }
+      if (!textImageImage) { setError('一緒に送る画像を選んでください'); return }
+    }
     setError('')
     setSaving(true)
     try {
+      const combinedContent = JSON.stringify({
+        text: textImageText,
+        image: textImageImage,
+      })
       const body: {
         keyword: string;
         matchType: 'exact' | 'contains';
@@ -70,11 +116,12 @@ export default function EditDialog({ draft, templates, onClose, onSaved }: Props
           mode === 'silent' ? 'silent'
           : mode === 'inline-flex' ? 'flex'
           : mode === 'inline-image' ? 'image'
+          : mode === 'inline-text-image' ? 'text_image'
           : mode === 'template' ? 'text' /* placeholder, override below if template found */
           : 'text',
         // template mode でも response_content / response_type を残す。template が
         // 削除された (ON DELETE SET NULL) ときの inline fallback として機能する。
-        responseContent: mode === 'silent' ? '' : responseContent,
+        responseContent: mode === 'silent' ? '' : mode === 'inline-text-image' ? combinedContent : responseContent,
         templateId: mode === 'template' ? templateId : null,
         lineAccountId: draft.lineAccountId,
         isActive,
@@ -140,6 +187,7 @@ export default function EditDialog({ draft, templates, onClose, onSaved }: Props
                 { key: 'silent', label: 'silent (返信なし)' },
                 { key: 'template', label: 'テンプレートから' },
                 { key: 'inline-text', label: 'テキスト直書き' },
+                { key: 'inline-text-image', label: 'テキスト＋画像' },
                 { key: 'inline-flex', label: 'Flex JSON 直書き' },
                 { key: 'inline-image', label: '画像 (image JSON)' },
               ] as const).map(({ key, label }) => (
@@ -202,6 +250,42 @@ export default function EditDialog({ draft, templates, onClose, onSaved }: Props
                 value={responseContent}
                 onChange={(e) => setResponseContent(e.target.value)}
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
+              />
+            </div>
+          )}
+          {mode === 'inline-text-image' && (
+            <div className="space-y-4 rounded-lg border border-pink-100 bg-white/60 p-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">一緒に送るテキスト</label>
+                <textarea
+                  rows={4}
+                  value={textImageText}
+                  onChange={(e) => setTextImageText(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
+                  placeholder="例：ご案内資料をお送りします。画像をご確認ください。"
+                />
+                <p className="mt-1 text-[11px] text-gray-500">LINEでは、テキストの後に画像を続けて送ります。</p>
+              </div>
+              <ImageUploader
+                mode="line-image"
+                value={textImageImage
+                  ? {
+                      mode: 'line-image',
+                      originalContentUrl: textImageImage.originalContentUrl,
+                      previewImageUrl: textImageImage.previewImageUrl,
+                    }
+                  : null}
+                onChange={(v) => {
+                  if (v?.mode === 'line-image') {
+                    setTextImageImage({
+                      originalContentUrl: v.originalContentUrl,
+                      previewImageUrl: v.previewImageUrl,
+                    })
+                  } else {
+                    setTextImageImage(null)
+                  }
+                }}
+                label="一緒に送る画像"
               />
             </div>
           )}
