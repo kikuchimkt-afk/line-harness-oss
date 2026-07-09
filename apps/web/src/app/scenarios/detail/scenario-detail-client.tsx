@@ -69,6 +69,17 @@ function formatScheduleLabel(mode: DeliveryMode | undefined, step: ScenarioStep)
   return `購読開始から${step.offsetDays ?? 0}日後の ${step.deliveryTime ?? '00:00'}`
 }
 
+function relativeBaseMinutesForStep(
+  steps: ScenarioStep[],
+  stepOrder: number,
+  editingStepId: string | null,
+): number {
+  return steps
+    .filter((step) => step.id !== editingStepId && step.stepOrder < stepOrder)
+    .sort((a, b) => a.stepOrder - b.stepOrder)
+    .reduce((total, step) => total + step.delayMinutes, 0)
+}
+
 interface StepFormState {
   stepOrder: number
   schedule: ScheduleValue
@@ -409,6 +420,11 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
 
   const sortedSteps = [...scenario.steps].sort((a, b) => a.stepOrder - b.stepOrder)
   const modeBadge = modeBadgeStyle[deliveryMode]
+  const relativeBaseMinutes = relativeBaseMinutesForStep(
+    sortedSteps,
+    stepForm.stepOrder,
+    editingStepId,
+  )
 
   return (
     <div>
@@ -595,6 +611,7 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
                 mode={deliveryMode}
                 value={stepForm.schedule}
                 onChange={(schedule) => setStepForm({ ...stepForm, schedule })}
+                relativeBaseMinutes={relativeBaseMinutes}
               />
 
               {/* 入力モード切替: 直接入力 / テンプレート参照 */}

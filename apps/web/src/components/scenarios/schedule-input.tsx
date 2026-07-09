@@ -35,6 +35,7 @@ interface Props {
   mode: DeliveryMode
   value: ScheduleValue
   onChange: (next: ScheduleValue) => void
+  relativeBaseMinutes?: number
 }
 
 const inputCls =
@@ -92,10 +93,36 @@ function currentDateTimeLabel(): string {
   return `${date} ${time}`
 }
 
-export default function ScheduleInput({ mode, value, onChange }: Props) {
+function dateTimeFromMinutesAfterNow(minutes: number): Date {
+  const date = new Date()
+  date.setSeconds(0, 0)
+  date.setMinutes(date.getMinutes() + Math.max(0, minutes))
+  return date
+}
+
+function timeInputValue(date: Date): string {
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+function minutesBetween(base: Date, target: Date): number {
+  return Math.max(0, Math.round((target.getTime() - base.getTime()) / 60_000))
+}
+
+export default function ScheduleInput({ mode, value, onChange, relativeBaseMinutes = 0 }: Props) {
   if (mode === 'relative') {
+    const baseDate = dateTimeFromMinutesAfterNow(relativeBaseMinutes)
+    const targetDate = dateTimeFromMinutesAfterNow(relativeBaseMinutes + value.delayMinutes)
+    const targetDateValue = localDateInputValue(targetDate)
+    const targetTimeValue = timeInputValue(targetDate)
+    const updateFromDateTime = (dateValue: string, timeValue: string) => {
+      if (!dateValue || !timeValue) return
+      const target = new Date(`${dateValue}T${timeValue}:00`)
+      if (Number.isNaN(target.getTime())) return
+      onChange({ ...value, delayMinutes: minutesBetween(baseDate, target) })
+    }
+
     return (
-      <div>
+      <div className="space-y-3">
         <label className="block text-xs font-medium text-gray-600 mb-1">遅延 (分)</label>
         <input
           type="number"
@@ -105,9 +132,35 @@ export default function ScheduleInput({ mode, value, onChange }: Props) {
           onChange={(e) => onChange({ ...value, delayMinutes: Math.max(0, Number(e.target.value) || 0) })}
         />
         <p className="text-xs text-gray-400 mt-0.5">前のステップから</p>
-        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-          カレンダーで「何日後の何時何分」を指定したい場合は、新規シナリオ作成時に「何日後の何時何分に配信」を選んでください。
-        </p>
+
+        <div className="rounded-lg border border-pink-100 bg-white/70 p-3">
+          <label className="block text-xs font-medium text-gray-700 mb-2">
+            カレンダーで日時指定
+          </label>
+          <div className="flex items-center gap-3 flex-wrap">
+            <input
+              type="date"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              value={targetDateValue}
+              onChange={(e) => updateFromDateTime(e.target.value, targetTimeValue)}
+            />
+            <input
+              type="time"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              value={targetTimeValue}
+              onChange={(e) => updateFromDateTime(targetDateValue, e.target.value)}
+            />
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            現在時刻 {currentDateTimeLabel()}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-gray-500">
+            保存時は「前のステップから {value.delayMinutes} 分後」に自動換算します。
+            {relativeBaseMinutes > 0
+              ? ` 前のステップまでの目安は、開始から ${relativeBaseMinutes} 分後です。`
+              : ' 前のステップが即時の場合、この日時がそのまま目安になります。'}
+          </p>
+        </div>
       </div>
     )
   }
