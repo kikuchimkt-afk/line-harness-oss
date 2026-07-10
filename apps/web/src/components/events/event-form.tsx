@@ -50,6 +50,14 @@ function formatJpDateTime(iso: string): string {
   })
 }
 
+function isoToJstDate(iso: string): string {
+  return new Date(new Date(iso).getTime() + 9 * 3600_000).toISOString().slice(0, 10)
+}
+
+function isoToJstHHMM(iso: string): string {
+  return new Date(new Date(iso).getTime() + 9 * 3600_000).toISOString().slice(11, 16)
+}
+
 function parseEventFormFields(raw: EventDetail['booking_form_fields']): EventBookingFormField[] {
   if (Array.isArray(raw)) return raw
   if (typeof raw !== 'string' || !raw.trim()) return []
@@ -880,6 +888,16 @@ function SlotsTab({
   const [err, setErr] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [showBulk, setShowBulk] = useState(false)
+  const [showBulkEdit, setShowBulkEdit] = useState(false)
+  const [selectedSlotIds, setSelectedSlotIds] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    setSelectedSlotIds((prev) => {
+      const liveIds = new Set(slots.map((s) => s.id))
+      const next = new Set([...prev].filter((id) => liveIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [slots])
 
   if (!eventId) {
     return (
@@ -910,6 +928,56 @@ function SlotsTab({
     }
   }
 
+  function toggleSlotSelected(slotId: string) {
+    setSelectedSlotIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(slotId)) next.delete(slotId)
+      else next.add(slotId)
+      return next
+    })
+  }
+
+  function toggleAllSelected() {
+    setSelectedSlotIds((prev) => (
+      prev.size === slots.length ? new Set() : new Set(slots.map((s) => s.id))
+    ))
+  }
+
+  async function deleteSlots(targetSlots: EventSlot[], label: string) {
+    if (!eventId || targetSlots.length === 0) return
+    const deletable = targetSlots.filter((s) => (s.active_count ?? 0) === 0)
+    const skipped = targetSlots.length - deletable.length
+    if (deletable.length === 0) {
+      alert('予約が入っている枠は削除できません。予約数が0の枠だけ削除できます。')
+      return
+    }
+    const message =
+      skipped > 0
+        ? `${label} ${targetSlots.length}件のうち、予約が入っていない ${deletable.length}件を削除します。\n予約が入っている ${skipped}件は残します。よろしいですか？`
+        : `${label} ${deletable.length}件を削除します。よろしいですか？`
+    if (!confirm(message)) return
+
+    setBusy(true)
+    setErr(null)
+    let failed = 0
+    try {
+      for (const slot of deletable) {
+        try {
+          await eventsApi.deleteSlot(accountId, eventId, slot.id)
+        } catch {
+          failed += 1
+        }
+      }
+      await refresh()
+      setSelectedSlotIds(new Set())
+      if (failed > 0) setErr(`${failed}件の削除に失敗しました。予約が入っていないか確認してください。`)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function toggleActive(s: EventSlot) {
     if (!eventId) return
     setBusy(true)
@@ -920,6 +988,47 @@ function SlotsTab({
       setBusy(false)
     }
   }
+
+  async function bulkUpdateSlots(input: SlotBulkEditInput) {
+    if (!eventId) return
+    const targets = slots.filter((s) => selectedSlotIds.has(s.id))
+    if (targets.length === 0) return
+    if (!input.changeTime && !input.changeCapacity && !input.changeActive) {
+      alert('変更する項目を1つ以上選んでください。')
+      return
+    }
+
+    const bookedCount = targets.filter((s) => (s.active_count ?? 0) > 0).length
+    if (bookedCount > 0 && !confirm(`選択した枠のうち ${bookedCount}件には予約があります。\n時刻や定員を変更すると、既存予約にも影響します。続けますか？`)) {
+      return
+    }
+
+    setBusy(true)
+    setErr(null)
+    try {
+      for (const slot of targets) {
+        const body: Partial<EventSlot> = {}
+        if (input.changeTime) {
+          const date = isoToJstDate(slot.starts_at)
+          body.starts_at = jstHHMMToUtcIso(date, input.startTime)
+          body.ends_at = jstHHMMToUtcIso(date, input.endTime)
+        }
+        if (input.changeCapacity) body.capacity = input.capacity
+        if (input.changeActive) body.is_active = input.isActive
+        await eventsApi.updateSlot(accountId, eventId, slot.id, body)
+      }
+      await refresh()
+      setSelectedSlotIds(new Set())
+      setShowBulkEdit(false)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const selectedSlots = slots.filter((s) => selectedSlotIds.has(s.id))
+  const allSelected = slots.length > 0 && selectedSlotIds.size === slots.length
 
   return (
     <div>
@@ -946,10 +1055,59 @@ function SlotsTab({
           予約枠がありません。「＋ 枠を追加」または「📅 一括追加」から作成してください。
         </div>
       ) : (
+        <>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-pink-100 bg-white/70 p-3">
+          <div className="text-sm text-gray-700">
+            {selectedSlotIds.size > 0 ? `${selectedSlotIds.size}件を選択中` : 'チェックした予約枠をまとめて変更・削除できます'}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={toggleAllSelected}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+            >
+              {allSelected ? '全解除' : '全選択'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBulkEdit(true)}
+              disabled={busy || selectedSlotIds.size === 0}
+              className="px-3 py-1.5 text-sm border border-pink-300 text-pink-700 rounded-lg hover:bg-pink-50 disabled:opacity-50"
+            >
+              選択を一括変更
+            </button>
+            <button
+              type="button"
+              onClick={() => deleteSlots(selectedSlots, '選択した枠')}
+              disabled={busy || selectedSlotIds.size === 0}
+              className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-50"
+            >
+              選択を削除
+            </button>
+            <button
+              type="button"
+              onClick={() => deleteSlots(slots, '全予約枠')}
+              disabled={busy || slots.length === 0}
+              className="px-3 py-1.5 text-sm bg-red-50 border border-red-200 text-red-700 rounded-lg hover:bg-red-100 disabled:opacity-50"
+            >
+              全削除
+            </button>
+          </div>
+        </div>
         <div className="overflow-x-auto border border-gray-200 rounded-lg">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
+                <th className="w-10 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAllSelected}
+                    aria-label="予約枠を全選択"
+                    className="rounded border-gray-300"
+                  />
+                </th>
                 <th className="text-left px-3 py-2 font-medium">日時</th>
                 <th className="text-left px-3 py-2 font-medium">定員</th>
                 <th className="text-left px-3 py-2 font-medium">予約数</th>
@@ -959,7 +1117,16 @@ function SlotsTab({
             </thead>
             <tbody>
               {slots.map((s) => (
-                <tr key={s.id} className="border-t border-gray-200">
+                <tr key={s.id} className={`border-t border-gray-200 ${selectedSlotIds.has(s.id) ? 'bg-pink-50/70' : ''}`}>
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedSlotIds.has(s.id)}
+                      onChange={() => toggleSlotSelected(s.id)}
+                      aria-label={`${formatJpDateTime(s.starts_at)} の予約枠を選択`}
+                      className="rounded border-gray-300"
+                    />
+                  </td>
                   <td className="px-3 py-2 text-gray-800">
                     {formatJpDateTime(s.starts_at)} 〜 {formatJpDateTime(s.ends_at).slice(-5)}
                   </td>
@@ -991,6 +1158,7 @@ function SlotsTab({
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {showAdd && (
@@ -1019,7 +1187,178 @@ function SlotsTab({
           }}
         />
       )}
+      {showBulkEdit && (
+        <BulkEditSlotsDialog
+          slots={selectedSlots}
+          onClose={() => setShowBulkEdit(false)}
+          onSubmit={bulkUpdateSlots}
+        />
+      )}
     </div>
+  )
+}
+
+interface SlotBulkEditInput {
+  changeTime: boolean
+  startTime: string
+  endTime: string
+  changeCapacity: boolean
+  capacity: number | null
+  changeActive: boolean
+  isActive: number
+}
+
+function BulkEditSlotsDialog({
+  slots,
+  onClose,
+  onSubmit,
+}: {
+  slots: EventSlot[]
+  onClose: () => void
+  onSubmit: (input: SlotBulkEditInput) => Promise<void>
+}) {
+  const first = slots[0]
+  const [changeTime, setChangeTime] = useState(false)
+  const [startTime, setStartTime] = useState(first ? isoToJstHHMM(first.starts_at) : '16:00')
+  const [endTime, setEndTime] = useState(first ? isoToJstHHMM(first.ends_at) : '19:00')
+  const [changeCapacity, setChangeCapacity] = useState(false)
+  const [capacity, setCapacity] = useState(first?.capacity == null ? '' : String(first.capacity))
+  const [changeActive, setChangeActive] = useState(false)
+  const [isActive, setIsActive] = useState(first?.is_active === 0 ? '0' : '1')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function submit() {
+    setErr(null)
+    if (!changeTime && !changeCapacity && !changeActive) {
+      setErr('変更する項目を1つ以上選んでください。')
+      return
+    }
+    if (changeTime && startTime >= endTime) {
+      setErr('開始時刻は終了時刻より前にしてください。')
+      return
+    }
+    const cap = capacity.trim() === '' ? null : Number(capacity)
+    if (changeCapacity && cap != null && (!Number.isInteger(cap) || cap < 1)) {
+      setErr('定員は1以上の整数にしてください。空欄にすると無制限になります。')
+      return
+    }
+
+    setBusy(true)
+    try {
+      await onSubmit({
+        changeTime,
+        startTime,
+        endTime,
+        changeCapacity,
+        capacity: cap,
+        changeActive,
+        isActive: Number(isActive),
+      })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DialogPortal>
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-2xl rounded-lg bg-white p-5 shadow-xl">
+          <h3 className="text-lg font-bold text-gray-900">選択した予約枠を一括変更</h3>
+          <p className="mt-1 text-sm text-gray-600">{slots.length}件の予約枠に同じ変更を反映します。</p>
+          {err && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-700">{err}</div>}
+
+          <div className="mt-4 space-y-3">
+            <label className="block rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={changeTime}
+                  onChange={(e) => setChangeTime(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm font-medium text-gray-900">時刻を変更する</span>
+              </div>
+              <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                <input
+                  type="time"
+                  value={startTime}
+                  onChange={(e) => setStartTime(e.target.value)}
+                  disabled={!changeTime}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+                />
+                <span className="text-gray-500">〜</span>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  disabled={!changeTime}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+                />
+              </div>
+              <p className="mt-1 text-xs text-gray-500">日付はそのまま、開始・終了時刻だけをまとめて変えます。</p>
+            </label>
+
+            <label className="block rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={changeCapacity}
+                  onChange={(e) => setChangeCapacity(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm font-medium text-gray-900">定員を変更する</span>
+              </div>
+              <input
+                type="number"
+                min={1}
+                value={capacity}
+                onChange={(e) => setCapacity(e.target.value)}
+                disabled={!changeCapacity}
+                placeholder="空欄で無制限"
+                className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+              />
+            </label>
+
+            <label className="block rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={changeActive}
+                  onChange={(e) => setChangeActive(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm font-medium text-gray-900">状態を変更する</span>
+              </div>
+              <select
+                value={isActive}
+                onChange={(e) => setIsActive(e.target.value)}
+                disabled={!changeActive}
+                className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+              >
+                <option value="1">有効にする</option>
+                <option value="0">停止する</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={onClose} className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50">
+              キャンセル
+            </button>
+            <button
+              onClick={submit}
+              disabled={busy}
+              className="rounded-lg bg-pink-500 px-4 py-2 text-sm font-medium text-white hover:bg-pink-600 disabled:opacity-50"
+            >
+              まとめて変更
+            </button>
+          </div>
+        </div>
+      </div>
+    </DialogPortal>
   )
 }
 
