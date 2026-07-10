@@ -153,7 +153,16 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
     credentials: 'include',
     headers,
   })
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  if (!res.ok) {
+    let message = `API error: ${res.status}`
+    try {
+      const body = (await res.json()) as { error?: string; message?: string }
+      message = body.error || body.message || message
+    } catch {
+      // Keep the status-based fallback when the response body is not JSON.
+    }
+    throw new Error(message)
+  }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }

@@ -349,8 +349,8 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
       setEditingStepId(null)
       loadScenario()
       reloadStats()
-    } catch {
-      setStepError('ステップの保存に失敗しました')
+    } catch (e) {
+      setStepError(e instanceof Error ? `ステップの保存に失敗しました: ${e.message}` : 'ステップの保存に失敗しました')
     } finally {
       setStepSaving(false)
     }
