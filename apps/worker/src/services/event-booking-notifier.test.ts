@@ -34,6 +34,16 @@ describe('renderEventNotificationText', () => {
     expect(text).not.toContain('面談予約はこちら');
   });
 
+  test('複数日程は1通の中でまとめて表示できる', () => {
+    const text = renderEventNotificationText('received_pending', {
+      ...baseCtx,
+      startsAtJstList: ['2026-06-01 10:00', '2026-06-02 10:00'],
+      bookingHistoryUrl: 'https://liff.line.me/2000000000-abc?page=event-me',
+    });
+    expect(text).toContain('日時:\n・2026-06-01 10:00\n・2026-06-02 10:00');
+    expect(text).toContain('予約履歴はこちら');
+  });
+
   test('後追い承認確定', () => {
     const text = renderEventNotificationText('confirmed', baseCtx);
     expect(text).toContain('予約が確定しました');

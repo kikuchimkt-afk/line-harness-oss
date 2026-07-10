@@ -12,6 +12,7 @@ export type EventNotificationKind =
 export interface EventNotificationContext {
   eventName: string;
   startsAtJst: string; // 例: "2026-06-01 10:00"
+  startsAtJstList?: string[];
   venueName?: string | null;
   venueUrl?: string | null;
   bookingHistoryUrl?: string | null;
@@ -24,7 +25,11 @@ export function renderEventNotificationText(
 ): string {
   const venueLine = ctx.venueName ? `\n会場: ${ctx.venueName}` : '';
   const venueUrlLine = ctx.venueUrl ? `\n${ctx.venueUrl}` : '';
-  const detail = `\nイベント: ${ctx.eventName}\n日時: ${ctx.startsAtJst}${venueLine}${venueUrlLine}`;
+  const uniqueStartsAt = Array.from(new Set(ctx.startsAtJstList ?? []));
+  const dateLine = uniqueStartsAt.length > 1
+    ? `\n日時:\n${uniqueStartsAt.map((startsAt) => `・${startsAt}`).join('\n')}`
+    : `\n日時: ${ctx.startsAtJst}`;
+  const detail = `\nイベント: ${ctx.eventName}${dateLine}${venueLine}${venueUrlLine}`;
   const historyLine = ctx.bookingHistoryUrl
     ? `\n\n予約履歴はこちら:\n${ctx.bookingHistoryUrl}`
     : '';

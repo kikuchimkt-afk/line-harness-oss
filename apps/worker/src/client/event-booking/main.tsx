@@ -493,11 +493,17 @@ function ConfirmScreen({
     try {
       const successes: Array<{ id: string; status: string }> = [];
       const failures: string[] = [];
+      const shouldSummarizeNotification = slots.length > 1;
       for (const selectedSlot of slots) {
         try {
           const res = await apiPost<{ id: string; status: string }>(
             `/api/liff/events/${event.id}/bookings`,
-            { slot_id: selectedSlot.id, customer_note: note || null, form_answers: answers },
+            {
+              slot_id: selectedSlot.id,
+              customer_note: note || null,
+              form_answers: answers,
+              suppress_notification: shouldSummarizeNotification,
+            },
             ctx,
             { 'Idempotency-Key': `${idemKey}-${selectedSlot.id}` },
           );
@@ -507,6 +513,18 @@ function ConfirmScreen({
         }
       }
       if (successes.length > 0) {
+        if (shouldSummarizeNotification) {
+          try {
+            await apiPost<{ ok: boolean; count: number }>(
+              `/api/liff/events/${event.id}/bookings/summary`,
+              { booking_ids: successes.map((res) => res.id) },
+              ctx,
+              { 'Idempotency-Key': `${idemKey}-summary` },
+            );
+          } catch (err) {
+            console.warn('[event-booking] summary notification failed', err);
+          }
+        }
         const status = successes.some((res) => res.status === 'requested') ? 'requested' : 'confirmed';
         onDone(status, successes.length, failures.length);
         return;

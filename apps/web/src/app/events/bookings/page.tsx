@@ -237,6 +237,11 @@ function BookingsInner() {
   const calendarCells = useMemo(() => buildCalendarCells(calendarMonth), [calendarMonth])
   const firstActiveSlotStart = activeCalendarItems[0]?.slot_starts_at ?? null
   const selectedDateItems = selectedDateKey ? bookingsByDate.get(selectedDateKey) ?? [] : []
+  const requestedVisibleItems = useMemo(
+    () => items.filter((booking) => booking.status === 'requested'),
+    [items],
+  )
+  const selectedDateRequestedItems = selectedDateItems.filter((booking) => booking.status === 'requested')
 
   useEffect(() => {
     if (!firstActiveSlotStart) {
@@ -313,6 +318,42 @@ function BookingsInner() {
     try {
       await eventsApi.decideBooking(selectedAccountId, eventId, id, action, reason)
       await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function bulkDecide(bookings: EventBookingItem[], action: 'confirm' | 'reject') {
+    if (!selectedAccountId || !eventId) return
+    const targets = bookings.filter((booking) => booking.status === 'requested')
+    if (targets.length === 0) return
+    let reason: string | undefined
+    if (action === 'reject') {
+      const r = window.prompt('まとめて拒否する理由（任意・admin内部メモ。友だちには固定文面）')
+      if (r === null) return
+      reason = r || undefined
+    }
+    const label = action === 'confirm' ? '承認' : '拒否'
+    const ok = window.confirm(
+      `${targets.length}件をまとめて${label}します。\n同じ友だちに複数の予約がある場合、LINE通知は1通にまとまります。\nよろしいですか？`,
+    )
+    if (!ok) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await eventsApi.bulkDecideBookings(
+        selectedAccountId,
+        eventId,
+        targets.map((booking) => booking.id),
+        action,
+        reason,
+      )
+      await refresh()
+      if (result.skipped > 0) {
+        window.alert(`${result.updated}件を更新しました。${result.skipped}件はすでに処理済みのためスキップしました。`)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -401,14 +442,36 @@ function BookingsInner() {
               カレンダー表示
             </button>
           </div>
-          <button
-            type="button"
-            onClick={downloadExcel}
-            disabled={!event || allItems.length === 0}
-            className="rounded-xl border border-pink-200 bg-white/85 px-4 py-2 text-sm font-medium text-pink-700 shadow-sm transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            ExcelでDL
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {viewMode === 'list' && tab === 'requested' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => bulkDecide(requestedVisibleItems, 'confirm')}
+                  disabled={busy || requestedVisibleItems.length === 0}
+                  className="rounded-xl border border-green-200 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 shadow-sm transition hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  表示中をまとめて承認
+                </button>
+                <button
+                  type="button"
+                  onClick={() => bulkDecide(requestedVisibleItems, 'reject')}
+                  disabled={busy || requestedVisibleItems.length === 0}
+                  className="rounded-xl border border-gray-200 bg-white/85 px-4 py-2 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  表示中をまとめて拒否
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={downloadExcel}
+              disabled={!event || allItems.length === 0}
+              className="rounded-xl border border-pink-200 bg-white/85 px-4 py-2 text-sm font-medium text-pink-700 shadow-sm transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              ExcelでDL
+            </button>
+          </div>
         </div>
 
         {viewMode === 'list' && (
@@ -631,6 +694,30 @@ function BookingsInner() {
                       カレンダーの日付を押すと、その日の予約詳細を確認できます。
                     </p>
                   </div>
+
+                  {selectedDateRequestedItems.length > 0 && (
+                    <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-pink-100 bg-pink-50/60 p-3">
+                      <span className="text-xs font-medium text-gray-600">
+                        この日の承認待ち: {selectedDateRequestedItems.length}件
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => bulkDecide(selectedDateRequestedItems, 'confirm')}
+                        disabled={busy}
+                        className="rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-50"
+                      >
+                        まとめて承認
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => bulkDecide(selectedDateRequestedItems, 'reject')}
+                        disabled={busy}
+                        className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        まとめて拒否
+                      </button>
+                    </div>
+                  )}
 
                   {!selectedDateKey ? (
                     <div className="rounded-lg border border-dashed border-pink-200 p-6 text-center text-sm text-gray-500">

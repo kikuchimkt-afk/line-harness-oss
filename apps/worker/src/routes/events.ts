@@ -947,6 +947,119 @@ function buildEventBookingHistoryUrl(liffId?: string | null): string | null {
   return url.toString();
 }
 
+const EVENT_BOOKING_BULK_LIMIT = 50;
+
+function normalizeBookingIdList(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > EVENT_BOOKING_BULK_LIMIT) {
+    return null;
+  }
+  const ids = value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
+  if (ids.length === 0) return null;
+  return Array.from(new Set(ids));
+}
+
+interface EventBookingNotificationRow {
+  id: string;
+  line_account_id: string;
+  event_id: string;
+  slot_id: string;
+  friend_id: string;
+  status: string;
+  decided_at: string | null;
+  event_name: string;
+  venue_name: string | null;
+  venue_url: string | null;
+  slot_starts_at: string;
+  channel_access_token: string | null;
+  liff_id: string | null;
+  line_user_id: string;
+  reminder_day_before_enabled: number;
+  reminder_hours_before: number | null;
+}
+
+async function sendGroupedBookingNotifications(
+  rows: EventBookingNotificationRow[],
+  kind: EventNotificationKind,
+): Promise<void> {
+  const groups = new Map<string, EventBookingNotificationRow[]>();
+  for (const row of rows) {
+    if (!row.channel_access_token || !row.line_user_id) continue;
+    const key = [
+      kind,
+      row.channel_access_token,
+      row.line_user_id,
+      row.liff_id ?? '',
+      row.event_name,
+    ].join('\u0000');
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  for (const group of groups.values()) {
+    const sorted = group
+      .slice()
+      .sort((a, b) => a.slot_starts_at.localeCompare(b.slot_starts_at));
+    const first = sorted[0];
+    await sendEventBookingNotification({
+      channelAccessToken: first.channel_access_token as string,
+      toLineUserId: first.line_user_id,
+      kind,
+      ctx: {
+        eventName: first.event_name,
+        startsAtJst: startsAtJst(first.slot_starts_at),
+        startsAtJstList: sorted.map((row) => startsAtJst(row.slot_starts_at)),
+        venueName: first.venue_name,
+        venueUrl: first.venue_url,
+        bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
+      },
+    });
+  }
+}
+
+events.post('/api/liff/events/:id/bookings/summary', async (c) => {
+  const account_id = await resolveAccountIdFromLiff(c);
+  if (!account_id) return bad(c, 'liff_account_resolution_failed', 400);
+  const callerLineUserId = await verifyCallerLineUserId(c.req.header('Authorization'), c.env);
+  if (!callerLineUserId) return bad(c, 'unauthorized', 401);
+
+  const body = (await c.req.json().catch(() => ({}))) as { booking_ids?: unknown };
+  const bookingIds = normalizeBookingIdList(body.booking_ids);
+  if (!bookingIds) return bad(c, 'invalid_booking_ids', 422);
+
+  const placeholders = bookingIds.map(() => '?').join(',');
+  const { results } = await c.env.DB
+    .prepare(
+      `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              e.name AS event_name, e.venue_name, e.venue_url,
+              e.reminder_day_before_enabled, e.reminder_hours_before,
+              s.starts_at AS slot_starts_at,
+              la.channel_access_token, la.liff_id,
+              f.line_user_id
+         FROM event_bookings b
+         JOIN events e ON e.id = b.event_id
+         JOIN event_slots s ON s.id = b.slot_id
+         JOIN line_accounts la ON la.id = b.line_account_id
+         JOIN friends f ON f.id = b.friend_id
+        WHERE b.event_id = ?
+          AND b.line_account_id = ?
+          AND f.line_user_id = ?
+          AND b.id IN (${placeholders})
+          AND b.status IN ('requested','confirmed')
+        ORDER BY s.starts_at ASC`,
+    )
+    .bind(c.req.param('id'), account_id, callerLineUserId, ...bookingIds)
+    .all<EventBookingNotificationRow>();
+
+  const rows = results ?? [];
+  if (rows.length > 0) {
+    const kind: EventNotificationKind = rows.some((row) => row.status === 'requested')
+      ? 'received_pending'
+      : 'received_confirmed';
+    await sendGroupedBookingNotifications(rows, kind);
+  }
+  return c.json({ ok: true, count: rows.length });
+});
+
 events.post('/api/liff/events/:id/bookings', async (c) => {
   const account_id = await resolveAccountIdFromLiff(c);
   if (!account_id) return bad(c, 'liff_account_resolution_failed', 400);
@@ -1030,6 +1143,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     slot_id?: string;
     customer_note?: string | null;
     form_answers?: unknown;
+    suppress_notification?: boolean;
   };
   if (typeof body.slot_id !== 'string' || body.slot_id.length === 0) {
     return finalize(422, { error: 'invalid_slot_id' });
@@ -1222,7 +1336,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
       .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
       .bind(account_id)
       .first<{ channel_access_token: string }>();
-    if (acc?.channel_access_token) {
+    if (acc?.channel_access_token && body.suppress_notification !== true) {
       const kind: EventNotificationKind =
         status === 'requested' ? 'received_pending' : 'received_confirmed';
       await sendEventBookingNotification({
@@ -1401,6 +1515,102 @@ async function notifyBookingFriend(
     console.error('[event-booking] notify failed', e);
   }
 }
+
+events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
+  const account_id = getAccountId(c);
+  if (!account_id) return bad(c, 'account_id_required', 400);
+  const event_id = c.req.param('id');
+  if (!(await ownsEvent(c.env.DB, event_id, account_id))) return bad(c, 'not_found', 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    booking_ids?: unknown;
+    action?: string;
+    reason?: string;
+  };
+  const bookingIds = normalizeBookingIdList(body.booking_ids);
+  if (!bookingIds) return bad(c, 'invalid_booking_ids', 422);
+  if (body.action !== 'confirm' && body.action !== 'reject') {
+    return bad(c, 'invalid_action', 422);
+  }
+  const action: EventBookingAction = body.action;
+  const next = nextStatus('requested' as never, action);
+  const placeholders = bookingIds.map(() => '?').join(',');
+  const { results } = await c.env.DB
+    .prepare(
+      `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              e.name AS event_name, e.venue_name, e.venue_url,
+              e.reminder_day_before_enabled, e.reminder_hours_before,
+              s.starts_at AS slot_starts_at,
+              la.channel_access_token, la.liff_id,
+              f.line_user_id
+         FROM event_bookings b
+         JOIN events e ON e.id = b.event_id
+         JOIN event_slots s ON s.id = b.slot_id
+         JOIN line_accounts la ON la.id = b.line_account_id
+         JOIN friends f ON f.id = b.friend_id
+        WHERE b.event_id = ?
+          AND b.id IN (${placeholders})
+        ORDER BY f.line_user_id ASC, s.starts_at ASC`,
+    )
+    .bind(event_id, ...bookingIds)
+    .all<EventBookingNotificationRow>();
+
+  const rows = results ?? [];
+  const foundIds = new Set(rows.map((row) => row.id));
+  let skipped = bookingIds.filter((id) => !foundIds.has(id)).length;
+  const updatedRows: EventBookingNotificationRow[] = [];
+  const nowIso = new Date().toISOString();
+  const staff = c.get('staff');
+
+  for (const row of rows) {
+    if (row.decided_at != null || !canTransition(row.status as never, action)) {
+      skipped += 1;
+      continue;
+    }
+    const upd = await c.env.DB
+      .prepare(
+        `UPDATE event_bookings
+            SET status = ?, decided_at = ?, decided_by_staff_id = ?, updated_at = ?
+          WHERE id = ? AND status = ? AND decided_at IS NULL`,
+      )
+      .bind(next, nowIso, staff?.id ?? null, nowIso, row.id, row.status)
+      .run();
+    if ((upd.meta?.changes ?? 0) === 0) {
+      skipped += 1;
+      continue;
+    }
+
+    if (action === 'reject' && body.reason) {
+      await c.env.DB
+        .prepare(
+          `UPDATE event_bookings
+              SET internal_note = COALESCE(internal_note || char(10), '') || ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        )
+        .bind(`[reject reason] ${body.reason}`, nowIso, row.id)
+        .run();
+    }
+
+    if (action === 'confirm') {
+      const reminders = computeRemindersForBooking({
+        starts_at_utc: row.slot_starts_at,
+        reminder_day_before_enabled: row.reminder_day_before_enabled === 1,
+        reminder_hours_before: row.reminder_hours_before,
+      });
+      await insertRemindersForBooking(c.env.DB, row.id, reminders);
+    }
+    updatedRows.push({ ...row, status: next, decided_at: nowIso });
+  }
+
+  if (updatedRows.length > 0) {
+    await sendGroupedBookingNotifications(
+      updatedRows,
+      action === 'confirm' ? 'confirmed' : 'rejected',
+    );
+  }
+  return c.json({ ok: true, updated: updatedRows.length, skipped });
+});
 
 events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c) => {
   const account_id = getAccountId(c);

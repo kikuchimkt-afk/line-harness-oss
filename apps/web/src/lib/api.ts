@@ -1733,6 +1733,17 @@ export const eventsApi = {
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}/decide`, accountId),
       { method: 'POST', body: JSON.stringify({ action, reason }) },
     ),
+  bulkDecideBookings: (
+    accountId: string,
+    eventId: string,
+    bookingIds: string[],
+    action: 'confirm' | 'reject',
+    reason?: string,
+  ) =>
+    fetchApi<{ ok: true; updated: number; skipped: number }>(
+      withAccount(`/api/events/admin/events/${eventId}/bookings/bulk-decide`, accountId),
+      { method: 'POST', body: JSON.stringify({ booking_ids: bookingIds, action, reason }) },
+    ),
   adminCancelBooking: (accountId: string, eventId: string, bookingId: string) =>
     fetchApi<{ ok: true }>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}/cancel`, accountId),
