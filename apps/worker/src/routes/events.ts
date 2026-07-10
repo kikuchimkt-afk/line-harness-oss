@@ -15,7 +15,15 @@ import {
   EVENT_NAME_MAX,
   EVENT_DESCRIPTION_MAX,
   CUSTOMER_NOTE_MAX,
+  EVENT_FORM_ANSWER_MAX,
+  EVENT_FORM_ANSWERS_JSON_MAX,
+  EVENT_FORM_FIELDS_MAX,
+  EVENT_FORM_LABEL_MAX,
+  EVENT_FORM_OPTION_MAX,
+  EVENT_FORM_PLACEHOLDER_MAX,
   EVENT_IDEMPOTENCY_TTL_MINUTES,
+  type EventBookingFormField,
+  type EventBookingFormFieldType,
   type EventTargetType,
 } from '../services/event-booking-types.js';
 import { getSlotsWithRemaining } from '../services/event-availability.js';
@@ -77,6 +85,127 @@ interface EventInput {
   reminder_hours_before?: number | null;
   is_published?: number;
   sort_order?: number;
+  booking_form_fields?: EventBookingFormField[];
+}
+
+const EVENT_FORM_FIELD_TYPES: ReadonlySet<EventBookingFormFieldType> = new Set([
+  'text',
+  'textarea',
+  'select',
+  'checkbox',
+]);
+
+function cleanString(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (s.length === 0 || s.length > max) return null;
+  return s;
+}
+
+function normalizeBookingFormFields(
+  value: unknown,
+): { ok: true; fields: EventBookingFormField[] } | { ok: false; code: string } {
+  if (value == null) return { ok: true, fields: [] };
+  if (!Array.isArray(value) || value.length > EVENT_FORM_FIELDS_MAX) {
+    return { ok: false, code: 'invalid_booking_form_fields' };
+  }
+  const seen = new Set<string>();
+  const fields: EventBookingFormField[] = [];
+  for (const raw of value) {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, code: 'invalid_booking_form_field' };
+    }
+    const item = raw as Record<string, unknown>;
+    const id = cleanString(item.id, 80);
+    const label = cleanString(item.label, EVENT_FORM_LABEL_MAX);
+    const type = item.type;
+    if (!id || !label || typeof type !== 'string' || !EVENT_FORM_FIELD_TYPES.has(type as EventBookingFormFieldType)) {
+      return { ok: false, code: 'invalid_booking_form_field' };
+    }
+    if (seen.has(id)) return { ok: false, code: 'duplicate_booking_form_field_id' };
+    seen.add(id);
+    const normalized: EventBookingFormField = {
+      id,
+      label,
+      type: type as EventBookingFormFieldType,
+      required: item.required === true || item.required === 1,
+    };
+    if (typeof item.placeholder === 'string' && item.placeholder.trim()) {
+      if (item.placeholder.trim().length > EVENT_FORM_PLACEHOLDER_MAX) {
+        return { ok: false, code: 'invalid_booking_form_placeholder' };
+      }
+      normalized.placeholder = item.placeholder.trim();
+    }
+    if (normalized.type === 'select' || normalized.type === 'checkbox') {
+      const options = Array.isArray(item.options)
+        ? item.options
+            .map((x) => cleanString(x, EVENT_FORM_OPTION_MAX))
+            .filter((x): x is string => Boolean(x))
+        : [];
+      const uniqueOptions = [...new Set(options)];
+      if (uniqueOptions.length === 0 || uniqueOptions.length > 20) {
+        return { ok: false, code: 'invalid_booking_form_options' };
+      }
+      normalized.options = uniqueOptions;
+    }
+    fields.push(normalized);
+  }
+  return { ok: true, fields };
+}
+
+function parseBookingFormFields(raw: unknown): EventBookingFormField[] {
+  if (Array.isArray(raw)) {
+    const normalized = normalizeBookingFormFields(raw);
+    return normalized.ok ? normalized.fields : [];
+  }
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const normalized = normalizeBookingFormFields(JSON.parse(raw));
+    return normalized.ok ? normalized.fields : [];
+  } catch {
+    return [];
+  }
+}
+
+function validateFormAnswers(
+  fields: EventBookingFormField[],
+  input: unknown,
+): { ok: true; answers: Record<string, string | string[]> } | { ok: false; code: string } {
+  if (input == null) {
+    input = {};
+  }
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, code: 'invalid_form_answers' };
+  }
+  const source = input as Record<string, unknown>;
+  const answers: Record<string, string | string[]> = {};
+  for (const field of fields) {
+    const value = source[field.id];
+    if (field.type === 'checkbox') {
+      const values = Array.isArray(value)
+        ? value.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean)
+        : [];
+      const allowed = new Set(field.options ?? []);
+      const unique = [...new Set(values)];
+      if (unique.some((x) => !allowed.has(x))) return { ok: false, code: 'invalid_form_answer_option' };
+      if (field.required && unique.length === 0) return { ok: false, code: 'missing_required_form_answer' };
+      answers[field.id] = unique;
+      continue;
+    }
+
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (field.required && text.length === 0) return { ok: false, code: 'missing_required_form_answer' };
+    if (text.length > EVENT_FORM_ANSWER_MAX) return { ok: false, code: 'form_answer_too_long' };
+    if (field.type === 'select' && text) {
+      const allowed = new Set(field.options ?? []);
+      if (!allowed.has(text)) return { ok: false, code: 'invalid_form_answer_option' };
+    }
+    answers[field.id] = text;
+  }
+  if (JSON.stringify(answers).length > EVENT_FORM_ANSWERS_JSON_MAX) {
+    return { ok: false, code: 'form_answers_too_large' };
+  }
+  return { ok: true, answers };
 }
 
 function validateEventInput(
@@ -112,6 +241,10 @@ function validateEventInput(
   }
   if (has('sort_order') && body.sort_order != null) {
     if (!Number.isInteger(body.sort_order)) return { ok: false, code: 'invalid_sort_order' };
+  }
+  if (has('booking_form_fields')) {
+    const fields = normalizeBookingFormFields(body.booking_form_fields);
+    if (!fields.ok) return { ok: false, code: fields.code };
   }
   if (has('target_type') && body.target_type != null) {
     if (body.target_type !== 'single' && body.target_type !== 'multi-account-dedup') {
@@ -152,6 +285,8 @@ events.post('/api/events/admin/events', async (c) => {
   const accountIds = targetType === 'multi-account-dedup' ? (body.account_ids as string[]) : null;
   const dedupPriority =
     targetType === 'multi-account-dedup' ? ((body.dedup_priority as string[] | undefined) ?? null) : null;
+  const formFields = normalizeBookingFormFields(body.booking_form_fields);
+  if (!formFields.ok) return bad(c, formFields.code, 422);
   // line_account_id sentinel: multi では account_ids[0] を保存 (NOT NULL 制約回避)
   const lineAccountIdToWrite = targetType === 'multi-account-dedup' ? accountIds![0] : account_id;
 
@@ -163,8 +298,8 @@ events.post('/api/events/admin/events', async (c) => {
          max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
-         target_type, account_ids, dedup_priority
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         target_type, account_ids, dedup_priority, booking_form_fields
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -185,6 +320,7 @@ events.post('/api/events/admin/events', async (c) => {
       targetType,
       accountIds ? JSON.stringify(accountIds) : null,
       dedupPriority ? JSON.stringify(dedupPriority) : null,
+      JSON.stringify(formFields.fields),
     )
     .run();
   const row = await c.env.DB
@@ -304,6 +440,12 @@ events.put('/api/events/admin/events/:id', async (c) => {
   if (Object.prototype.hasOwnProperty.call(body, 'dedup_priority')) {
     setClauses.push('dedup_priority = ?');
     setValues.push(body.dedup_priority == null ? null : JSON.stringify(body.dedup_priority));
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'booking_form_fields')) {
+    const formFields = normalizeBookingFormFields(body.booking_form_fields);
+    if (!formFields.ok) return bad(c, formFields.code, 422);
+    setClauses.push('booking_form_fields = ?');
+    setValues.push(JSON.stringify(formFields.fields));
   }
   // multi-account-dedup に切り替わったら line_account_id sentinel を account_ids[0] に合わせる
   if (body.target_type === 'multi-account-dedup' && Array.isArray(body.account_ids) && (body.account_ids as string[]).length > 0) {
@@ -613,10 +755,10 @@ events.get('/api/liff/events/me', async (c) => {
   const nowIso = new Date().toISOString();
   const sql =
     tab === 'upcoming'
-      ? `SELECT b.id, b.event_id, b.status, b.customer_note, b.requested_at, b.decided_at, b.cancelled_at,
-                e.name AS event_name, e.image_url AS event_image_url,
-                e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
-                s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
+      ? `SELECT b.id, b.event_id, b.status, b.customer_note, b.form_answers, b.requested_at, b.decided_at, b.cancelled_at,
+                 e.name AS event_name, e.image_url AS event_image_url,
+                 e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
+                 s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
            FROM event_bookings b
            JOIN events e ON e.id = b.event_id
            JOIN event_slots s ON s.id = b.slot_id
@@ -625,10 +767,10 @@ events.get('/api/liff/events/me', async (c) => {
             AND b.status IN ('requested','confirmed')
             AND s.starts_at >= ?
           ORDER BY s.starts_at ASC`
-      : `SELECT b.id, b.event_id, b.status, b.customer_note, b.requested_at, b.decided_at, b.cancelled_at,
-                e.name AS event_name, e.image_url AS event_image_url,
-                e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
-                s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
+      : `SELECT b.id, b.event_id, b.status, b.customer_note, b.form_answers, b.requested_at, b.decided_at, b.cancelled_at,
+                 e.name AS event_name, e.image_url AS event_image_url,
+                 e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
+                 s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
            FROM event_bookings b
            JOIN events e ON e.id = b.event_id
            JOIN event_slots s ON s.id = b.slot_id
@@ -780,6 +922,7 @@ interface EventDbRow {
   max_bookings_per_friend: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  booking_form_fields: string | null;
 }
 
 interface SlotDbRow {
@@ -864,7 +1007,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   const event = await c.env.DB
     .prepare(
       `SELECT id, name, venue_name, venue_url, requires_approval, max_bookings_per_friend,
-              reminder_day_before_enabled, reminder_hours_before
+              reminder_day_before_enabled, reminder_hours_before, booking_form_fields
          FROM events
         WHERE id = ? AND deleted_at IS NULL AND is_published = 1 AND (
           (target_type = 'single' AND line_account_id = ?)
@@ -876,7 +1019,11 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     .first<EventDbRow>();
   if (!event) return finalize(409, { error: 'event_unpublished' });
 
-  const body = (await c.req.json().catch(() => ({}))) as { slot_id?: string; customer_note?: string | null };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    slot_id?: string;
+    customer_note?: string | null;
+    form_answers?: unknown;
+  };
   if (typeof body.slot_id !== 'string' || body.slot_id.length === 0) {
     return finalize(422, { error: 'invalid_slot_id' });
   }
@@ -884,6 +1031,11 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     if (typeof body.customer_note !== 'string' || body.customer_note.length > CUSTOMER_NOTE_MAX) {
       return finalize(422, { error: 'invalid_customer_note' });
     }
+  }
+  const bookingFormFields = parseBookingFormFields(event.booking_form_fields);
+  const formAnswers = validateFormAnswers(bookingFormFields, body.form_answers);
+  if (!formAnswers.ok) {
+    return finalize(422, { error: formAnswers.code });
   }
 
   const slot = await c.env.DB
@@ -965,10 +1117,21 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   await c.env.DB
     .prepare(
       `INSERT INTO event_bookings
-         (id, line_account_id, event_id, slot_id, friend_id, status, customer_note, requested_at, identity_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, requested_at, identity_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, account_id, event.id, slot.id, bookingFriend.id, status, body.customer_note ?? null, nowIso, identityKey)
+    .bind(
+      id,
+      account_id,
+      event.id,
+      slot.id,
+      bookingFriend.id,
+      status,
+      body.customer_note ?? null,
+      JSON.stringify(formAnswers.answers),
+      nowIso,
+      identityKey,
+    )
     .run();
 
   // Verify capacity again. If there is a race winner ahead of us — i.e. an

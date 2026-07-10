@@ -65,6 +65,7 @@ interface EventRow {
   target_type?: 'single' | 'multi-account-dedup';
   account_ids?: string | null;
   dedup_priority?: string | null;
+  booking_form_fields?: string | null;
   [k: string]: unknown;
 }
 
@@ -85,6 +86,7 @@ interface BookingRow {
   status: string;
   slot_id?: string;
   friend_id?: string;
+  form_answers?: string;
 }
 
 interface LineAccount {
@@ -597,13 +599,14 @@ function makeEventDb(state: {
           }
           if (sql.startsWith('INSERT INTO event_bookings')) {
             const [
-              id, line_account_id, event_id, slot_id, friend_id, status, customer_note, _requested_at, identity_key,
-            ] = bound as [string, string, string, string, string, string, string | null, string, string | undefined];
+              id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, _requested_at, identity_key,
+            ] = bound as [string, string, string, string, string, string, string | null, string, string, string | undefined];
             (state.bookings ?? []).push({
               id, event_id, status,
               slot_id, friend_id,
               line_account_id,
               customer_note,
+              form_answers,
               identity_key,
             } as BookingRow & Record<string, unknown>);
             return { success: true, meta: { changes: 1 } };
@@ -650,14 +653,14 @@ function makeEventDb(state: {
               max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
               reminder_day_before_enabled, reminder_hours_before,
               is_published, sort_order,
-              target_type, account_ids, dedup_priority,
+              target_type, account_ids, dedup_priority, booking_form_fields,
             ] = bound as [
               string, string, string, string | null, string | null, string | null,
               string | null, number,
               number | null, number, number | null,
               number, number | null,
               number, number,
-              string, string | null, string | null,
+              string, string | null, string | null, string,
             ];
             const now = new Date().toISOString();
             state.events.push({
@@ -683,6 +686,7 @@ function makeEventDb(state: {
               target_type: target_type as 'single' | 'multi-account-dedup',
               account_ids,
               dedup_priority,
+              booking_form_fields,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -769,6 +773,7 @@ describe('POST /api/events/admin/events', () => {
     expect(body.is_published).toBe(0);
     expect(body.requires_approval).toBe(0);
     expect(body.reminder_day_before_enabled).toBe(1);
+    expect(body.booking_form_fields).toBe('[]');
     expect(state.events).toHaveLength(1);
   });
 
@@ -791,6 +796,10 @@ describe('POST /api/events/admin/events', () => {
         reminder_hours_before: 2,
         is_published: 1,
         sort_order: 5,
+        booking_form_fields: [
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+          { id: 'content', label: '内容', type: 'checkbox', required: true, options: ['宿題', '英検'] },
+        ],
       }),
     });
     expect(res.status).toBe(201);
@@ -798,6 +807,7 @@ describe('POST /api/events/admin/events', () => {
     expect(body.requires_approval).toBe(1);
     expect(body.cancel_deadline_hours_before).toBe(12);
     expect(body.is_published).toBe(1);
+    expect(JSON.parse(body.booking_form_fields ?? '[]')).toHaveLength(2);
   });
 
   test('400 when account_id missing', async () => {
@@ -1420,6 +1430,69 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(idempotencyMocks.finalizeEventIdempotencyResponse).toHaveBeenCalled();
   });
 
+  test('stores form_answers for custom booking fields', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        booking_form_fields: JSON.stringify([
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+          { id: 'content', label: '内容', type: 'checkbox', required: true, options: ['宿題', '英検'] },
+        ]),
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({
+        slot_id: 's1',
+        form_answers: { student_name: '山田太郎', content: ['宿題', '英検'] },
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(JSON.parse(state.bookings[0].form_answers ?? '{}')).toEqual({
+      student_name: '山田太郎',
+      content: ['宿題', '英検'],
+    });
+  });
+
+  test('422 when required custom booking field is missing', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        booking_form_fields: JSON.stringify([
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+        ]),
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1', form_answers: {} }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('missing_required_form_answer');
+    expect(state.bookings).toHaveLength(0);
+  });
+
   test('creates requested booking when requires_approval=1', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 1 })],
@@ -2016,6 +2089,7 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     target_type: 'single',
     account_ids: null,
     dedup_priority: null,
+    booking_form_fields: '[]',
     ...over,
   };
 }

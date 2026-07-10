@@ -25,6 +25,7 @@ interface EventDetail {
   max_bookings_per_friend: number | null;
   requires_approval: number;
   cancel_deadline_hours_before: number | null;
+  booking_form_fields?: EventBookingFormField[] | string | null;
   // 既予約検出 (multi-account 含む): 同一人物が別アカで既に予約済の場合に
   // Worker が GET 時点で詰めて返す。null は未予約。
   my_existing_booking?: {
@@ -33,6 +34,17 @@ interface EventDetail {
     slot_starts_at: string;
     line_account_id: string;
   } | null;
+}
+
+type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
 }
 
 interface EventSlot {
@@ -51,6 +63,7 @@ interface MyBooking {
   event_id: string;
   status: string;
   customer_note: string | null;
+  form_answers?: string | Record<string, string | string[]> | null;
   event_name: string;
   event_image_url: string | null;
   venue_name: string | null;
@@ -121,6 +134,29 @@ function formatJpDateOnly(iso: string): string {
 
 function formatJpTimeOnly(iso: string): string {
   return new Date(iso).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+}
+
+type FormAnswers = Record<string, string | string[]>;
+
+function parseFormFields(raw: EventDetail['booking_form_fields']): EventBookingFormField[] {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as EventBookingFormField[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getTextAnswer(answers: FormAnswers, id: string): string {
+  const value = answers[id];
+  return typeof value === 'string' ? value : '';
+}
+
+function getListAnswer(answers: FormAnswers, id: string): string[] {
+  const value = answers[id];
+  return Array.isArray(value) ? value : [];
 }
 
 function uid(): string {
@@ -344,11 +380,37 @@ function ConfirmScreen({
   onDone: (status: string) => void;
 }) {
   const [note, setNote] = useState('');
+  const [answers, setAnswers] = useState<FormAnswers>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idemKey] = useState(uid);
+  const formFields = parseFormFields(event.booking_form_fields);
+
+  function setAnswer(id: string, value: string | string[]) {
+    setAnswers((prev) => ({ ...prev, [id]: value }));
+  }
+
+  function validateAnswers(): string | null {
+    for (const field of formFields) {
+      const value = answers[field.id];
+      if (field.type === 'checkbox') {
+        if (field.required && (!Array.isArray(value) || value.length === 0)) {
+          return `${field.label}を選択してください`;
+        }
+        continue;
+      }
+      const text = typeof value === 'string' ? value.trim() : '';
+      if (field.required && !text) return `${field.label}を入力してください`;
+    }
+    return null;
+  }
 
   async function submit() {
+    const validationError = validateAnswers();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     if (note.length > 5000) {
       setError('備考は 5000 字以内で入力してください');
       return;
@@ -358,7 +420,7 @@ function ConfirmScreen({
     try {
       const res = await apiPost<{ id: string; status: string }>(
         `/api/liff/events/${event.id}/bookings`,
-        { slot_id: slot.id, customer_note: note || null },
+        { slot_id: slot.id, customer_note: note || null, form_answers: answers },
         ctx,
         { 'Idempotency-Key': idemKey },
       );
@@ -414,6 +476,78 @@ function ConfirmScreen({
       {event.requires_approval === 1 && (
         <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded-xl p-3">
           このイベントは承認制です。受付後、運営が承認するまでお待ちください。
+        </div>
+      )}
+
+      {formFields.length > 0 && (
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900">必要事項</h2>
+            <p className="text-xs text-gray-500 mt-1">参加に必要な内容をご入力ください。</p>
+          </div>
+          {formFields.map((field) => (
+            <div key={field.id}>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                {field.label}
+                {field.required && <span className="text-red-500 ml-1">*</span>}
+              </label>
+              {field.type === 'textarea' ? (
+                <textarea
+                  value={getTextAnswer(answers, field.id)}
+                  onChange={(e) => setAnswer(field.id, e.target.value)}
+                  rows={4}
+                  maxLength={2000}
+                  placeholder={field.placeholder || '入力してください'}
+                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                />
+              ) : field.type === 'select' ? (
+                <select
+                  value={getTextAnswer(answers, field.id)}
+                  onChange={(e) => setAnswer(field.id, e.target.value)}
+                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                >
+                  <option value="">選択してください</option>
+                  {(field.options ?? []).map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              ) : field.type === 'checkbox' ? (
+                <div className="space-y-2">
+                  {(field.options ?? []).map((option) => {
+                    const selected = getListAnswer(answers, field.id).includes(option);
+                    return (
+                      <label key={option} className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(e) => {
+                            const current = getListAnswer(answers, field.id);
+                            setAnswer(
+                              field.id,
+                              e.target.checked
+                                ? [...current, option]
+                                : current.filter((x) => x !== option),
+                            );
+                          }}
+                          className="rounded border-gray-300"
+                        />
+                        {option}
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={getTextAnswer(answers, field.id)}
+                  onChange={(e) => setAnswer(field.id, e.target.value)}
+                  maxLength={2000}
+                  placeholder={field.placeholder || '入力してください'}
+                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                />
+              )}
+            </div>
+          ))}
         </div>
       )}
 

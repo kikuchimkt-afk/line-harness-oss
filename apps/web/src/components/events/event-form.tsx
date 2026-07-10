@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { eventsApi, type EventDetail, type EventSlot } from '@/lib/api'
+import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot } from '@/lib/api'
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
 import { generateBulkSlots, type BulkSlotInput } from './bulk-slot-generator'
@@ -30,6 +30,7 @@ const DEFAULT_DRAFT: EventDetail = {
   reminder_hours_before: null,
   is_published: 0,
   sort_order: 0,
+  booking_form_fields: [],
 }
 
 export interface EventFormProps {
@@ -47,6 +48,35 @@ function formatJpDateTime(iso: string): string {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
 }
+
+function parseEventFormFields(raw: EventDetail['booking_form_fields']): EventBookingFormField[] {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw !== 'string' || !raw.trim()) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? (parsed as EventBookingFormField[]) : []
+  } catch {
+    return []
+  }
+}
+
+function makeFormFieldId(): string {
+  return `field_${crypto.randomUUID().slice(0, 8)}`
+}
+
+const SUPPORT_PRESET_FIELDS: EventBookingFormField[] = [
+  { id: 'student_name', label: '生徒名', type: 'text', required: true, placeholder: '例: 山田 太郎' },
+  { id: 'grade', label: '学年', type: 'select', required: true, options: ['小学生', '中1', '中2', '中3', '高1', '高2', '高3', 'その他'] },
+  { id: 'parent_name', label: '保護者名', type: 'text', required: true, placeholder: '例: 山田 花子' },
+  {
+    id: 'study_content',
+    label: '当日取り組みたい内容',
+    type: 'checkbox',
+    required: true,
+    options: ['夏休みの宿題', '課題テスト対策', '英検対策', '学習アプリ', 'その他'],
+  },
+  { id: 'consultation', label: '事前に相談したいこと', type: 'textarea', required: false, placeholder: '必要があればご記入ください' },
+]
 
 export default function EventForm({ accountId, eventId }: EventFormProps) {
   const router = useRouter()
@@ -150,6 +180,7 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
         reminder_hours_before: draft.reminder_hours_before,
         is_published: draft.is_published,
         sort_order: draft.sort_order,
+        booking_form_fields: parseEventFormFields(draft.booking_form_fields),
         target_type: targetType,
         // Worker は account_ids を配列で受け取って内部で JSON.stringify するので、
         // ここでは配列のまま送る (Partial<EventDetail> の union 型を許容)
@@ -541,6 +572,11 @@ function OverviewTab({
         </select>
       </div>
 
+      <BookingFormFieldsEditor
+        fields={parseEventFormFields(draft.booking_form_fields)}
+        onChange={(fields) => update('booking_form_fields', fields as EventDetail['booking_form_fields'])}
+      />
+
       {/* 公開対象 */}
       <div className="border-t border-gray-200 pt-5">
         <div className="text-sm font-medium text-gray-700 mb-2">公開対象</div>
@@ -621,6 +657,194 @@ function OverviewTab({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function BookingFormFieldsEditor({
+  fields,
+  onChange,
+}: {
+  fields: EventBookingFormField[]
+  onChange: (fields: EventBookingFormField[]) => void
+}) {
+  function updateField(index: number, patch: Partial<EventBookingFormField>) {
+    onChange(fields.map((field, i) => (i === index ? { ...field, ...patch } : field)))
+  }
+
+  function addField(type: EventBookingFormFieldType = 'text') {
+    const next: EventBookingFormField = {
+      id: makeFormFieldId(),
+      label: '',
+      type,
+      required: false,
+      placeholder: '',
+      options: type === 'select' || type === 'checkbox' ? [''] : undefined,
+    }
+    onChange([...fields, next])
+  }
+
+  function removeField(index: number) {
+    onChange(fields.filter((_, i) => i !== index))
+  }
+
+  function moveField(index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= fields.length) return
+    const next = [...fields]
+    const [item] = next.splice(index, 1)
+    next.splice(target, 0, item)
+    onChange(next)
+  }
+
+  function applyPreset() {
+    if (fields.length > 0 && !confirm('現在の質問項目を、学習サポート用の基本項目に置き換えますか？')) {
+      return
+    }
+    onChange(SUPPORT_PRESET_FIELDS.map((field) => ({ ...field, options: field.options ? [...field.options] : undefined })))
+  }
+
+  return (
+    <div className="border-t border-gray-200 pt-5">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-medium text-gray-700">予約フォーム項目</div>
+          <p className="text-xs text-gray-500 mt-1">
+            保護者に入力してもらう内容を設定します。未設定の場合は備考欄だけ表示されます。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={applyPreset}
+            className="px-3 py-1.5 text-xs font-medium border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-50"
+          >
+            学習サポート用を入れる
+          </button>
+          <button
+            type="button"
+            onClick={() => addField('text')}
+            className="px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            ＋ 質問を追加
+          </button>
+        </div>
+      </div>
+
+      {fields.length === 0 ? (
+        <div className="border border-dashed border-gray-300 rounded-lg p-4 text-sm text-gray-500">
+          まだ質問項目はありません。夏休み学習サポートでは「学習サポート用を入れる」から始めるのがおすすめです。
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {fields.map((field, index) => {
+            const usesOptions = field.type === 'select' || field.type === 'checkbox'
+            return (
+              <div key={field.id} className="border border-gray-200 rounded-lg p-4 bg-gray-50/60">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="text-xs font-medium text-gray-500">質問 {index + 1}</div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => moveField(index, -1)}
+                      disabled={index === 0}
+                      className="text-xs text-gray-500 hover:text-gray-900 disabled:opacity-30"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => moveField(index, 1)}
+                      disabled={index === fields.length - 1}
+                      className="text-xs text-gray-500 hover:text-gray-900 disabled:opacity-30"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeField(index)}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      削除
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-600">質問名</span>
+                    <input
+                      value={field.label}
+                      onChange={(e) => updateField(index, { label: e.target.value })}
+                      maxLength={80}
+                      placeholder="例: 生徒名"
+                      className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-600">入力方法</span>
+                    <select
+                      value={field.type}
+                      onChange={(e) => {
+                        const type = e.target.value as EventBookingFormFieldType
+                        updateField(index, {
+                          type,
+                          options: type === 'select' || type === 'checkbox' ? (field.options?.length ? field.options : ['']) : undefined,
+                        })
+                      }}
+                      className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    >
+                      <option value="text">短文入力</option>
+                      <option value="textarea">長文入力</option>
+                      <option value="select">選択式（1つ）</option>
+                      <option value="checkbox">選択式（複数）</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-600">入力例・補足</span>
+                    <input
+                      value={field.placeholder ?? ''}
+                      onChange={(e) => updateField(index, { placeholder: e.target.value })}
+                      maxLength={120}
+                      placeholder="例: 山田 太郎"
+                      className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 mt-6">
+                    <input
+                      type="checkbox"
+                      checked={field.required}
+                      onChange={(e) => updateField(index, { required: e.target.checked })}
+                      className="rounded border-gray-300"
+                    />
+                    必須にする
+                  </label>
+                </div>
+
+                {usesOptions && (
+                  <label className="block mt-3">
+                    <span className="text-xs font-medium text-gray-600">選択肢（1行に1つ）</span>
+                    <textarea
+                      value={(field.options ?? []).join('\n')}
+                      onChange={(e) =>
+                        updateField(index, {
+                          options: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
+                        })
+                      }
+                      rows={4}
+                      placeholder={'夏休みの宿題\n課題テスト対策\n英検対策'}
+                      className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    />
+                  </label>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

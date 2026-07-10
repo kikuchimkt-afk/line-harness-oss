@@ -26,6 +26,17 @@ export type EventTargetType = 'single' | 'multi-account-dedup';
 
 export const EVENT_TARGET_TYPES: ReadonlyArray<EventTargetType> = ['single', 'multi-account-dedup'];
 
+export type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+export interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
+}
+
 export interface EventRow {
   id: string;
   line_account_id: string;
@@ -54,6 +65,7 @@ export interface EventRow {
   account_ids: string | null;
   dedup_priority: string | null;
   failed_account_ids: string | null;
+  booking_form_fields: string;
 }
 
 export interface EventSlotRow {
@@ -77,6 +89,7 @@ export interface EventBookingRow {
   friend_id: string;
   status: EventBookingStatus;
   customer_note: string | null;
+  form_answers: string;
   internal_note: string | null;
   requested_at: string;
   decided_at: string | null;
@@ -101,6 +114,12 @@ export interface EventBookingReminderRow {
 export const EVENT_NAME_MAX = 255;
 export const EVENT_DESCRIPTION_MAX = 20000;
 export const CUSTOMER_NOTE_MAX = 5000;
+export const EVENT_FORM_FIELDS_MAX = 20;
+export const EVENT_FORM_LABEL_MAX = 80;
+export const EVENT_FORM_OPTION_MAX = 80;
+export const EVENT_FORM_PLACEHOLDER_MAX = 120;
+export const EVENT_FORM_ANSWER_MAX = 2000;
+export const EVENT_FORM_ANSWERS_JSON_MAX = 20000;
 export const REQUESTED_EXPIRE_HOURS = 24;
 export const REMINDER_MAX_RETRY = 3;
 export const EVENT_IDEMPOTENCY_TTL_MINUTES = 60 * 24;

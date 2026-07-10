@@ -1609,12 +1609,24 @@ export interface EventDetail {
   reminder_hours_before: number | null;
   is_published: number;
   sort_order: number;
+  booking_form_fields?: EventBookingFormField[] | string | null;
   // Multi-account fields (migration 040, broadcasts と同パターン)
   target_type?: 'single' | 'multi-account-dedup';
   // Worker は JSON 文字列で返す。UI 側で parse して string[] を扱う。
   account_ids?: string | string[] | null;
   dedup_priority?: string | string[] | null;
   line_account_id?: string;
+}
+
+export type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+export interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
 }
 
 export interface EventSlot {
@@ -1636,6 +1648,7 @@ export interface EventBookingItem {
   line_account_id: string;
   status: string;
   customer_note: string | null;
+  form_answers: string | Record<string, string | string[]> | null;
   internal_note: string | null;
   requested_at: string;
   decided_at: string | null;

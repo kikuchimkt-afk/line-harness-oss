@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import Header from '@/components/layout/header'
 import { useAccount } from '@/contexts/account-context'
-import { eventsApi, type EventBookingItem, type EventDetail } from '@/lib/api'
+import { eventsApi, type EventBookingFormField, type EventBookingItem, type EventDetail } from '@/lib/api'
 
 const STATUS_TABS: Array<{ key: string; label: string }> = [
   { key: 'requested', label: '承認待ち' },
@@ -36,6 +36,49 @@ function formatJp(iso: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function parseFormFields(raw: EventDetail['booking_form_fields']): EventBookingFormField[] {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw !== 'string' || !raw.trim()) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? (parsed as EventBookingFormField[]) : []
+  } catch {
+    return []
+  }
+}
+
+function parseAnswers(raw: EventBookingItem['form_answers']): Record<string, string | string[]> {
+  if (raw == null) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, string | string[]>
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, string | string[]>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function bookingAnswerLines(
+  booking: EventBookingItem,
+  fields: EventBookingFormField[],
+): Array<{ label: string; value: string }> {
+  const answers = parseAnswers(booking.form_answers)
+  const lines = fields
+    .map((field) => {
+      const raw = answers[field.id]
+      const value = Array.isArray(raw) ? raw.join('、') : typeof raw === 'string' ? raw : ''
+      return value ? { label: field.label, value } : null
+    })
+    .filter((x): x is { label: string; value: string } => x !== null)
+  if (booking.customer_note) {
+    lines.push({ label: '備考', value: booking.customer_note })
+  }
+  return lines
 }
 
 function BookingsInner() {
@@ -76,6 +119,7 @@ function BookingsInner() {
   if (!eventId) {
     return <div className="p-4 text-red-700">id クエリが必要です</div>
   }
+  const formFields = event ? parseFormFields(event.booking_form_fields) : []
 
   async function decide(id: string, action: 'confirm' | 'reject') {
     if (!selectedAccountId || !eventId) return
@@ -178,6 +222,7 @@ function BookingsInner() {
                   <tr>
                     <th className="text-left px-4 py-2 font-medium">友だち</th>
                     <th className="text-left px-4 py-2 font-medium">経由アカ</th>
+                    <th className="text-left px-4 py-2 font-medium">回答内容</th>
                     <th className="text-left px-4 py-2 font-medium">予約枠</th>
                     <th className="text-left px-4 py-2 font-medium">状態</th>
                     <th className="text-left px-4 py-2 font-medium">受付日時</th>
@@ -190,12 +235,27 @@ function BookingsInner() {
                     const accountLabel = acct
                       ? `${acct.country ? acct.country + ' ' : ''}${acct.name}`
                       : (b.line_account_id ?? '').slice(0, 8)
+                    const answerLines = bookingAnswerLines(b, formFields)
                     return (
                     <tr key={b.id} className="border-t border-gray-100 hover:bg-gray-50">
                       <td className="px-4 py-3 text-gray-800">
                         {b.friend_display_name ?? b.friend_id.slice(0, 8)}
                       </td>
                       <td className="px-4 py-3 text-gray-700 text-xs">{accountLabel}</td>
+                      <td className="px-4 py-3 text-gray-700 text-xs min-w-[220px]">
+                        {answerLines.length === 0 ? (
+                          <span className="text-gray-400">未入力</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {answerLines.map((line) => (
+                              <div key={line.label}>
+                                <span className="font-medium text-gray-500">{line.label}: </span>
+                                <span className="whitespace-pre-wrap">{line.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-gray-700">{formatJp(b.slot_starts_at)}</td>
                       <td className="px-4 py-3">
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadge[b.status] ?? 'bg-gray-100'}`}>
