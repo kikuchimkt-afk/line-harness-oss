@@ -66,7 +66,7 @@ export interface CreateTagInput {
 // ─── Scenario ───────────────────────────────────────────
 /**
  * シナリオ配信モード:
- * - relative: 前ステップからの相対遅延 (delayMinutes)
+ * - relative: 前ステップからの相対遅延 (delayMinutes) または前ステップ後 N 日後の HH:MM (offsetDays + deliveryTime)
  * - elapsed: 購読開始からの経過時間 (offsetDays + offsetMinutes)
  * - absolute_time: 購読開始から N 日後の HH:MM JST (offsetDays + deliveryTime)
  */

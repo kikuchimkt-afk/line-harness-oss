@@ -282,9 +282,9 @@ export const api = {
         messageType: ScenarioStep['messageType']
         messageContent: string
         delayMinutes?: number
-        offsetDays?: number
-        offsetMinutes?: number
-        deliveryTime?: string
+        offsetDays?: number | null
+        offsetMinutes?: number | null
+        deliveryTime?: string | null
         templateId?: string | null
         onReachTagId?: string | null
       },
@@ -301,9 +301,9 @@ export const api = {
         messageType?: ScenarioStep['messageType']
         messageContent?: string
         delayMinutes?: number
-        offsetDays?: number
-        offsetMinutes?: number
-        deliveryTime?: string
+        offsetDays?: number | null
+        offsetMinutes?: number | null
+        deliveryTime?: string | null
         templateId?: string | null
         onReachTagId?: string | null
       },

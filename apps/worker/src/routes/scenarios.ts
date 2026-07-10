@@ -72,9 +72,9 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 interface StepScheduleBody {
   delayMinutes?: number;
-  offsetDays?: number;
-  offsetMinutes?: number;
-  deliveryTime?: string;
+  offsetDays?: number | null;
+  offsetMinutes?: number | null;
+  deliveryTime?: string | null;
 }
 
 /** delivery_mode に応じてスケジュールフィールドを検証する。 */
@@ -83,8 +83,19 @@ function validateStepSchedule(
   body: StepScheduleBody,
 ): { ok: true } | { ok: false; error: string } {
   if (mode === 'relative') {
-    if (body.offsetDays != null || body.offsetMinutes != null || body.deliveryTime != null) {
-      return { ok: false, error: 'relative mode: only delayMinutes is allowed' };
+    if (body.offsetMinutes != null) {
+      return { ok: false, error: 'relative mode: offsetMinutes is not allowed' };
+    }
+    const hasTimeFields = body.offsetDays !== undefined || body.deliveryTime !== undefined;
+    const clearsTimeFields = body.offsetDays === null && body.deliveryTime === null;
+    if (hasTimeFields && !clearsTimeFields) {
+      if (typeof body.offsetDays !== 'number' || body.offsetDays < 0) {
+        return { ok: false, error: 'relative time mode: offsetDays (>=0) is required' };
+      }
+      if (typeof body.deliveryTime !== 'string' || !HHMM_RE.test(body.deliveryTime)) {
+        return { ok: false, error: 'relative time mode: deliveryTime must match HH:MM' };
+      }
+      return { ok: true };
     }
     if (typeof body.delayMinutes !== 'number' || body.delayMinutes < 0) {
       return { ok: false, error: 'relative mode: delayMinutes (>=0) is required' };
@@ -291,9 +302,9 @@ scenarios.post('/api/scenarios/:id/steps', async (c) => {
     const body = await c.req.json<{
       stepOrder: number;
       delayMinutes?: number;
-      offsetDays?: number;
-      offsetMinutes?: number;
-      deliveryTime?: string;
+      offsetDays?: number | null;
+      offsetMinutes?: number | null;
+      deliveryTime?: string | null;
       messageType: MessageType;
       messageContent: string;
       conditionType?: string | null;
@@ -368,9 +379,9 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
     const body = await c.req.json<{
       stepOrder?: number;
       delayMinutes?: number;
-      offsetDays?: number;
-      offsetMinutes?: number;
-      deliveryTime?: string;
+      offsetDays?: number | null;
+      offsetMinutes?: number | null;
+      deliveryTime?: string | null;
       messageType?: MessageType;
       messageContent?: string;
       conditionType?: string | null;
@@ -404,10 +415,10 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
     // (1 フィールドだけ更新するケース、例: elapsed step の offsetMinutes だけ変更、
     //  absolute_time step の deliveryTime だけ変更 を許可するため)
     const scheduleTouched =
-      body.delayMinutes != null ||
-      body.offsetDays != null ||
-      body.offsetMinutes != null ||
-      body.deliveryTime != null;
+      body.delayMinutes !== undefined ||
+      body.offsetDays !== undefined ||
+      body.offsetMinutes !== undefined ||
+      body.deliveryTime !== undefined;
     if (scheduleTouched) {
       const scenarioRow = await c.env.DB
         .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
@@ -434,22 +445,28 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
       // mode mismatch (relative scenario に offsetDays を投げる等) は body の生値で検出する。
       // 一方、対応 mode のフィールドが片方だけ送られた場合 (例: absolute_time で deliveryTime のみ)
       // は既存値で穴埋めする。
-      const scheduleForValidation: {
-        delayMinutes?: number;
-        offsetDays?: number;
-        offsetMinutes?: number;
-        deliveryTime?: string;
-      } = {
-        delayMinutes: body.delayMinutes,
-        offsetDays: body.offsetDays,
-        offsetMinutes: body.offsetMinutes,
-        deliveryTime: body.deliveryTime,
-      };
+      const scheduleForValidation: StepScheduleBody = {};
       if (scenarioRow.delivery_mode === 'relative') {
-        if (scheduleForValidation.delayMinutes === undefined) {
-          scheduleForValidation.delayMinutes = existingStep.delay_minutes;
+        const touchesTimeFields = body.offsetDays !== undefined || body.deliveryTime !== undefined;
+        const clearsTimeFields = body.offsetDays === null && body.deliveryTime === null;
+        if (touchesTimeFields && !clearsTimeFields) {
+          scheduleForValidation.offsetDays =
+            body.offsetDays !== undefined ? body.offsetDays : existingStep.offset_days;
+          scheduleForValidation.deliveryTime =
+            body.deliveryTime !== undefined ? body.deliveryTime : existingStep.delivery_time;
+          scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        } else {
+          scheduleForValidation.delayMinutes =
+            body.delayMinutes !== undefined ? body.delayMinutes : existingStep.delay_minutes;
+          scheduleForValidation.offsetDays = body.offsetDays;
+          scheduleForValidation.deliveryTime = body.deliveryTime;
+          scheduleForValidation.offsetMinutes = body.offsetMinutes;
         }
       } else if (scenarioRow.delivery_mode === 'elapsed') {
+        scheduleForValidation.delayMinutes = body.delayMinutes;
+        scheduleForValidation.offsetDays = body.offsetDays;
+        scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        scheduleForValidation.deliveryTime = body.deliveryTime;
         if (scheduleForValidation.offsetDays === undefined && existingStep.offset_days != null) {
           scheduleForValidation.offsetDays = existingStep.offset_days;
         }
@@ -458,6 +475,10 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
         }
       } else {
         // absolute_time
+        scheduleForValidation.delayMinutes = body.delayMinutes;
+        scheduleForValidation.offsetDays = body.offsetDays;
+        scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        scheduleForValidation.deliveryTime = body.deliveryTime;
         if (scheduleForValidation.offsetDays === undefined && existingStep.offset_days != null) {
           scheduleForValidation.offsetDays = existingStep.offset_days;
         }

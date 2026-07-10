@@ -30,7 +30,7 @@ const messageTypeOptions: { value: MessageType; label: string }[] = [
 ]
 
 const modeBadgeStyle: Record<DeliveryMode, { bg: string; text: string; label: string }> = {
-  relative: { bg: 'bg-gray-100', text: 'text-gray-600', label: 'Legacy' },
+  relative: { bg: 'bg-pink-50', text: 'text-pink-700', label: '前ステップ基準' },
   elapsed: { bg: 'bg-blue-50', text: 'text-blue-700', label: '経過時間' },
   absolute_time: { bg: 'bg-amber-50', text: 'text-amber-700', label: '時刻指定' },
 }
@@ -52,7 +52,12 @@ function formatDelay(minutes: number): string {
 
 function formatScheduleLabel(mode: DeliveryMode | undefined, step: ScenarioStep): string {
   const m = mode ?? 'relative'
-  if (m === 'relative') return formatDelay(step.delayMinutes)
+  if (m === 'relative') {
+    if (step.offsetDays != null && step.deliveryTime) {
+      return `前ステップ配信後 ${step.offsetDays}日後の ${step.deliveryTime}`
+    }
+    return formatDelay(step.delayMinutes)
+  }
   if (m === 'elapsed') {
     const days = step.offsetDays ?? 0
     const mins = step.offsetMinutes ?? 0
@@ -69,17 +74,6 @@ function formatScheduleLabel(mode: DeliveryMode | undefined, step: ScenarioStep)
   return `購読開始から${step.offsetDays ?? 0}日後の ${step.deliveryTime ?? '00:00'}`
 }
 
-function relativeBaseMinutesForStep(
-  steps: ScenarioStep[],
-  stepOrder: number,
-  editingStepId: string | null,
-): number {
-  return steps
-    .filter((step) => step.id !== editingStepId && step.stepOrder < stepOrder)
-    .sort((a, b) => a.stepOrder - b.stepOrder)
-    .reduce((total, step) => total + step.delayMinutes, 0)
-}
-
 interface StepFormState {
   stepOrder: number
   schedule: ScheduleValue
@@ -90,10 +84,10 @@ interface StepFormState {
   inputMode: 'direct' | 'template'
 }
 
-function emptyStepForm(stepOrder: number): StepFormState {
+function emptyStepForm(stepOrder: number, relativeMode: ScheduleValue['relativeMode'] = 'time'): StepFormState {
   return {
     stepOrder,
-    schedule: { ...emptySchedule },
+    schedule: { ...emptySchedule, relativeMode },
     messageType: 'text',
     messageContent: '',
     templateId: null,
@@ -254,7 +248,8 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
 
   const openAddStep = () => {
     const nextOrder = scenario ? (scenario.steps.length > 0 ? Math.max(...scenario.steps.map(s => s.stepOrder)) + 1 : 1) : 1
-    setStepForm(emptyStepForm(nextOrder))
+    const relativeMode = deliveryMode === 'relative' && nextOrder === 1 ? 'minutes' : 'time'
+    setStepForm(emptyStepForm(nextOrder, relativeMode))
     setEditingStepId(null)
     setShowStepForm(true)
     setStepError('')
@@ -270,6 +265,7 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
         offsetHours: ui.offsetHours,
         offsetMinutesRemainder: ui.offsetMinutesRemainder,
         deliveryTime: step.deliveryTime ?? '09:00',
+        relativeMode: step.offsetDays != null && step.deliveryTime ? 'time' : 'minutes',
       },
       messageType: step.messageType,
       messageContent: step.messageContent,
@@ -420,11 +416,6 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
 
   const sortedSteps = [...scenario.steps].sort((a, b) => a.stepOrder - b.stepOrder)
   const modeBadge = modeBadgeStyle[deliveryMode]
-  const relativeBaseMinutes = relativeBaseMinutesForStep(
-    sortedSteps,
-    stepForm.stepOrder,
-    editingStepId,
-  )
 
   return (
     <div>
@@ -611,7 +602,6 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
                 mode={deliveryMode}
                 value={stepForm.schedule}
                 onChange={(schedule) => setStepForm({ ...stepForm, schedule })}
-                relativeBaseMinutes={relativeBaseMinutes}
               />
 
               {/* 入力モード切替: 直接入力 / テンプレート参照 */}
