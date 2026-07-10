@@ -22,7 +22,7 @@ import {
 } from '@line-crm/db';
 import type { EntryRoute, Friend } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
-import { buildMessage, expandVariables } from '../services/step-delivery.js';
+import { buildMessage, expandVariables, messageToLogPayload } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
@@ -34,10 +34,21 @@ const webhook = new Hono<Env>();
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
 const INCOMING_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
 const NOTICE_PREVIEW_MAX_LENGTH = 500;
+const RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX = 'lh:richmenu:text-image:';
 
 type NoticeRecipient = {
   id: string;
   line_user_id: string;
+};
+
+type RichMenuTextImageActionData = {
+  kind?: unknown;
+  actionId?: unknown;
+  text?: unknown;
+  image?: {
+    originalContentUrl?: unknown;
+    previewImageUrl?: unknown;
+  } | null;
 };
 
 function truncateNoticeText(text: string): string {
@@ -146,6 +157,89 @@ async function notifyIncomingMessageRecipients(
   } catch (err) {
     console.error('[webhook] incoming notice failed', err);
   }
+}
+
+async function handleRichMenuTextImagePostback(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    friend: Friend;
+    lineAccountId: string | null;
+    postbackData: string;
+    replyToken: string;
+  },
+): Promise<boolean> {
+  if (!params.postbackData.startsWith(RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX)) {
+    return false;
+  }
+  if (!params.lineAccountId) {
+    console.warn('text+image rich menu postback received without lineAccountId');
+    return true;
+  }
+
+  const actionId = params.postbackData.slice(RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX.length);
+  if (!actionId) return true;
+
+  const row = await db
+    .prepare(
+      `SELECT a.action_data
+         FROM rich_menu_areas a
+         JOIN rich_menu_pages p ON p.id = a.page_id
+         JOIN rich_menu_groups g ON g.id = p.group_id
+        WHERE g.account_id = ?
+          AND a.action_type = 'postback'
+          AND json_extract(a.action_data, '$.kind') = 'text_image'
+          AND json_extract(a.action_data, '$.actionId') = ?
+        LIMIT 1`,
+    )
+    .bind(params.lineAccountId, actionId)
+    .first<{ action_data: string }>();
+
+  if (!row?.action_data) {
+    console.warn(`text+image rich menu action not found: ${actionId}`);
+    return true;
+  }
+
+  let parsed: RichMenuTextImageActionData;
+  try {
+    parsed = JSON.parse(row.action_data) as RichMenuTextImageActionData;
+  } catch {
+    console.warn(`invalid text+image rich menu action JSON: ${actionId}`);
+    return true;
+  }
+
+  const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+  const originalContentUrl = typeof parsed.image?.originalContentUrl === 'string'
+    ? parsed.image.originalContentUrl
+    : '';
+  const previewImageUrl = typeof parsed.image?.previewImageUrl === 'string'
+    ? parsed.image.previewImageUrl
+    : originalContentUrl;
+
+  const messages: ReturnType<typeof buildMessage>[] = [];
+  if (text) messages.push(buildMessage('text', text));
+  if (originalContentUrl) {
+    messages.push(buildMessage('image', JSON.stringify({ originalContentUrl, previewImageUrl })));
+  }
+
+  if (messages.length === 0) {
+    console.warn(`text+image rich menu action has no reply payload: ${actionId}`);
+    return true;
+  }
+
+  await lineClient.replyMessage(params.replyToken, messages);
+  for (const message of messages) {
+    const payload = messageToLogPayload(message);
+    await db
+      .prepare(
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'rich_menu', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), params.friend.id, payload.messageType, payload.content, params.lineAccountId, jstNow())
+      .run();
+  }
+
+  return true;
 }
 
 async function notifyFriendAddRecipients(
@@ -575,6 +669,14 @@ async function handleEvent(
     } catch (err) {
       console.error('Failed to log incoming postback', err);
     }
+
+    const handledRichMenuTextImage = await handleRichMenuTextImagePostback(db, lineClient, {
+      friend,
+      lineAccountId,
+      postbackData,
+      replyToken: event.replyToken,
+    });
+    if (handledRichMenuTextImage) return;
 
     for (const rule of autoReplies.results) {
       const isMatch = rule.match_type === 'exact'

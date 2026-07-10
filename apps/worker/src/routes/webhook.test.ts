@@ -46,6 +46,10 @@ vi.mock('../services/event-bus.js', () => ({
 vi.mock('../services/step-delivery.js', () => ({
   buildMessage: vi.fn(),
   expandVariables: vi.fn(),
+  messageToLogPayload: vi.fn((message: { type: string; text?: string }) => ({
+    messageType: message.type,
+    content: message.text ?? JSON.stringify(message),
+  })),
 }));
 
 import { verifySignature } from '@line-crm/line-sdk';

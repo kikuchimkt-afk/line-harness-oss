@@ -1,8 +1,13 @@
 'use client'
 
+import { useRef, useState } from 'react'
+import { api } from '@/lib/api'
 import type { Area } from './canvas-editor'
 
 type PageOption = { id: string; name: string }
+type ActionSelectValue = Area['actionType'] | 'text_image'
+
+const TEXT_IMAGE_POSTBACK_PREFIX = 'lh:richmenu:text-image:'
 
 type Props = {
   area: Area
@@ -11,7 +16,14 @@ type Props = {
   onDelete: () => void
 }
 
-function defaultActionData(type: Area['actionType']): Record<string, unknown> {
+function createActionId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `text-image-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function defaultActionData(type: ActionSelectValue): Record<string, unknown> {
   switch (type) {
     case 'uri':
       return { uri: '' }
@@ -19,6 +31,16 @@ function defaultActionData(type: Area['actionType']): Record<string, unknown> {
       return { text: '' }
     case 'postback':
       return { data: '', displayText: '' }
+    case 'text_image': {
+      const actionId = createActionId()
+      return {
+        kind: 'text_image',
+        actionId,
+        data: `${TEXT_IMAGE_POSTBACK_PREFIX}${actionId}`,
+        text: '',
+        image: null,
+      }
+    }
     case 'richmenuswitch':
       return { targetPageId: '' }
   }
@@ -48,6 +70,40 @@ function NumField({
 
 export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
   const data = (area.actionData ?? {}) as Record<string, unknown>
+  const selectedAction: ActionSelectValue =
+    area.actionType === 'postback' && data.kind === 'text_image'
+      ? 'text_image'
+      : area.actionType
+  const image = data.image && typeof data.image === 'object'
+    ? data.image as { originalContentUrl?: string; previewImageUrl?: string }
+    : null
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+
+  async function handleTextImageUpload(file: File) {
+    setUploading(true)
+    setUploadError(null)
+    try {
+      const res = await api.uploads.image(file)
+      if (!res.success) throw new Error(res.error ?? '画像のアップロードに失敗しました')
+      onUpdate({
+        actionData: {
+          ...data,
+          image: {
+            originalContentUrl: res.data.url,
+            previewImageUrl: res.data.url,
+            key: res.data.key,
+            mimeType: res.data.mimeType,
+          },
+        },
+      })
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setUploading(false)
+    }
+  }
 
   return (
     <div className="space-y-3 text-sm">
@@ -79,15 +135,19 @@ export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
       <label className="block">
         <span className="text-xs text-gray-500">アクション</span>
         <select
-          value={area.actionType}
+          value={selectedAction}
           onChange={(e) => {
-            const next = e.target.value as Area['actionType']
-            onUpdate({ actionType: next, actionData: defaultActionData(next) })
+            const next = e.target.value as ActionSelectValue
+            onUpdate({
+              actionType: next === 'text_image' ? 'postback' : next,
+              actionData: defaultActionData(next),
+            })
           }}
           className="mt-0.5 block w-full border border-gray-300 rounded px-2 py-1 text-sm"
         >
           <option value="uri">URL を開く (uri)</option>
           <option value="message">テキスト送信 (message)</option>
+          <option value="text_image">テキスト＋画像を送る</option>
           <option value="postback">postback</option>
           <option value="richmenuswitch">タブ切替 (richmenuswitch)</option>
         </select>
@@ -120,7 +180,78 @@ export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
         </label>
       )}
 
-      {area.actionType === 'postback' && (
+      {selectedAction === 'text_image' && (
+        <div className="space-y-3 rounded-lg border border-pink-100 bg-pink-50/40 p-3">
+          <label className="block">
+            <span className="text-xs text-gray-600">送信テキスト</span>
+            <textarea
+              rows={4}
+              value={(data.text as string) ?? ''}
+              onChange={(e) => onUpdate({ actionData: { ...data, text: e.target.value } })}
+              placeholder="画像と一緒に送る文章を入力"
+              className="mt-0.5 block w-full border border-pink-200 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200 resize-y"
+            />
+          </label>
+
+          <div>
+            <span className="text-xs text-gray-600">送信画像</span>
+            {image?.originalContentUrl ? (
+              <div className="mt-1 flex items-start gap-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={image.previewImageUrl || image.originalContentUrl}
+                  alt=""
+                  className="h-20 w-20 rounded border border-pink-100 object-cover"
+                />
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading}
+                    className="text-xs font-medium text-pink-700 hover:underline disabled:opacity-50"
+                  >
+                    差し替え
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onUpdate({ actionData: { ...data, image: null } })}
+                    disabled={uploading}
+                    className="text-xs font-medium text-red-600 hover:underline disabled:opacity-50"
+                  >
+                    取り消し
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="mt-1 rounded-lg border border-pink-200 bg-white px-3 py-2 text-xs font-medium text-pink-700 hover:bg-pink-50 disabled:opacity-50"
+              >
+                {uploading ? 'アップロード中...' : '画像を選択'}
+              </button>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void handleTextImageUpload(file)
+                e.target.value = ''
+              }}
+            />
+            {uploadError && <p className="mt-1 text-[11px] text-red-600">{uploadError}</p>}
+            <p className="mt-1 text-[11px] text-gray-500">
+              PNG / JPEG 推奨。タップされたら、本文と画像をLINEにまとめて返信します。
+            </p>
+          </div>
+        </div>
+      )}
+
+      {selectedAction === 'postback' && (
         <>
           <label className="block">
             <span className="text-xs text-gray-500">postback data</span>

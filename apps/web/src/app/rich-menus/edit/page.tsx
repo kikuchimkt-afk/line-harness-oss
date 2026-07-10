@@ -483,6 +483,19 @@ function Editor({
                     setActivePageId(targetId)
                     setSelectedAreaId(null)
                   }
+                } else if (
+                  area.actionType === 'postback' &&
+                  (area.actionData as { kind?: string }).kind === 'text_image'
+                ) {
+                  const data = area.actionData as {
+                    text?: string
+                    image?: { originalContentUrl?: string } | null
+                  }
+                  alert(
+                    'テキスト＋画像を送信します\n\n' +
+                      `テキスト:\n${data.text || '(未設定)'}\n\n` +
+                      `画像: ${data.image?.originalContentUrl ? '設定済み' : '未設定'}`,
+                  )
                 } else {
                   alert(`action: ${area.actionType}\n${JSON.stringify(area.actionData)}`)
                 }

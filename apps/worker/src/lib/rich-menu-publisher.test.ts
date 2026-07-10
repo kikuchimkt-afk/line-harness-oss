@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   buildAliasId,
   resolveSwitcherActions,
+  toLineRichMenuAction,
   publishRichMenuGroup,
   unpublishRichMenuGroup,
   linkRichMenuBulkChunked,
@@ -67,6 +68,44 @@ describe('resolveSwitcherActions', () => {
       }],
     }];
     expect(() => resolveSwitcherActions(pages, 'gid12345-aaaa')).toThrow(/nonexistent/);
+  });
+});
+
+describe('toLineRichMenuAction', () => {
+  it('text_image の内部データを LINE postback action に変換する', () => {
+    const action = toLineRichMenuAction({
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+      actionType: 'postback',
+      actionData: {
+        kind: 'text_image',
+        actionId: 'action-1',
+        data: 'lh:richmenu:text-image:action-1',
+        text: '案内です',
+        image: {
+          originalContentUrl: 'https://example.com/image.jpg',
+          previewImageUrl: 'https://example.com/image.jpg',
+        },
+      },
+    });
+
+    expect(action).toEqual({
+      type: 'postback',
+      data: 'lh:richmenu:text-image:action-1',
+    });
+  });
+
+  it('text_image は本文または画像がない場合 publish 前に拒否する', () => {
+    expect(() =>
+      toLineRichMenuAction({
+        bounds: { x: 0, y: 0, width: 100, height: 100 },
+        actionType: 'postback',
+        actionData: {
+          kind: 'text_image',
+          actionId: 'action-1',
+          data: 'lh:richmenu:text-image:action-1',
+        },
+      }),
+    ).toThrow(/requires text or image/);
   });
 });
 
