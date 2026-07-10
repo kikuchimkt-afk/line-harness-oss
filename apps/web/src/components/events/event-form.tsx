@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot } from '@/lib/api'
 import ImageUploader from '@/components/shared/image-uploader'
@@ -77,6 +78,17 @@ const SUPPORT_PRESET_FIELDS: EventBookingFormField[] = [
   },
   { id: 'consultation', label: '事前に相談したいこと', type: 'textarea', required: false, placeholder: '必要があればご記入ください' },
 ]
+
+function DialogPortal({ children }: { children: ReactNode }) {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  if (!mounted) return null
+  return createPortal(children, document.body)
+}
 
 export default function EventForm({ accountId, eventId }: EventFormProps) {
   const router = useRouter()
@@ -1044,8 +1056,9 @@ function AddSlotDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 px-4 py-6 sm:py-10">
-      <div className="mx-auto w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+    <DialogPortal>
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4 text-gray-900">予約枠を追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
         <div className="space-y-3">
@@ -1101,8 +1114,9 @@ function AddSlotDialog({
             追加
           </button>
         </div>
+        </div>
       </div>
-    </div>
+    </DialogPortal>
   )
 }
 
@@ -1147,11 +1161,12 @@ function BulkSlotDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 px-4 py-6 sm:py-10">
-      <div className="mx-auto w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl">
-        <h3 className="text-lg font-bold mb-4 text-gray-900">予約枠の一括追加</h3>
+    <DialogPortal>
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="w-full max-w-3xl rounded-lg bg-white p-5 shadow-xl">
+        <h3 className="text-lg font-bold mb-3 text-gray-900">予約枠の一括追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
-        <div className="space-y-4">
+        <div className="space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label>
               <span className="text-sm font-medium text-gray-700">開始日</span>
@@ -1181,54 +1196,56 @@ function BulkSlotDialog({
               ))}
             </div>
           </div>
-          <div>
-            <span className="text-sm font-medium text-gray-700 block mb-1.5">時刻パターン</span>
-            {patterns.map((p, i) => (
-              <div key={i} className="flex gap-2 mb-1.5 items-center">
-                <input
-                  type="time"
-                  value={p.start}
-                  onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, start: e.target.value } : x)))}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                />
-                <span className="text-gray-500">〜</span>
-                <input
-                  type="time"
-                  value={p.end}
-                  onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, end: e.target.value } : x)))}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                />
-                {patterns.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setPatterns((ps) => ps.filter((_, j) => j !== i))}
-                    className="text-red-600 px-2"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={() => setPatterns((ps) => [...ps, { start: '14:00', end: '15:00' }])}
-              className="text-sm text-blue-600 hover:underline"
-            >
-              ＋ パターン追加
-            </button>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_220px] md:items-start">
+            <div>
+              <span className="text-sm font-medium text-gray-700 block mb-1.5">時刻パターン</span>
+              {patterns.map((p, i) => (
+                <div key={i} className="flex gap-2 mb-1.5 items-center">
+                  <input
+                    type="time"
+                    value={p.start}
+                    onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, start: e.target.value } : x)))}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                  <span className="text-gray-500">〜</span>
+                  <input
+                    type="time"
+                    value={p.end}
+                    onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, end: e.target.value } : x)))}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                  {patterns.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setPatterns((ps) => ps.filter((_, j) => j !== i))}
+                      className="text-red-600 px-2"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setPatterns((ps) => [...ps, { start: '14:00', end: '15:00' }])}
+                className="text-sm text-blue-600 hover:underline"
+              >
+                ＋ パターン追加
+              </button>
+            </div>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">定員（空欄=無制限）</span>
+              <input
+                type="number"
+                min={1}
+                value={capacity}
+                onChange={(e) => setCapacity(e.target.value)}
+                className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </label>
           </div>
-          <label className="block">
-            <span className="text-sm font-medium text-gray-700">定員（各枠共通・空欄=無制限）</span>
-            <input
-              type="number"
-              min={1}
-              value={capacity}
-              onChange={(e) => setCapacity(e.target.value)}
-              className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
         </div>
-        <div className="flex justify-end gap-2 mt-5">
+        <div className="flex justify-end gap-2 mt-4">
           <button onClick={onClose} className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">
             キャンセル
           </button>
@@ -1240,8 +1257,9 @@ function BulkSlotDialog({
             生成
           </button>
         </div>
+        </div>
       </div>
-    </div>
+    </DialogPortal>
   )
 }
 
