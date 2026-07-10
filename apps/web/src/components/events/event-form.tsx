@@ -1044,8 +1044,8 @@ function AddSlotDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 px-4 py-6 sm:py-10">
+      <div className="mx-auto w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4 text-gray-900">予約枠を追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
         <div className="space-y-3">
@@ -1147,12 +1147,12 @@ function BulkSlotDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg mx-4">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 px-4 py-6 sm:py-10">
+      <div className="mx-auto w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4 text-gray-900">予約枠の一括追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label>
               <span className="text-sm font-medium text-gray-700">開始日</span>
               <input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
@@ -1164,13 +1164,13 @@ function BulkSlotDialog({
           </div>
           <div>
             <span className="text-sm font-medium text-gray-700 block mb-1.5">曜日</span>
-            <div className="flex gap-1.5">
+            <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7">
               {['日', '月', '火', '水', '木', '金', '土'].map((d, i) => (
                 <button
                   key={i}
                   type="button"
                   onClick={() => toggleWeekday(i)}
-                  className={`flex-1 px-2 py-2 text-sm border rounded-lg ${
+                  className={`px-2 py-2 text-sm border rounded-lg ${
                     weekdays.includes(i)
                       ? 'bg-blue-600 text-white border-blue-600'
                       : 'border-gray-300 text-gray-700 hover:bg-gray-50'
