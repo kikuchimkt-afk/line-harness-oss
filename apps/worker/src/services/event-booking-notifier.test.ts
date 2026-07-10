@@ -24,13 +24,14 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('変更・キャンセルは予約履歴画面');
   });
 
-  test('受付メッセージに面談予約URLを含められる', () => {
+  test('受付メッセージに予約履歴URLを含められる', () => {
     const text = renderEventNotificationText('received_confirmed', {
       ...baseCtx,
-      consultationBookingUrl: 'https://example.com/?page=salon-book',
+      bookingHistoryUrl: 'https://liff.line.me/2000000000-abc?page=event-me',
     });
-    expect(text).toContain('面談予約はこちら');
-    expect(text).toContain('https://example.com/?page=salon-book');
+    expect(text).toContain('予約履歴はこちら');
+    expect(text).toContain('https://liff.line.me/2000000000-abc?page=event-me');
+    expect(text).not.toContain('面談予約はこちら');
   });
 
   test('後追い承認確定', () => {

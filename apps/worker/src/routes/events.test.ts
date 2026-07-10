@@ -1955,7 +1955,12 @@ describe('admin bookings management', () => {
     expect(state.bookings[0].status).toBe('confirmed');
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: 'confirmed' }),
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({
+          bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
+        }),
+      }),
     );
   });
 

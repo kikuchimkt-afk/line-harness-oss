@@ -940,11 +940,10 @@ function startsAtJst(utcIso: string): string {
   return `${jst.slice(0, 10)} ${jst.slice(11, 16)}`;
 }
 
-function buildSalonBookingUrl(requestUrl: string, liffId?: string | null): string | null {
+function buildEventBookingHistoryUrl(liffId?: string | null): string | null {
   if (!liffId) return null;
-  const url = new URL('/', new URL(requestUrl).origin);
-  url.searchParams.set('liffId', liffId);
-  url.searchParams.set('page', 'salon-book');
+  const url = new URL(`https://liff.line.me/${liffId}`);
+  url.searchParams.set('page', 'event-me');
   return url.toString();
 }
 
@@ -1235,7 +1234,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
           startsAtJst: startsAtJst(slot.starts_at),
           venueName: event.venue_name,
           venueUrl: event.venue_url,
-          consultationBookingUrl: buildSalonBookingUrl(c.req.url, c.req.query('liffId')),
+          bookingHistoryUrl: buildEventBookingHistoryUrl(c.req.query('liffId')),
         },
       });
     }
@@ -1359,7 +1358,6 @@ async function notifyBookingFriend(
   db: D1Database,
   booking_id: string,
   kind: EventNotificationKind,
-  requestUrl?: string,
 ): Promise<void> {
   try {
     const row = await db
@@ -1396,7 +1394,7 @@ async function notifyBookingFriend(
         startsAtJst: startsAtJst(row.slot_starts_at),
         venueName: row.venue_name,
         venueUrl: row.venue_url,
-        consultationBookingUrl: requestUrl ? buildSalonBookingUrl(requestUrl, row.liff_id) : null,
+        bookingHistoryUrl: buildEventBookingHistoryUrl(row.liff_id),
       },
     });
   } catch (e) {
@@ -1469,7 +1467,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     }
   }
 
-  await notifyBookingFriend(c.env.DB, booking.id, action === 'confirm' ? 'confirmed' : 'rejected', c.req.url);
+  await notifyBookingFriend(c.env.DB, booking.id, action === 'confirm' ? 'confirmed' : 'rejected');
   const updated = await c.env.DB
     .prepare(`SELECT * FROM event_bookings WHERE id = ?`)
     .bind(booking.id)
@@ -1499,7 +1497,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/cancel', async (c)
     .run();
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, booking.id);
-  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin', c.req.url);
+  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
   return c.json({ ok: true });
 });
 
