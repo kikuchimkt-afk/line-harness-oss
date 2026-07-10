@@ -24,6 +24,15 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('変更・キャンセルは予約履歴画面');
   });
 
+  test('受付メッセージに面談予約URLを含められる', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      consultationBookingUrl: 'https://example.com/?page=salon-book',
+    });
+    expect(text).toContain('面談予約はこちら');
+    expect(text).toContain('https://example.com/?page=salon-book');
+  });
+
   test('後追い承認確定', () => {
     const text = renderEventNotificationText('confirmed', baseCtx);
     expect(text).toContain('予約が確定しました');

@@ -195,6 +195,7 @@ function makeEventDb(state: {
               venue_url: e.venue_url,
               slot_starts_at: s.starts_at,
               channel_access_token: la.channel_access_token ?? '',
+              liff_id: la.liff_id ?? null,
               line_user_id: f.line_user_id,
             } as T;
           }
@@ -1614,6 +1615,31 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('over_friend_limit');
+  });
+
+  test('allows multiple bookings when max_bookings_per_friend is null', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, max_bookings_per_friend: null })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed', identity_key: 'uid:U1-uuid' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1', user_id: 'U1-uuid' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's2' }),
+    });
+    expect(res.status).toBe(201);
+    expect(state.bookings).toHaveLength(2);
   });
 
   test('410 slot_started for past slot', async () => {

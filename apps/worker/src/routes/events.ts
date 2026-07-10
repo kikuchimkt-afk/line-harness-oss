@@ -940,6 +940,14 @@ function startsAtJst(utcIso: string): string {
   return `${jst.slice(0, 10)} ${jst.slice(11, 16)}`;
 }
 
+function buildSalonBookingUrl(requestUrl: string, liffId?: string | null): string | null {
+  if (!liffId) return null;
+  const url = new URL('/', new URL(requestUrl).origin);
+  url.searchParams.set('liffId', liffId);
+  url.searchParams.set('page', 'salon-book');
+  return url.toString();
+}
+
 events.post('/api/liff/events/:id/bookings', async (c) => {
   const account_id = await resolveAccountIdFromLiff(c);
   if (!account_id) return bad(c, 'liff_account_resolution_failed', 400);
@@ -1168,9 +1176,9 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
 
   // Verify friend-limit again (identity_key ベース、cross-account 同一人物
   // を含めて再 COUNT)。並走 race の loser は DELETE してロールバック。
-  // effectiveMax = max_bookings_per_friend ?? 1 (max=null は 1 件まで)。
-  {
-    const effectiveMax = event.max_bookings_per_friend ?? 1;
+  // max=null は「制限なし」なので再チェックもスキップする。
+  if (event.max_bookings_per_friend != null) {
+    const effectiveMax = event.max_bookings_per_friend;
     const cnt2 = await c.env.DB
       .prepare(
         `SELECT COUNT(*) AS c FROM event_bookings
@@ -1227,6 +1235,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
           startsAtJst: startsAtJst(slot.starts_at),
           venueName: event.venue_name,
           venueUrl: event.venue_url,
+          consultationBookingUrl: buildSalonBookingUrl(c.req.url, c.req.query('liffId')),
         },
       });
     }
@@ -1350,6 +1359,7 @@ async function notifyBookingFriend(
   db: D1Database,
   booking_id: string,
   kind: EventNotificationKind,
+  requestUrl?: string,
 ): Promise<void> {
   try {
     const row = await db
@@ -1357,6 +1367,7 @@ async function notifyBookingFriend(
         `SELECT e.name AS event_name, e.venue_name, e.venue_url,
                 s.starts_at AS slot_starts_at,
                 la.channel_access_token,
+                la.liff_id,
                 f.line_user_id
            FROM event_bookings b
            JOIN events e ON e.id = b.event_id
@@ -1372,6 +1383,7 @@ async function notifyBookingFriend(
         venue_url: string | null;
         slot_starts_at: string;
         channel_access_token: string;
+        liff_id: string | null;
         line_user_id: string;
       }>();
     if (!row || !row.channel_access_token) return;
@@ -1384,6 +1396,7 @@ async function notifyBookingFriend(
         startsAtJst: startsAtJst(row.slot_starts_at),
         venueName: row.venue_name,
         venueUrl: row.venue_url,
+        consultationBookingUrl: requestUrl ? buildSalonBookingUrl(requestUrl, row.liff_id) : null,
       },
     });
   } catch (e) {
@@ -1456,7 +1469,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     }
   }
 
-  await notifyBookingFriend(c.env.DB, booking.id, action === 'confirm' ? 'confirmed' : 'rejected');
+  await notifyBookingFriend(c.env.DB, booking.id, action === 'confirm' ? 'confirmed' : 'rejected', c.req.url);
   const updated = await c.env.DB
     .prepare(`SELECT * FROM event_bookings WHERE id = ?`)
     .bind(booking.id)
@@ -1486,7 +1499,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/cancel', async (c)
     .run();
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, booking.id);
-  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
+  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin', c.req.url);
   return c.json({ ok: true });
 });
 

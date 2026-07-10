@@ -163,6 +163,13 @@ function uid(): string {
   return crypto.randomUUID();
 }
 
+function buildSalonBookingUrl(liffId: string): string {
+  const url = new URL('/', window.location.origin);
+  url.searchParams.set('liffId', liffId);
+  url.searchParams.set('page', 'salon-book');
+  return url.toString();
+}
+
 // ─── Loading ──────────────────────────────────────────────
 
 function Spinner() {
@@ -178,17 +185,18 @@ function Spinner() {
 function EventDetailScreen({
   ctx,
   eventId,
-  onPickSlot,
+  onPickSlots,
   onGoHistory,
 }: {
   ctx: EventBookingContext;
   eventId: string;
-  onPickSlot: (slot: EventSlot, event: EventDetail) => void;
+  onPickSlots: (slots: EventSlot[], event: EventDetail) => void;
   onGoHistory: () => void;
 }) {
   const [event, setEvent] = useState<EventDetail | null>(null);
   const [slots, setSlots] = useState<EventSlot[]>([]);
   const [myActive, setMyActive] = useState<MyBooking[]>([]);
+  const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -225,6 +233,11 @@ function EventDetailScreen({
     void load();
     return () => { cancelled = true; };
   }, [ctx, eventId]);
+
+  useEffect(() => {
+    const availableIds = new Set(slots.map((slot) => slot.id));
+    setSelectedSlotIds((prev) => prev.filter((slotId) => availableIds.has(slotId)));
+  }, [slots]);
 
   if (loading) return <Spinner />;
   if (error || !event) {
@@ -270,7 +283,20 @@ function EventDetailScreen({
     );
   }
 
-  const overLimit = max != null && myActive.length >= max;
+  const activeCountForLimit = Math.max(myActive.length, existingBooking ? 1 : 0);
+  const remainingSelectable = max == null ? Number.POSITIVE_INFINITY : Math.max(0, max - activeCountForLimit);
+  const overLimit = remainingSelectable <= 0;
+  const selectedSlots = slots.filter((slot) => selectedSlotIds.includes(slot.id));
+
+  function toggleSlot(slot: EventSlot) {
+    const full = slot.remaining != null && slot.remaining <= 0;
+    if (full) return;
+    setSelectedSlotIds((prev) => {
+      if (prev.includes(slot.id)) return prev.filter((slotId) => slotId !== slot.id);
+      if (prev.length >= remainingSelectable) return prev;
+      return [...prev, slot.id];
+    });
+  }
 
   return (
     <div className="pb-24 eb-fade-in">
@@ -300,7 +326,7 @@ function EventDetailScreen({
           )}
           {max != null && (
             <div className="mt-3 inline-flex items-center gap-1 eb-badge bg-gray-100 text-gray-700">
-              あなたの予約 {myActive.length} / {max}
+              あなたの予約 {activeCountForLimit} / {max}
             </div>
           )}
           {existingBooking && (
@@ -308,6 +334,9 @@ function EventDetailScreen({
               ✓ {formatJp(existingBooking.slot_starts_at)} の予約済みです
             </div>
           )}
+          <button onClick={onGoHistory} className="eb-history-top-btn mt-4">
+            予約履歴を見る
+          </button>
         </div>
 
         {event.description && (
@@ -320,6 +349,9 @@ function EventDetailScreen({
 
         <div className="mt-5">
           <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">日時を選択</h2>
+          <p className="text-xs text-gray-500 mb-3 px-1">
+            参加したい日時を複数選べます。必要事項の入力は次の画面で1回だけです。
+          </p>
           {slots.length === 0 ? (
             <div className="eb-card text-center text-sm text-gray-500">
               現在予約可能な枠はありません。
@@ -328,17 +360,24 @@ function EventDetailScreen({
             <ul className="space-y-2">
               {slots.map((s) => {
                 const full = s.remaining != null && s.remaining <= 0;
-                const disabled = full || overLimit;
+                const selected = selectedSlotIds.includes(s.id);
+                const selectionLimitReached = selectedSlotIds.length >= remainingSelectable;
+                const disabled = !selected && (full || overLimit || selectionLimitReached);
                 return (
                   <li key={s.id}>
                     <button
                       disabled={disabled}
-                      onClick={() => onPickSlot(s, event)}
-                      className="eb-slot-btn"
+                      onClick={() => toggleSlot(s)}
+                      className={`eb-slot-btn ${selected ? 'eb-slot-selected' : ''}`}
                     >
-                      <span className="flex flex-col items-start">
-                        <span className="text-xs opacity-70">{formatJpDateOnly(s.starts_at)}</span>
-                        <span className="text-base">{formatJpTimeOnly(s.starts_at)} 〜 {formatJpTimeOnly(s.ends_at)}</span>
+                      <span className="flex items-center gap-3">
+                        <span className="eb-slot-check" aria-hidden>
+                          {selected ? '✓' : ''}
+                        </span>
+                        <span className="flex flex-col items-start">
+                          <span className="text-xs opacity-70">{formatJpDateOnly(s.starts_at)}</span>
+                          <span className="text-base">{formatJpTimeOnly(s.starts_at)} 〜 {formatJpTimeOnly(s.ends_at)}</span>
+                        </span>
                       </span>
                       <span className="text-xs font-medium">
                         {full ? '満員' : s.capacity == null ? '定員なし' : `残 ${s.remaining}`}
@@ -356,11 +395,20 @@ function EventDetailScreen({
           )}
         </div>
 
-        <div className="mt-6 text-center">
-          <button onClick={onGoHistory} className="text-sm eb-line-green-text underline">
-            予約履歴を見る
-          </button>
-        </div>
+        {slots.length > 0 && !overLimit && (
+          <div className="eb-selection-panel">
+            <div className="text-xs text-gray-600">
+              選択中: <span className="font-bold text-gray-900">{selectedSlots.length}</span> 件
+            </div>
+            <button
+              onClick={() => onPickSlots(selectedSlots, event)}
+              disabled={selectedSlots.length === 0}
+              className="eb-primary-btn"
+            >
+              選択した日時で申し込む
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -369,15 +417,15 @@ function EventDetailScreen({
 function ConfirmScreen({
   ctx,
   event,
-  slot,
+  slots,
   onBack,
   onDone,
 }: {
   ctx: EventBookingContext;
   event: EventDetail;
-  slot: EventSlot;
+  slots: EventSlot[];
   onBack: () => void;
-  onDone: (status: string) => void;
+  onDone: (status: string, count: number, failedCount?: number) => void;
 }) {
   const [note, setNote] = useState('');
   const [answers, setAnswers] = useState<FormAnswers>({});
@@ -405,7 +453,32 @@ function ConfirmScreen({
     return null;
   }
 
+  function bookingErrorMessage(err: unknown): string {
+    const e = err as { status?: number; body?: { error?: string; existing?: { slot_starts_at?: string } } };
+    const code = e.body?.error;
+    switch (code) {
+      case 'slot_full': return 'すでに満員になりました。別の日時をお選びください。';
+      case 'over_friend_limit': return 'このイベントへの予約上限に達しています。';
+      case 'slot_started': return 'この枠は既に開始されています。';
+      case 'slot_inactive': return 'この枠は受付を締め切りました。';
+      case 'event_unpublished': return 'このイベントは現在受付を停止しています。';
+      case 'unauthorized':
+      case 'friend_not_found':
+        return 'LINE 認証に失敗しました。一度トークルームに戻り、友だち追加が完了していることを確認してください。';
+      case 'idempotent_in_progress': return '前回のリクエストを処理中です。少しお待ちください。';
+      case 'duplicate_friend_booking': {
+        const when = e.body?.existing?.slot_starts_at ? formatJp(e.body.existing.slot_starts_at) : '';
+        return `このイベントは既に予約済みです${when ? `（${when}）` : ''}。予約履歴から確認できます。`;
+      }
+      default: return err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async function submit() {
+    if (slots.length === 0) {
+      setError('予約する日時を選び直してください。');
+      return;
+    }
     const validationError = validateAnswers();
     if (validationError) {
       setError(validationError);
@@ -418,36 +491,29 @@ function ConfirmScreen({
     setSubmitting(true);
     setError(null);
     try {
-      const res = await apiPost<{ id: string; status: string }>(
-        `/api/liff/events/${event.id}/bookings`,
-        { slot_id: slot.id, customer_note: note || null, form_answers: answers },
-        ctx,
-        { 'Idempotency-Key': idemKey },
-      );
-      onDone(res.status);
-    } catch (err) {
-      const e = err as { status?: number; body?: { error?: string } };
-      const code = e.body?.error;
-      const msg = (() => {
-        switch (code) {
-          case 'slot_full': return 'すでに満員になりました。別の日時をお選びください。';
-          case 'over_friend_limit': return 'このイベントへの予約上限に達しています。';
-          case 'slot_started': return 'この枠は既に開始されています。';
-          case 'slot_inactive': return 'この枠は受付を締め切りました。';
-          case 'event_unpublished': return 'このイベントは現在受付を停止しています。';
-          case 'unauthorized':
-          case 'friend_not_found':
-            return 'LINE 認証に失敗しました。一度トークルームに戻り、友だち追加が完了していることを確認してください。';
-          case 'idempotent_in_progress': return '前回のリクエストを処理中です。少しお待ちください。';
-          case 'duplicate_friend_booking': {
-            const existing = (e.body as { existing?: { slot_starts_at?: string } } | undefined)?.existing;
-            const when = existing?.slot_starts_at ? formatJp(existing.slot_starts_at) : '';
-            return `このイベントは既に予約済みです${when ? `（${when}）` : ''}。予約履歴から確認できます。`;
-          }
-          default: return err instanceof Error ? err.message : String(err);
+      const successes: Array<{ id: string; status: string }> = [];
+      const failures: string[] = [];
+      for (const selectedSlot of slots) {
+        try {
+          const res = await apiPost<{ id: string; status: string }>(
+            `/api/liff/events/${event.id}/bookings`,
+            { slot_id: selectedSlot.id, customer_note: note || null, form_answers: answers },
+            ctx,
+            { 'Idempotency-Key': `${idemKey}-${selectedSlot.id}` },
+          );
+          successes.push(res);
+        } catch (err) {
+          failures.push(`${formatJp(selectedSlot.starts_at)}: ${bookingErrorMessage(err)}`);
         }
-      })();
-      setError(msg);
+      }
+      if (successes.length > 0) {
+        const status = successes.some((res) => res.status === 'requested') ? 'requested' : 'confirmed';
+        onDone(status, successes.length, failures.length);
+        return;
+      }
+      setError(failures[0] ?? '予約リクエストの送信に失敗しました。時間をおいて再度お試しください。');
+    } catch (err) {
+      setError(bookingErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -468,9 +534,18 @@ function ConfirmScreen({
       <div className="eb-card">
         <dl className="space-y-3 text-sm">
           <Row label="イベント" value={event.name} />
-          <Row label="日時" value={formatJp(slot.starts_at)} />
+          <Row label="日時" value={slots.length === 1 ? formatJp(slots[0].starts_at) : `${slots.length}件選択`} />
           {event.venue_name && <Row label="会場" value={event.venue_name} />}
         </dl>
+        {slots.length > 1 && (
+          <ul className="mt-3 space-y-2 border-t border-gray-100 pt-3">
+            {slots.map((selectedSlot) => (
+              <li key={selectedSlot.id} className="text-sm text-gray-700">
+                📅 {formatJp(selectedSlot.starts_at)}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {event.requires_approval === 1 && (
@@ -573,7 +648,7 @@ function ConfirmScreen({
       )}
 
       <button onClick={submit} disabled={submitting} className="eb-primary-btn">
-        {submitting ? '送信中...' : '予約をリクエスト'}
+        {submitting ? '送信中...' : slots.length > 1 ? `${slots.length}件まとめてリクエスト` : '予約をリクエスト'}
       </button>
       <button onClick={onBack} disabled={submitting} className="eb-secondary-btn">
         戻る
@@ -591,22 +666,47 @@ function Row({ label, value, valueClassName }: { label: string; value: string; v
   );
 }
 
-function DoneScreen({ status, onGoHistory }: { status: string; onGoHistory: () => void }) {
+function DoneScreen({
+  status,
+  count,
+  failedCount = 0,
+  onGoHistory,
+  onGoSalonBooking,
+}: {
+  status: string;
+  count: number;
+  failedCount?: number;
+  onGoHistory: () => void;
+  onGoSalonBooking: () => void;
+}) {
   const isPending = status === 'requested';
+  const hasPartialFailure = failedCount > 0;
+  const countText = count > 1 ? `${count}件の申込み` : '申込み';
+  const title = hasPartialFailure
+    ? '一部を受付しました'
+    : isPending
+      ? '受付しました'
+      : '予約が確定しました';
+  const desc = hasPartialFailure
+    ? `${count}件は受付できました。${failedCount}件は受付できませんでした。予約履歴で受付済みの日程をご確認ください。`
+    : isPending
+      ? `${countText}を受け付けました。運営の承認をお待ちください。承認されると LINE でお知らせします。`
+      : `${countText}が確定しました。LINE で詳細をお送りしました。`;
   return (
     <div className="px-4 py-10 text-center eb-slide-up">
       <div className="eb-card">
-        <div className="text-5xl mb-3">{isPending ? '⏳' : '✅'}</div>
+        <div className="text-5xl mb-3">{hasPartialFailure ? '⚠️' : isPending ? '⏳' : '✅'}</div>
         <h1 className="text-lg font-bold mb-2 text-gray-900">
-          {isPending ? '受付しました' : '予約が確定しました'}
+          {title}
         </h1>
         <p className="text-sm text-gray-600 mb-6 leading-relaxed">
-          {isPending
-            ? '運営の承認をお待ちください。承認されると LINE でお知らせします。'
-            : '予約が確定しました。LINE で詳細をお送りしました。'}
+          {desc}
         </p>
         <button onClick={onGoHistory} className="eb-primary-btn">
           予約履歴を見る
+        </button>
+        <button onClick={onGoSalonBooking} className="eb-secondary-btn mt-3">
+          面談予約へ進む
         </button>
       </div>
     </div>
@@ -747,8 +847,8 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
 
 type Screen =
   | { kind: 'detail'; eventId: string }
-  | { kind: 'confirm'; event: EventDetail; slot: EventSlot }
-  | { kind: 'done'; status: string }
+  | { kind: 'confirm'; event: EventDetail; slots: EventSlot[] }
+  | { kind: 'done'; status: string; count: number; failedCount?: number }
   | { kind: 'history' };
 
 function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
@@ -776,7 +876,7 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
           <EventDetailScreen
             ctx={ctx}
             eventId={screen.eventId}
-            onPickSlot={(slot, event) => setScreen({ kind: 'confirm', event, slot })}
+            onPickSlots={(slots, event) => setScreen({ kind: 'confirm', event, slots })}
             onGoHistory={() => setScreen({ kind: 'history' })}
           />
         )}
@@ -784,13 +884,19 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
           <ConfirmScreen
             ctx={ctx}
             event={screen.event}
-            slot={screen.slot}
+            slots={screen.slots}
             onBack={() => setScreen({ kind: 'detail', eventId: screen.event.id })}
-            onDone={(status) => setScreen({ kind: 'done', status })}
+            onDone={(status, count, failedCount) => setScreen({ kind: 'done', status, count, failedCount })}
           />
         )}
         {screen.kind === 'done' && (
-          <DoneScreen status={screen.status} onGoHistory={() => setScreen({ kind: 'history' })} />
+          <DoneScreen
+            status={screen.status}
+            count={screen.count}
+            failedCount={screen.failedCount}
+            onGoHistory={() => setScreen({ kind: 'history' })}
+            onGoSalonBooking={() => { window.location.href = buildSalonBookingUrl(ctx.liffId); }}
+          />
         )}
         {screen.kind === 'history' && <HistoryScreen ctx={ctx} />}
       </main>

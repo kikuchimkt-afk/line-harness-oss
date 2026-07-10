@@ -14,6 +14,7 @@ export interface EventNotificationContext {
   startsAtJst: string; // 例: "2026-06-01 10:00"
   venueName?: string | null;
   venueUrl?: string | null;
+  consultationBookingUrl?: string | null;
   hoursBefore?: number;
 }
 
@@ -24,13 +25,16 @@ export function renderEventNotificationText(
   const venueLine = ctx.venueName ? `\n会場: ${ctx.venueName}` : '';
   const venueUrlLine = ctx.venueUrl ? `\n${ctx.venueUrl}` : '';
   const detail = `\nイベント: ${ctx.eventName}\n日時: ${ctx.startsAtJst}${venueLine}${venueUrlLine}`;
+  const consultationLine = ctx.consultationBookingUrl
+    ? `\n\n面談予約はこちら:\n${ctx.consultationBookingUrl}`
+    : '';
   switch (kind) {
     case 'received_pending':
-      return `イベント申込みを受け付けました。${detail}\n\n運営の承認をお待ちください。`;
+      return `イベント申込みを受け付けました。${detail}\n\n運営の承認をお待ちください。${consultationLine}`;
     case 'received_confirmed':
-      return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。`;
+      return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。${consultationLine}`;
     case 'confirmed':
-      return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。`;
+      return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。${consultationLine}`;
     case 'rejected':
       return `申し訳ございません、今回のイベント予約はお受けできませんでした。${detail}`;
     case 'cancelled_by_admin':
