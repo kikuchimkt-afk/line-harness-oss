@@ -10,16 +10,16 @@ export async function canAccessLineAccount(c: Context<Env>, lineAccountId: strin
 }
 
 /**
- * Returns null when the current staff can see every account (owner / legacy
- * unrestricted staff), otherwise the concrete account ids they may operate.
+ * Returns null when the current staff can see every account (owner/env owner),
+ * otherwise the concrete account ids they may operate. Non-owner staff with no
+ * assigned accounts intentionally receives an empty list, not unrestricted
+ * access.
  */
 export async function getAllowedLineAccountIds(c: Context<Env>): Promise<string[] | null> {
   const staff = c.get('staff');
   if (!staff || staff.role === 'owner' || staff.id === 'env-owner') return null;
 
   const accountIds = await getStaffAccountIds(c.env.DB, staff.id);
-  if (accountIds.length === 0) return null; // Legacy unrestricted staff/admin.
-
   return accountIds;
 }
 
@@ -57,7 +57,7 @@ export async function filterAccessibleLineAccounts(
   if (!staff || staff.role === 'owner' || staff.id === 'env-owner') return accounts;
 
   const accountIds = await getStaffAccountIds(c.env.DB, staff.id);
-  if (accountIds.length === 0) return accounts; // Legacy unrestricted staff/admin.
+  if (accountIds.length === 0) return [];
 
   const allowed = new Set(accountIds);
   return accounts.filter((account) => allowed.has(account.id));

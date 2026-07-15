@@ -237,6 +237,9 @@ chats.get('/api/chats', async (c) => {
       if (denied) return denied;
     }
     const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
+    if (!lineAccountId && allowedLineAccountIds?.length === 0) {
+      return c.json({ success: true, data: [] });
+    }
 
     let unansweredIds: Set<string> | null = null;
     if (unansweredOnly) {

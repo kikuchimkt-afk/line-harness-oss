@@ -189,18 +189,22 @@ scenarios.get('/api/scenarios', async (c) => {
     } else {
       const allowedLineAccountIds = await getAllowedLineAccountIds(c);
       if (allowedLineAccountIds) {
-        const result = await c.env.DB
-          .prepare(
-            `SELECT s.*, COUNT(ss.id) as step_count
-             FROM scenarios s
-             LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
-             WHERE s.line_account_id IN (${makePlaceholders(allowedLineAccountIds.length)})
-             GROUP BY s.id
-             ORDER BY s.created_at DESC`,
-          )
-          .bind(...allowedLineAccountIds)
-          .all<DbScenarioWithStepCount>();
-        items = result.results;
+        if (allowedLineAccountIds.length === 0) {
+          items = [];
+        } else {
+          const result = await c.env.DB
+            .prepare(
+              `SELECT s.*, COUNT(ss.id) as step_count
+               FROM scenarios s
+               LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
+               WHERE s.line_account_id IN (${makePlaceholders(allowedLineAccountIds.length)})
+               GROUP BY s.id
+               ORDER BY s.created_at DESC`,
+            )
+            .bind(...allowedLineAccountIds)
+            .all<DbScenarioWithStepCount>();
+          items = result.results;
+        }
       } else {
         items = await getScenarios(c.env.DB);
       }

@@ -102,6 +102,22 @@ describe('account access scoping', () => {
     vi.unstubAllGlobals();
   });
 
+  test('GET /api/line-accounts returns no accounts for restricted admins without assignments', async () => {
+    const secondAccount = { ...fakeAccount, id: 'acc-2', name: '暗誦大会' };
+    dbMocks.getLineAccounts.mockResolvedValue([fakeAccount, secondAccount]);
+    dbMocks.getStaffAccountIds.mockResolvedValue([]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+
+    const app = setupApp('admin');
+    const res = await app.request('/api/line-accounts');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: Array<{ id: string; name: string }> };
+    expect(body.success).toBe(true);
+    expect(body.data).toEqual([]);
+    vi.unstubAllGlobals();
+  });
+
   test('GET /api/line-accounts/:id rejects assigned-out accounts', async () => {
     dbMocks.getLineAccountById.mockResolvedValue(fakeAccount);
     dbMocks.staffCanAccessLineAccount.mockResolvedValue(false);

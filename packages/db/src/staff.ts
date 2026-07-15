@@ -140,7 +140,6 @@ export async function staffCanAccessLineAccount(
 ): Promise<boolean> {
   if (staff.role === 'owner' || staff.id === 'env-owner') return true;
   const accountIds = await getStaffAccountIds(db, staff.id);
-  if (accountIds.length === 0) return true; // Legacy unrestricted staff/admin.
   return accountIds.includes(lineAccountId);
 }
 

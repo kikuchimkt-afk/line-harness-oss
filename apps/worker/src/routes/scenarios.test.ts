@@ -147,6 +147,22 @@ describe('GET /api/scenarios?lineAccountId=X', () => {
     expect(dbMocks.getScenarios).toHaveBeenCalledTimes(1);
   });
 
+  test('restricted admin with no assigned accounts sees no scenarios', async () => {
+    dbMocks.getStaffAccountIds.mockResolvedValue([]);
+    dbMocks.getScenarios.mockResolvedValue([
+      { id: 's-global', name: 'global', line_account_id: null, ...rowBase },
+      { id: 's-acc1', name: 'acc1', line_account_id: 'acc-1', ...rowBase },
+    ]);
+    const { db } = makeScenarioDb([]);
+
+    const res = await setupApp(db, 'admin').request('/api/scenarios');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: { id: string }[] };
+    expect(body.success).toBe(true);
+    expect(body.data).toEqual([]);
+    expect(dbMocks.getScenarios).not.toHaveBeenCalled();
+  });
+
   test('returns empty array when filter matches nothing and no globals exist', async () => {
     const rows: ScenarioRow[] = [
       { id: 's-other', name: 'other', line_account_id: 'acc-other', ...rowBase },

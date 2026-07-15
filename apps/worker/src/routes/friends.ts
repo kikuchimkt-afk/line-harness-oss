@@ -151,6 +151,18 @@ friends.get('/api/friends', async (c) => {
       if (denied) return denied;
     }
     const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
+    if (!lineAccountId && allowedLineAccountIds?.length === 0) {
+      return c.json({
+        success: true,
+        data: {
+          items: [],
+          total: 0,
+          page: Math.floor(offset / limit) + 1,
+          limit,
+          hasNextPage: false,
+        },
+      });
+    }
 
     // Build WHERE conditions
     const conditions: string[] = [];
@@ -418,14 +430,18 @@ friends.get('/api/friends/count', async (c) => {
     } else {
       const allowedLineAccountIds = await getAllowedLineAccountIds(c);
       if (allowedLineAccountIds) {
-        const row = await c.env.DB
-          .prepare(
-            `SELECT COUNT(*) as count FROM friends
-             WHERE is_following = 1 AND line_account_id IN (${sqlPlaceholders(allowedLineAccountIds.length)})`,
-          )
-          .bind(...allowedLineAccountIds)
-          .first<{ count: number }>();
-        count = row?.count ?? 0;
+        if (allowedLineAccountIds.length === 0) {
+          count = 0;
+        } else {
+          const row = await c.env.DB
+            .prepare(
+              `SELECT COUNT(*) as count FROM friends
+               WHERE is_following = 1 AND line_account_id IN (${sqlPlaceholders(allowedLineAccountIds.length)})`,
+            )
+            .bind(...allowedLineAccountIds)
+            .first<{ count: number }>();
+          count = row?.count ?? 0;
+        }
       } else {
         count = await getFriendCount(c.env.DB);
       }
@@ -446,6 +462,9 @@ friends.get('/api/friends/ref-stats', async (c) => {
       if (denied) return denied;
     }
     const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
+    if (!lineAccountId && allowedLineAccountIds?.length === 0) {
+      return c.json({ success: true, data: { routes: [], totalWithRef: 0 } });
+    }
     const scopeSql = lineAccountId
       ? 'line_account_id = ?'
       : allowedLineAccountIds
