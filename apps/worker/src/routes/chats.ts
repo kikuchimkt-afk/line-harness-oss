@@ -16,8 +16,35 @@ import {
 } from '@line-crm/db';
 import type { Env } from '../index.js';
 import { parseFriendMetadata, resolveFriendDisplayName } from '../utils/friend-profile.js';
+import {
+  denyIfCannotAccessLineAccount,
+  denyIfLineAccountOutsideScope,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
 
 const chats = new Hono<Env>();
+
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(',');
+}
+
+async function denyIfCannotAccessFriend(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  friendId: string,
+  requestedLineAccountId?: string,
+): Promise<Response | null> {
+  const friend = await getFriendById(c.env.DB, friendId);
+  if (!friend) return null;
+  if (requestedLineAccountId) {
+    if (friend.line_account_id && friend.line_account_id !== requestedLineAccountId) {
+      return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+    }
+    const denied = await denyIfCannotAccessLineAccount(c, requestedLineAccountId);
+    if (denied) return denied;
+    return denyIfLineAccountOutsideScope(c, friend.line_account_id);
+  }
+  return denyIfLineAccountOutsideScope(c, friend.line_account_id);
+}
 
 function clampLoadingSeconds(value: number | undefined): number {
   const n = Number.isFinite(value) ? Math.floor(value as number) : 5;
@@ -205,11 +232,19 @@ chats.get('/api/chats', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const unansweredOnly =
       c.req.query('unansweredOnly') === 'true' || c.req.query('unansweredOnly') === '1';
+    if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+    }
+    const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
 
     let unansweredIds: Set<string> | null = null;
     if (unansweredOnly) {
       const { getUnansweredFriendIds } = await import('../services/unanswered-inbox.js');
-      unansweredIds = await getUnansweredFriendIds(c.env.DB);
+      unansweredIds = await getUnansweredFriendIds(c.env.DB, {
+        account: lineAccountId,
+        accountIds: allowedLineAccountIds ?? undefined,
+      });
       // 空 Set のとき = 未対応ゼロ。早期 return で空配列を返す。
       if (unansweredIds.size === 0) {
         return c.json({ success: true, data: [] });
@@ -228,12 +263,17 @@ chats.get('/api/chats', async (c) => {
     //      を ranking する (アカ別 inbox が他アカの履歴をスキャンしないように)。
     //   2. content は text のみ先頭 200 文字まで切り詰めて返す (flex/image など raw JSON を返すと
     //      broadcast 後の rows で multi-MB レスポンスになる)。
+    const scopedAccountSql = allowedLineAccountIds
+      ? `line_account_id IN (${placeholders(allowedLineAccountIds.length)})`
+      : null;
     const messageAccountFilterSql = lineAccountId
       ? `line_account_id = ?`
-      : `1=1`;
+      : scopedAccountSql ?? `1=1`;
     const chatAccountFilterSql = lineAccountId
       ? `(line_account_id = ? OR (line_account_id IS NULL AND friend_id IN (SELECT id FROM friends WHERE line_account_id = ?)))`
-      : `1=1`;
+      : allowedLineAccountIds
+        ? `(line_account_id IN (${placeholders(allowedLineAccountIds.length)}) OR (line_account_id IS NULL AND friend_id IN (SELECT id FROM friends WHERE line_account_id IN (${placeholders(allowedLineAccountIds.length)}))))`
+        : `1=1`;
     let sql = `
       WITH activity AS (
         SELECT friend_id, MAX(created_at) AS last_message_at
@@ -326,7 +366,15 @@ chats.get('/api/chats', async (c) => {
     // accountFilterSql に '?' が複数 (4 箇所) あるので、bindings は事前に積んでおく。
     const ctePrebindings: unknown[] = lineAccountId
       ? [lineAccountId, lineAccountId, lineAccountId, lineAccountId, lineAccountId]
-      : [];
+      : allowedLineAccountIds
+        ? [
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+          ]
+        : [];
     const conditions: string[] = [];
     const bindings: unknown[] = [];
 
@@ -416,9 +464,18 @@ chats.get('/api/chats/:id', async (c) => {
     const createdAt = chatRow?.created_at ?? null;
 
     const friend = await c.env.DB
-      .prepare(`SELECT display_name, metadata, picture_url, line_user_id FROM friends WHERE id = ?`)
+      .prepare(`SELECT display_name, metadata, picture_url, line_user_id, line_account_id FROM friends WHERE id = ?`)
       .bind(resolvedFriendId)
-      .first<{ display_name: string | null; metadata: string | null; picture_url: string | null; line_user_id: string }>();
+      .first<{ display_name: string | null; metadata: string | null; picture_url: string | null; line_user_id: string; line_account_id: string | null }>();
+    if (friend) {
+      if (lineAccountId && friend.line_account_id && friend.line_account_id !== lineAccountId) {
+        return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+      }
+      const denied = lineAccountId
+        ? await denyIfCannotAccessLineAccount(c, lineAccountId)
+        : await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+      if (denied) return denied;
+    }
 
     // 新しい1000件を取って昇順に戻す。LIMIT 200 ASC だと古い200件だけで broadcast/scenario 等の
     // 新しい push が欠落していた（Shu で 481件中 281件欠落のバグあり）。一覧側と同様に test 配信は除外。
@@ -491,6 +548,8 @@ chats.put('/api/chats/:id', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const resolved = await resolveOrCreateChat(c.env.DB, id, lineAccountId);
     if (!resolved) return c.json({ success: false, error: 'Not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, resolved.friend_id, lineAccountId);
+    if (denied) return denied;
     const body = await c.req.json<{ operatorId?: string | null; status?: string; notes?: string }>();
     await updateChat(c.env.DB, resolved.id, body);
     const updated = await getChatById(c.env.DB, resolved.id);
@@ -513,6 +572,8 @@ chats.post('/api/chats/:id/loading', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const chat = await resolveOrCreateChat(c.env.DB, chatId, lineAccountId);
     if (!chat) return c.json({ success: false, error: 'Chat not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, chat.friend_id, lineAccountId);
+    if (denied) return denied;
 
     let loadingSecondsInput: number | undefined;
     try {
@@ -552,6 +613,8 @@ chats.post('/api/chats/:id/send', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const chat = await resolveOrCreateChat(c.env.DB, chatId, lineAccountId);
     if (!chat) return c.json({ success: false, error: 'Chat not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, chat.friend_id, lineAccountId);
+    if (denied) return denied;
 
     const body = await c.req.json<{ messageType?: string; content: string }>();
     if (!body.content) return c.json({ success: false, error: 'content is required' }, 400);

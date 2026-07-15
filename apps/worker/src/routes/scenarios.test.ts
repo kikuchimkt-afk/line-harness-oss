@@ -14,6 +14,8 @@ const dbMocks = {
   getFriendById: vi.fn(),
   computeNextDeliveryAt: vi.fn(),
   resolveStepContent: vi.fn(),
+  getStaffAccountIds: vi.fn(),
+  staffCanAccessLineAccount: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -56,6 +58,14 @@ function makeScenarioDb(rows: ScenarioRow[]) {
             );
             return { results: filtered };
           }
+          if (/FROM scenarios s\b/i.test(sql) && /s\.line_account_id = \?/i.test(sql)) {
+            const [lineAccountId] = bound as [string];
+            return { results: rows.filter((r) => r.line_account_id === lineAccountId) };
+          }
+          if (/FROM scenarios s\b/i.test(sql) && /s\.line_account_id IN/i.test(sql)) {
+            const allowed = new Set(bound as string[]);
+            return { results: rows.filter((r) => r.line_account_id && allowed.has(r.line_account_id)) };
+          }
           return { results: [] };
         },
       };
@@ -65,10 +75,14 @@ function makeScenarioDb(rows: ScenarioRow[]) {
   return { db, calls };
 }
 
-function setupApp(db: D1Database) {
-  const app = new Hono<{ Bindings: { DB: D1Database } }>();
+function setupApp(db: D1Database, role: 'owner' | 'admin' | 'staff' = 'owner') {
+  const app = new Hono<{
+    Bindings: { DB: D1Database };
+    Variables: { staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' } };
+  }>();
   app.use('*', async (c, next) => {
     c.env = { DB: db };
+    c.set('staff', { id: `${role}-1`, name: role, role });
     await next();
   });
   app.route('/', scenariosModule);
@@ -88,6 +102,8 @@ const rowBase = {
 
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
+  dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+  dbMocks.getStaffAccountIds.mockResolvedValue([]);
 });
 
 describe('GET /api/scenarios?lineAccountId=X', () => {
@@ -141,5 +157,21 @@ describe('GET /api/scenarios?lineAccountId=X', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { success: boolean; data: unknown[] };
     expect(body.data).toEqual([]);
+  });
+
+  test('restricted admin sees only assigned account scenarios, not global scenarios', async () => {
+    dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+    dbMocks.getStaffAccountIds.mockResolvedValue(['acc-1']);
+    const rows: ScenarioRow[] = [
+      { id: 's-global', name: 'global', line_account_id: null, ...rowBase },
+      { id: 's-acc1', name: 'acc1', line_account_id: 'acc-1', ...rowBase },
+      { id: 's-acc2', name: 'acc2', line_account_id: 'acc-2', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+
+    const res = await setupApp(db, 'admin').request('/api/scenarios?lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: { id: string }[] };
+    expect(body.data.map((d) => d.id)).toEqual(['s-acc1']);
   });
 });

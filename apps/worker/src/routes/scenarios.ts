@@ -24,8 +24,29 @@ import type {
   DeliveryMode,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import {
+  denyIfCannotAccessLineAccount,
+  denyIfLineAccountOutsideScope,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
 
 const scenarios = new Hono<Env>();
+
+function makePlaceholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(',');
+}
+
+async function denyIfCannotAccessScenario(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  scenarioId: string,
+): Promise<Response | null> {
+  const row = await c.env.DB
+    .prepare(`SELECT line_account_id FROM scenarios WHERE id = ?`)
+    .bind(scenarioId)
+    .first<{ line_account_id: string | null }>();
+  if (!row) return c.json({ success: false, error: 'Scenario not found' }, 404);
+  return denyIfLineAccountOutsideScope(c, row.line_account_id);
+}
 
 /** Convert D1 snake_case Scenario row to shared camelCase shape */
 function serializeScenario(row: DbScenario) {
@@ -147,12 +168,18 @@ scenarios.get('/api/scenarios', async (c) => {
     const lineAccountId = c.req.query('lineAccountId');
     let items: DbScenarioWithStepCount[];
     if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+      const allowedLineAccountIds = await getAllowedLineAccountIds(c);
+      const scopeSql = allowedLineAccountIds
+        ? `s.line_account_id = ?`
+        : `s.line_account_id IS NULL OR s.line_account_id = ?`;
       const result = await c.env.DB
         .prepare(
           `SELECT s.*, COUNT(ss.id) as step_count
            FROM scenarios s
            LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
-           WHERE s.line_account_id IS NULL OR s.line_account_id = ?
+           WHERE ${scopeSql}
            GROUP BY s.id
            ORDER BY s.created_at DESC`,
         )
@@ -160,7 +187,23 @@ scenarios.get('/api/scenarios', async (c) => {
         .all<DbScenarioWithStepCount>();
       items = result.results;
     } else {
-      items = await getScenarios(c.env.DB);
+      const allowedLineAccountIds = await getAllowedLineAccountIds(c);
+      if (allowedLineAccountIds) {
+        const result = await c.env.DB
+          .prepare(
+            `SELECT s.*, COUNT(ss.id) as step_count
+             FROM scenarios s
+             LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
+             WHERE s.line_account_id IN (${makePlaceholders(allowedLineAccountIds.length)})
+             GROUP BY s.id
+             ORDER BY s.created_at DESC`,
+          )
+          .bind(...allowedLineAccountIds)
+          .all<DbScenarioWithStepCount>();
+        items = result.results;
+      } else {
+        items = await getScenarios(c.env.DB);
+      }
     }
     return c.json({
       success: true,
@@ -179,6 +222,8 @@ scenarios.get('/api/scenarios', async (c) => {
 scenarios.get('/api/scenarios/:id', async (c) => {
   try {
     const id = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
     const scenario = await getScenarioById(c.env.DB, id);
 
     if (!scenario) {
@@ -219,6 +264,10 @@ scenarios.post('/api/scenarios', async (c) => {
     if (!VALID_DELIVERY_MODES.includes(deliveryMode as DeliveryMode)) {
       return c.json({ success: false, error: 'invalid deliveryMode' }, 400);
     }
+    const denied = body.lineAccountId
+      ? await denyIfCannotAccessLineAccount(c, body.lineAccountId)
+      : await denyIfLineAccountOutsideScope(c, null);
+    if (denied) return denied;
 
     let scenario = await createScenario(c.env.DB, {
       name: body.name,
@@ -263,6 +312,8 @@ scenarios.put('/api/scenarios/:id', async (c) => {
     if (body.deliveryMode !== undefined) {
       return c.json({ success: false, error: 'deliveryMode cannot be changed after creation' }, 400);
     }
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
 
     const updated = await updateScenario(c.env.DB, id, {
       name: body.name,
@@ -287,6 +338,8 @@ scenarios.put('/api/scenarios/:id', async (c) => {
 scenarios.delete('/api/scenarios/:id', async (c) => {
   try {
     const id = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
     await deleteScenario(c.env.DB, id);
     return c.json({ success: true, data: null });
   } catch (err) {
@@ -299,6 +352,8 @@ scenarios.delete('/api/scenarios/:id', async (c) => {
 scenarios.post('/api/scenarios/:id/steps', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{
       stepOrder: number;
       delayMinutes?: number;
@@ -376,6 +431,8 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
   try {
     const scenarioId = c.req.param('id');
     const stepId = c.req.param('stepId');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{
       stepOrder?: number;
       delayMinutes?: number;
@@ -530,6 +587,9 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
 // DELETE /api/scenarios/:id/steps/:stepId - delete step
 scenarios.delete('/api/scenarios/:id/steps/:stepId', async (c) => {
   try {
+    const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const stepId = c.req.param('stepId');
     await deleteScenarioStep(c.env.DB, stepId);
     return c.json({ success: true, data: null });
@@ -543,6 +603,8 @@ scenarios.delete('/api/scenarios/:id/steps/:stepId', async (c) => {
 scenarios.post('/api/scenarios/:id/steps/reorder', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{ orders: { stepId: string; stepOrder: number }[] }>();
 
     if (!Array.isArray(body.orders) || body.orders.length === 0) {
@@ -620,6 +682,8 @@ const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'] as const;
 scenarios.get('/api/scenarios/:id/preview', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const scenarioRow = await c.env.DB
       .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
       .bind(scenarioId)
@@ -711,6 +775,8 @@ scenarios.get('/api/scenarios/:id/preview', async (c) => {
 scenarios.get('/api/scenarios/:id/stats', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const scenario = await c.env.DB
       .prepare(`SELECT id FROM scenarios WHERE id = ?`)
       .bind(scenarioId)
@@ -732,6 +798,8 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     const scenarioId = c.req.param('id');
     const friendId = c.req.param('friendId');
     const db = c.env.DB;
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
 
     // Verify both exist
     const [scenario, friend] = await Promise.all([

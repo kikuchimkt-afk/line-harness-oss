@@ -20,8 +20,34 @@ import {
   resolveFriendDisplayName,
 } from '../utils/friend-profile.js';
 import type { Env } from '../index.js';
+import {
+  denyIfCannotAccessLineAccount,
+  denyIfLineAccountOutsideScope,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
 
 const friends = new Hono<Env>();
+
+function sqlPlaceholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(',');
+}
+
+async function denyIfCannotAccessFriendId(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  friendId: string,
+  requestedLineAccountId?: string,
+): Promise<Response | null> {
+  const friend = await getFriendById(c.env.DB, friendId);
+  if (!friend) return null;
+  if (requestedLineAccountId) {
+    if (friend.line_account_id && friend.line_account_id !== requestedLineAccountId) {
+      return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+    }
+    const denied = await denyIfCannotAccessLineAccount(c, requestedLineAccountId);
+    if (denied) return denied;
+  }
+  return denyIfLineAccountOutsideScope(c, friend.line_account_id);
+}
 
 /**
  * Convert a D1 snake_case Friend row to the shared camelCase shape.
@@ -120,6 +146,11 @@ friends.get('/api/friends', async (c) => {
       c.req.query('handled') === 'unhandled' ? 'unhandled' : null;
 
     const db = c.env.DB;
+    if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+    }
+    const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
 
     // Build WHERE conditions
     const conditions: string[] = [];
@@ -131,6 +162,9 @@ friends.get('/api/friends', async (c) => {
     if (lineAccountId) {
       conditions.push('f.line_account_id = ?');
       binds.push(lineAccountId);
+    } else if (allowedLineAccountIds) {
+      conditions.push(`f.line_account_id IN (${sqlPlaceholders(allowedLineAccountIds.length)})`);
+      binds.push(...allowedLineAccountIds);
     }
     const displayNameExpr = `COALESCE(NULLIF(TRIM(json_extract(f.metadata, '$.harnessDisplayName')), ''), f.display_name, '')`;
     if (search) {
@@ -376,11 +410,25 @@ friends.get('/api/friends/count', async (c) => {
     const lineAccountId = c.req.query('lineAccountId');
     let count: number;
     if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
       const row = await c.env.DB.prepare('SELECT COUNT(*) as count FROM friends WHERE is_following = 1 AND line_account_id = ?')
         .bind(lineAccountId).first<{ count: number }>();
       count = row?.count ?? 0;
     } else {
-      count = await getFriendCount(c.env.DB);
+      const allowedLineAccountIds = await getAllowedLineAccountIds(c);
+      if (allowedLineAccountIds) {
+        const row = await c.env.DB
+          .prepare(
+            `SELECT COUNT(*) as count FROM friends
+             WHERE is_following = 1 AND line_account_id IN (${sqlPlaceholders(allowedLineAccountIds.length)})`,
+          )
+          .bind(...allowedLineAccountIds)
+          .first<{ count: number }>();
+        count = row?.count ?? 0;
+      } else {
+        count = await getFriendCount(c.env.DB);
+      }
     }
     return c.json({ success: true, data: { count } });
   } catch (err) {
@@ -393,15 +441,26 @@ friends.get('/api/friends/count', async (c) => {
 friends.get('/api/friends/ref-stats', async (c) => {
   try {
     const lineAccountId = c.req.query('lineAccountId');
-    const where = lineAccountId ? 'WHERE line_account_id = ?' : 'WHERE ref_code IS NOT NULL';
-    const binds = lineAccountId ? [lineAccountId] : [];
+    if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+    }
+    const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
+    const scopeSql = lineAccountId
+      ? 'line_account_id = ?'
+      : allowedLineAccountIds
+        ? `line_account_id IN (${sqlPlaceholders(allowedLineAccountIds.length)})`
+        : null;
+    const where = scopeSql ? `WHERE ${scopeSql} AND ref_code IS NOT NULL` : 'WHERE ref_code IS NOT NULL';
+    const binds = lineAccountId ? [lineAccountId] : allowedLineAccountIds ?? [];
     const stmt = c.env.DB.prepare(
-      `SELECT ref_code, COUNT(*) as count FROM friends ${where} AND ref_code IS NOT NULL GROUP BY ref_code ORDER BY count DESC`,
+      `SELECT ref_code, COUNT(*) as count FROM friends ${where} GROUP BY ref_code ORDER BY count DESC`,
     );
     const result = await (binds.length > 0 ? stmt.bind(...binds) : stmt).all<{ ref_code: string; count: number }>();
-    const total = await c.env.DB.prepare(
-      `SELECT COUNT(*) as count FROM friends ${lineAccountId ? 'WHERE line_account_id = ?' : ''} ${lineAccountId ? 'AND' : 'WHERE'} ref_code IS NOT NULL`,
-    ).bind(...(lineAccountId ? [lineAccountId] : [])).first<{ count: number }>();
+    const totalStmt = c.env.DB.prepare(
+      `SELECT COUNT(*) as count FROM friends ${where}`,
+    );
+    const total = await (binds.length > 0 ? totalStmt.bind(...binds) : totalStmt).first<{ count: number }>();
     return c.json({
       success: true,
       data: {
@@ -429,6 +488,8 @@ friends.get('/api/friends/:id', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    const denied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (denied) return denied;
 
     return c.json({
       success: true,
@@ -454,6 +515,8 @@ friends.post('/api/friends/:id/tags', async (c) => {
     }
 
     const db = c.env.DB;
+    const denied = await denyIfCannotAccessFriendId(c, friendId);
+    if (denied) return denied;
     await addTagToFriend(db, friendId, body.tagId);
 
     // Enroll in tag_added scenarios that match this tag
@@ -485,6 +548,8 @@ friends.delete('/api/friends/:id/tags/:tagId', async (c) => {
   try {
     const friendId = c.req.param('id');
     const tagId = c.req.param('tagId');
+    const denied = await denyIfCannotAccessFriendId(c, friendId);
+    if (denied) return denied;
 
     await removeTagFromFriend(c.env.DB, friendId, tagId);
 
@@ -508,6 +573,8 @@ friends.put('/api/friends/:id/profile', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    const denied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (denied) return denied;
 
     const body = await c.req.json<Record<string, unknown>>();
     const existing = parseFriendMetadata(friend.metadata);
@@ -545,6 +612,8 @@ friends.put('/api/friends/:id/metadata', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    const denied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (denied) return denied;
 
     const body = await c.req.json<Record<string, unknown>>();
     const existing = parseFriendMetadata(friend.metadata);
@@ -577,6 +646,8 @@ friends.get('/api/friends/:id/messages', async (c) => {
   try {
     const friendId = c.req.param('id');
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
+    const denied = await denyIfCannotAccessFriendId(c, friendId, lineAccountId);
+    if (denied) return denied;
     // Fetch the latest 200 messages (DESC) then reverse to ASC for display.
     // Using ORDER BY ASC LIMIT 200 returns the OLDEST 200 rows, which silently
     // hides recent activity for chatty friends. Exclude delivery_type='test'
@@ -621,6 +692,13 @@ friends.post('/api/friends/:id/messages', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    if (lineAccountId && friend.line_account_id && friend.line_account_id !== lineAccountId) {
+      return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+    }
+    const denied = await (lineAccountId
+      ? denyIfCannotAccessLineAccount(c, lineAccountId)
+      : denyIfLineAccountOutsideScope(c, friend.line_account_id));
+    if (denied) return denied;
 
     const { LineClient } = await import('@line-crm/line-sdk');
     // Resolve access token from friend's account (multi-account support)
