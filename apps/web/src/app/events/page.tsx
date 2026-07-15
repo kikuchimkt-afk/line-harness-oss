@@ -21,6 +21,7 @@ export default function EventsListPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [duplicatingId, setDuplicatingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!selectedAccountId) return
@@ -52,6 +53,30 @@ export default function EventsListPage() {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setDuplicatingId(null)
+    }
+  }
+
+  async function deleteEvent(event: EventListItem) {
+    if (!selectedAccountId || deletingId) return
+    if (event.total_active > 0 || event.pending_count > 0) {
+      setError('予約済み・承認待ちの予約があるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。')
+      return
+    }
+    if (!confirm(`「${event.name}」を削除します。\n一覧と予約ページから非表示になります。予約履歴は保持されます。\nよろしいですか？`)) return
+    setDeletingId(event.id)
+    setError(null)
+    try {
+      await eventsApi.deleteEvent(selectedAccountId, event.id)
+      setItems((current) => current.filter((item) => item.id !== event.id))
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setError(
+        message === 'event_has_active_bookings'
+          ? '予約済み・承認待ちの予約があるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。'
+          : message,
+      )
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -157,14 +182,22 @@ export default function EventsListPage() {
                     </div>
                   </div>
                 </Link>
-                <div className="border-t border-gray-100 px-4 py-3">
+                <div className="border-t border-gray-100 px-4 py-3 space-y-2">
                   <button
                     type="button"
                     onClick={() => duplicateEvent(e)}
-                    disabled={duplicatingId === e.id}
+                    disabled={duplicatingId === e.id || deletingId === e.id}
                     className="w-full rounded-lg border border-pink-200 bg-pink-50 px-3 py-2 text-sm font-medium text-pink-700 hover:bg-pink-100 disabled:opacity-50"
                   >
                     {duplicatingId === e.id ? 'コピー中...' : 'コピーして編集'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteEvent(e)}
+                    disabled={deletingId === e.id || duplicatingId === e.id}
+                    className="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {deletingId === e.id ? '削除中...' : '削除'}
                   </button>
                 </div>
               </div>
