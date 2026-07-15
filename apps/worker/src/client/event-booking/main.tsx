@@ -163,13 +163,6 @@ function uid(): string {
   return crypto.randomUUID();
 }
 
-function buildSalonBookingUrl(liffId: string): string {
-  const url = new URL('/', window.location.origin);
-  url.searchParams.set('liffId', liffId);
-  url.searchParams.set('page', 'salon-book');
-  return url.toString();
-}
-
 // ─── Loading ──────────────────────────────────────────────
 
 function Spinner() {
@@ -689,13 +682,11 @@ function DoneScreen({
   count,
   failedCount = 0,
   onGoHistory,
-  onGoSalonBooking,
 }: {
   status: string;
   count: number;
   failedCount?: number;
   onGoHistory: () => void;
-  onGoSalonBooking: () => void;
 }) {
   const isPending = status === 'requested';
   const hasPartialFailure = failedCount > 0;
@@ -722,9 +713,6 @@ function DoneScreen({
         </p>
         <button onClick={onGoHistory} className="eb-primary-btn">
           予約履歴を見る
-        </button>
-        <button onClick={onGoSalonBooking} className="eb-secondary-btn mt-3">
-          面談予約へ進む
         </button>
       </div>
     </div>
@@ -913,7 +901,6 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
             count={screen.count}
             failedCount={screen.failedCount}
             onGoHistory={() => setScreen({ kind: 'history' })}
-            onGoSalonBooking={() => { window.location.href = buildSalonBookingUrl(ctx.liffId); }}
           />
         )}
         {screen.kind === 'history' && <HistoryScreen ctx={ctx} />}
