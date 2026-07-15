@@ -851,7 +851,7 @@ function BookingFormFieldsEditor({
                       value={(field.options ?? []).join('\n')}
                       onChange={(e) =>
                         updateField(index, {
-                          options: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
+                          options: e.target.value.replace(/\r\n/g, '\n').split('\n'),
                         })
                       }
                       rows={4}
