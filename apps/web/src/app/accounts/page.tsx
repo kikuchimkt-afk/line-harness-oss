@@ -15,6 +15,7 @@ import {
 } from '@/components/accounts/account-form-fields'
 import AccountSetupUrls from '@/components/accounts/account-setup-urls'
 import AccountEditModal from '@/components/accounts/account-edit-modal'
+import { useAccount } from '@/contexts/account-context'
 
 interface LineAccountListItem {
   id: string
@@ -55,6 +56,7 @@ const ccPrompts = [
 ]
 
 export default function AccountsPage() {
+  const { refreshAccounts } = useAccount()
   const [accounts, setAccounts] = useState<LineAccountListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -80,6 +82,10 @@ export default function AccountsPage() {
       setError('APIに接続できませんでした。サーバーが起動しているか確認してください。')
     }
     setLoading(false)
+  }
+
+  const refreshLocalAndSharedAccounts = async () => {
+    await Promise.all([load(), refreshAccounts()])
   }
 
   useEffect(() => { load() }, [])
@@ -359,7 +365,7 @@ export default function AccountsPage() {
           initialLoginChannelId={editing.loginChannelId}
           initialLiffId={editing.liffId}
           onClose={() => setEditing(null)}
-          onSaved={load}
+          onSaved={() => { void refreshLocalAndSharedAccounts() }}
         />
       )}
     </div>

@@ -100,7 +100,7 @@ function DialogPortal({ children }: { children: ReactNode }) {
 
 export default function EventForm({ accountId, eventId }: EventFormProps) {
   const router = useRouter()
-  const { selectedAccount, accounts } = useAccount()
+  const { selectedAccount, accounts, refreshAccounts } = useAccount()
   const [tab, setTab] = useState<Tab>('overview')
   const [draft, setDraft] = useState<EventDetail>(DEFAULT_DRAFT)
   const [slots, setSlots] = useState<EventSlot[]>([])
@@ -121,10 +121,15 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
     }
   }
 
-  const liffId = selectedAccount?.liffId ?? null
+  const currentAccount = accounts.find((a) => a.id === accountId) ?? selectedAccount
+  const liffId = currentAccount?.liffId ?? null
   const liffUrl = eventId && liffId
     ? `https://liff.line.me/${liffId}/?page=event&id=${eventId}`
     : null
+
+  useEffect(() => {
+    void refreshAccounts()
+  }, [accountId, refreshAccounts])
 
   useEffect(() => {
     let cancelled = false
