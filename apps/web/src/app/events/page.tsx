@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import Header from '@/components/layout/header'
 import { eventsApi, type EventListItem } from '@/lib/api'
 import { useAccount } from '@/contexts/account-context'
@@ -14,10 +15,12 @@ function formatJpDate(iso: string | null): string {
 }
 
 export default function EventsListPage() {
+  const router = useRouter()
   const { selectedAccountId } = useAccount()
   const [items, setItems] = useState<EventListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!selectedAccountId) return
@@ -36,6 +39,21 @@ export default function EventsListPage() {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  async function duplicateEvent(event: EventListItem) {
+    if (!selectedAccountId || duplicatingId) return
+    if (!confirm(`「${event.name}」をコピーして下書きを作成します。\n予約者・予約履歴はコピーされません。よろしいですか？`)) return
+    setDuplicatingId(event.id)
+    setError(null)
+    try {
+      const copied = await eventsApi.duplicateEvent(selectedAccountId, event.id)
+      router.push(`/events/edit?id=${copied.id}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDuplicatingId(null)
+    }
+  }
 
   return (
     <>
@@ -82,63 +100,74 @@ export default function EventsListPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {items.map((e) => (
-              <Link
+              <div
                 key={e.id}
-                href={`/events/edit?id=${e.id}`}
                 className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow"
               >
-                {e.image_url ? (
-                  <img
-                    src={e.image_url}
-                    alt={e.name}
-                    className="w-full h-32 object-cover bg-gray-100"
-                  />
-                ) : (
-                  <div className="w-full h-32 bg-gradient-to-br from-blue-100 to-blue-200" />
-                )}
-                <div className="p-4">
-                  <div className="flex items-start justify-between gap-2 mb-1">
-                    <div className="font-semibold text-gray-900 line-clamp-2 flex-1">{e.name}</div>
-                    <div className="flex flex-col gap-1 shrink-0 items-end">
-                      {e.is_published === 1 ? (
-                        <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
-                          公開中
-                        </span>
-                      ) : (
-                        <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
-                          下書き
+                <Link href={`/events/edit?id=${e.id}`} className="block">
+                  {e.image_url ? (
+                    <img
+                      src={e.image_url}
+                      alt={e.name}
+                      className="w-full h-32 object-cover bg-gray-100"
+                    />
+                  ) : (
+                    <div className="w-full h-32 bg-gradient-to-br from-blue-100 to-blue-200" />
+                  )}
+                  <div className="p-4 pb-3">
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                      <div className="font-semibold text-gray-900 line-clamp-2 flex-1">{e.name}</div>
+                      <div className="flex flex-col gap-1 shrink-0 items-end">
+                        {e.is_published === 1 ? (
+                          <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                            公開中
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                            下書き
+                          </span>
+                        )}
+                        {e.target_type === 'multi-account-dedup' && (() => {
+                          const ids: string[] = Array.isArray(e.account_ids)
+                            ? e.account_ids
+                            : typeof e.account_ids === 'string'
+                              ? (() => { try { return JSON.parse(e.account_ids) as string[] } catch { return [] } })()
+                              : []
+                          return (
+                            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
+                              横断 {ids.length} アカ
+                            </span>
+                          )
+                        })()}
+                      </div>
+                    </div>
+                    <div className="text-xs text-gray-500 mb-3">
+                      {formatJpDate(e.next_slot_starts_at)}
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-gray-700">
+                        予約 <span className="font-semibold">{e.total_active}</span>
+                        {e.total_capacity != null && <span className="text-gray-400"> / {e.total_capacity}</span>}
+                      </span>
+                      {e.pending_count > 0 && (
+                        <span className="bg-yellow-100 text-yellow-800 text-xs font-bold px-2 py-0.5 rounded-full">
+                          承認待ち {e.pending_count}
                         </span>
                       )}
-                      {e.target_type === 'multi-account-dedup' && (() => {
-                        const ids: string[] = Array.isArray(e.account_ids)
-                          ? e.account_ids
-                          : typeof e.account_ids === 'string'
-                            ? (() => { try { return JSON.parse(e.account_ids) as string[] } catch { return [] } })()
-                            : []
-                        return (
-                          <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
-                            横断 {ids.length} アカ
-                          </span>
-                        )
-                      })()}
                     </div>
                   </div>
-                  <div className="text-xs text-gray-500 mb-3">
-                    {formatJpDate(e.next_slot_starts_at)}
-                  </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-700">
-                      予約 <span className="font-semibold">{e.total_active}</span>
-                      {e.total_capacity != null && <span className="text-gray-400"> / {e.total_capacity}</span>}
-                    </span>
-                    {e.pending_count > 0 && (
-                      <span className="bg-yellow-100 text-yellow-800 text-xs font-bold px-2 py-0.5 rounded-full">
-                        承認待ち {e.pending_count}
-                      </span>
-                    )}
-                  </div>
+                </Link>
+                <div className="border-t border-gray-100 px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => duplicateEvent(e)}
+                    disabled={duplicatingId === e.id}
+                    className="w-full rounded-lg border border-pink-200 bg-pink-50 px-3 py-2 text-sm font-medium text-pink-700 hover:bg-pink-100 disabled:opacity-50"
+                  >
+                    {duplicatingId === e.id ? 'コピー中...' : 'コピーして編集'}
+                  </button>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
         )}

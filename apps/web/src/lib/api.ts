@@ -1629,6 +1629,12 @@ export interface EventBookingFormField {
   options?: string[];
 }
 
+export interface SlotVisibilityCondition {
+  fieldId: string;
+  operator: 'in';
+  values: string[];
+}
+
 export interface EventSlot {
   id: string;
   event_id: string;
@@ -1637,6 +1643,7 @@ export interface EventSlot {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  visibility_conditions?: SlotVisibilityCondition[] | string | null;
   active_count?: number;
 }
 
@@ -1674,6 +1681,11 @@ export const eventsApi = {
       withAccount('/api/events/admin/events', accountId),
       { method: 'POST', body: JSON.stringify(body) },
     ),
+  duplicateEvent: (accountId: string, id: string) =>
+    fetchApi<EventDetail>(
+      withAccount(`/api/events/admin/events/${id}/duplicate`, accountId),
+      { method: 'POST' },
+    ),
   updateEvent: (accountId: string, id: string, body: Partial<EventDetail>) =>
     fetchApi<EventDetail>(
       withAccount(`/api/events/admin/events/${id}`, accountId),
@@ -1692,7 +1704,14 @@ export const eventsApi = {
   createSlots: (
     accountId: string,
     eventId: string,
-    slots: Array<{ starts_at: string; ends_at: string; capacity: number | null; is_active?: number; sort_order?: number }>,
+    slots: Array<{
+      starts_at: string;
+      ends_at: string;
+      capacity: number | null;
+      is_active?: number;
+      sort_order?: number;
+      visibility_conditions?: SlotVisibilityCondition[] | null;
+    }>,
   ) =>
     fetchApi<{ items: EventSlot[] }>(
       withAccount(`/api/events/admin/events/${eventId}/slots`, accountId),

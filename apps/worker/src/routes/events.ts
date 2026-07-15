@@ -208,6 +208,74 @@ function validateFormAnswers(
   return { ok: true, answers };
 }
 
+interface SlotVisibilityCondition {
+  fieldId: string;
+  operator: 'in';
+  values: string[];
+}
+
+function normalizeSlotVisibilityConditions(
+  value: unknown,
+): { ok: true; conditions: SlotVisibilityCondition[] } | { ok: false; code: string } {
+  if (value == null || value === '') return { ok: true, conditions: [] };
+  let source: unknown = value;
+  if (typeof value === 'string') {
+    if (!value.trim()) return { ok: true, conditions: [] };
+    try {
+      source = JSON.parse(value) as unknown;
+    } catch {
+      return { ok: false, code: 'invalid_slot_visibility_conditions' };
+    }
+  }
+  if (!Array.isArray(source) || source.length > 10) {
+    return { ok: false, code: 'invalid_slot_visibility_conditions' };
+  }
+  const conditions: SlotVisibilityCondition[] = [];
+  for (const raw of source) {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, code: 'invalid_slot_visibility_condition' };
+    }
+    const item = raw as Record<string, unknown>;
+    const fieldId = cleanString(item.fieldId, 80);
+    const rawValues = Array.isArray(item.values)
+      ? item.values
+      : typeof item.value === 'string'
+        ? [item.value]
+        : [];
+    const values = [...new Set(
+      rawValues
+        .map((x) => (typeof x === 'string' ? x.trim() : ''))
+        .filter((x) => x.length > 0 && x.length <= EVENT_FORM_OPTION_MAX),
+    )];
+    if (!fieldId && values.length === 0) continue;
+    if (!fieldId || values.length === 0 || values.length > 20) {
+      return { ok: false, code: 'invalid_slot_visibility_condition' };
+    }
+    conditions.push({ fieldId, operator: 'in', values });
+  }
+  return { ok: true, conditions };
+}
+
+function parseSlotVisibilityConditions(raw: unknown): SlotVisibilityCondition[] {
+  const normalized = normalizeSlotVisibilityConditions(raw);
+  return normalized.ok ? normalized.conditions : [];
+}
+
+function answerValuesForCondition(answer: string | string[] | undefined): string[] {
+  if (Array.isArray(answer)) return answer.map((x) => x.trim()).filter(Boolean);
+  if (typeof answer === 'string' && answer.trim()) return [answer.trim()];
+  return [];
+}
+
+function slotVisibilityMatches(rawConditions: unknown, answers: Record<string, string | string[]>): boolean {
+  const conditions = parseSlotVisibilityConditions(rawConditions);
+  if (conditions.length === 0) return true;
+  return conditions.every((condition) => {
+    const answerValues = answerValuesForCondition(answers[condition.fieldId]);
+    return answerValues.some((value) => condition.values.includes(value));
+  });
+}
+
 function validateEventInput(
   body: Record<string, unknown>,
   isCreate: boolean,
@@ -385,6 +453,121 @@ events.get('/api/events/admin/events/:id', async (c) => {
     .first();
   if (!row) return bad(c, 'not_found', 404);
   return c.json(row);
+});
+
+events.post('/api/events/admin/events/:id/duplicate', async (c) => {
+  const account_id = getAccountId(c);
+  if (!account_id) return bad(c, 'account_id_required', 400);
+  const sourceId = c.req.param('id');
+  const source = await c.env.DB
+    .prepare(
+      `SELECT * FROM events
+        WHERE id = ? AND deleted_at IS NULL AND (
+          (target_type = 'single' AND line_account_id = ?)
+          OR (target_type = 'multi-account-dedup'
+              AND EXISTS (SELECT 1 FROM json_each(account_ids) WHERE value = ?))
+        )`,
+    )
+    .bind(sourceId, account_id, account_id)
+    .first<Record<string, unknown>>();
+  if (!source) return bad(c, 'not_found', 404);
+
+  const newId = crypto.randomUUID();
+  const targetType = source.target_type === 'multi-account-dedup' ? 'multi-account-dedup' : 'single';
+  const accountIds =
+    targetType === 'multi-account-dedup' && typeof source.account_ids === 'string' && source.account_ids.trim()
+      ? source.account_ids
+      : null;
+  const parsedAccountIds = (() => {
+    if (!accountIds) return null;
+    try {
+      const parsed = JSON.parse(accountIds) as unknown;
+      return Array.isArray(parsed) && parsed.every((id) => typeof id === 'string') ? parsed : null;
+    } catch {
+      return null;
+    }
+  })();
+  const lineAccountIdToWrite = targetType === 'multi-account-dedup'
+    ? (parsedAccountIds?.[0] ?? account_id)
+    : account_id;
+  const sourceName = typeof source.name === 'string' ? source.name : 'イベント';
+  const copiedName = `${sourceName} のコピー`.slice(0, EVENT_NAME_MAX);
+
+  await c.env.DB
+    .prepare(
+      `INSERT INTO events (
+         id, line_account_id, name, venue_name, venue_url, image_url,
+         description, description_centered,
+         max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
+         reminder_day_before_enabled, reminder_hours_before,
+         is_published, sort_order,
+         target_type, account_ids, dedup_priority, booking_form_fields,
+         confirmation_message_extra, reminder_message_extra,
+         og_title, og_description, og_image_url
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      newId,
+      lineAccountIdToWrite,
+      copiedName,
+      source.venue_name ?? null,
+      source.venue_url ?? null,
+      source.image_url ?? null,
+      source.description ?? null,
+      source.description_centered ?? 0,
+      source.max_bookings_per_friend ?? null,
+      source.requires_approval ?? 0,
+      source.cancel_deadline_hours_before ?? null,
+      source.reminder_day_before_enabled ?? 1,
+      source.reminder_hours_before ?? null,
+      0,
+      source.sort_order ?? 0,
+      targetType,
+      accountIds,
+      source.dedup_priority ?? null,
+      source.booking_form_fields ?? '[]',
+      source.confirmation_message_extra ?? null,
+      source.reminder_message_extra ?? null,
+      source.og_title ?? null,
+      source.og_description ?? null,
+      source.og_image_url ?? null,
+    )
+    .run();
+
+  const { results: sourceSlots } = await c.env.DB
+    .prepare(
+      `SELECT starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions
+         FROM event_slots
+        WHERE event_id = ? AND deleted_at IS NULL
+        ORDER BY sort_order ASC, starts_at ASC`,
+    )
+    .bind(sourceId)
+    .all<Record<string, unknown>>();
+  for (const slot of sourceSlots ?? []) {
+    await c.env.DB
+      .prepare(
+        `INSERT INTO event_slots
+           (id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        newId,
+        slot.starts_at,
+        slot.ends_at,
+        slot.capacity ?? null,
+        slot.is_active ?? 1,
+        slot.sort_order ?? 0,
+        slot.visibility_conditions ?? null,
+      )
+      .run();
+  }
+
+  const row = await c.env.DB
+    .prepare(`SELECT * FROM events WHERE id = ?`)
+    .bind(newId)
+    .first();
+  return c.json(row, 201);
 });
 
 events.put('/api/events/admin/events/:id', async (c) => {
@@ -604,6 +787,7 @@ interface SlotInput {
   capacity?: number | null;
   is_active?: number;
   sort_order?: number;
+  visibility_conditions?: unknown;
 }
 
 function validateSlotInput(s: SlotInput, isCreate: boolean): { ok: true } | { ok: false; code: string } {
@@ -627,6 +811,10 @@ function validateSlotInput(s: SlotInput, isCreate: boolean): { ok: true } | { ok
   }
   if (s.sort_order != null && !Number.isInteger(s.sort_order)) {
     return { ok: false, code: 'invalid_sort_order' };
+  }
+  if (Object.prototype.hasOwnProperty.call(s, 'visibility_conditions')) {
+    const conditions = normalizeSlotVisibilityConditions(s.visibility_conditions);
+    if (!conditions.ok) return { ok: false, code: conditions.code };
   }
   return { ok: true };
 }
@@ -662,12 +850,14 @@ events.post('/api/events/admin/events/:id/slots', async (c) => {
   for (const s of body.slots) {
     const v = validateSlotInput(s, true);
     if (!v.ok) return bad(c, v.code, 422);
+    const visibility = normalizeSlotVisibilityConditions(s.visibility_conditions);
+    if (!visibility.ok) return bad(c, visibility.code, 422);
     const id = crypto.randomUUID();
     await c.env.DB
       .prepare(
         `INSERT INTO event_slots
-           (id, event_id, starts_at, ends_at, capacity, is_active, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -677,6 +867,7 @@ events.post('/api/events/admin/events/:id/slots', async (c) => {
         s.capacity ?? null,
         s.is_active ?? 1,
         s.sort_order ?? 0,
+        visibility.conditions.length > 0 ? JSON.stringify(visibility.conditions) : null,
       )
       .run();
     const row = await c.env.DB.prepare(`SELECT * FROM event_slots WHERE id = ?`).bind(id).first();
@@ -704,17 +895,24 @@ events.put('/api/events/admin/events/:id/slots/:slotId', async (c) => {
     capacity: body.capacity,
     is_active: body.is_active,
     sort_order: body.sort_order,
+    visibility_conditions: body.visibility_conditions ?? slot.visibility_conditions,
   };
   const v = validateSlotInput(merged, false);
   if (!v.ok) return bad(c, v.code, 422);
 
-  const updatable = ['starts_at', 'ends_at', 'capacity', 'is_active', 'sort_order'] as const;
+  const updatable = ['starts_at', 'ends_at', 'capacity', 'is_active', 'sort_order', 'visibility_conditions'] as const;
   const setClauses: string[] = [];
   const setValues: unknown[] = [];
   for (const k of updatable) {
     if (Object.prototype.hasOwnProperty.call(body, k)) {
       setClauses.push(`${k} = ?`);
-      setValues.push((body as Record<string, unknown>)[k]);
+      if (k === 'visibility_conditions') {
+        const visibility = normalizeSlotVisibilityConditions(body.visibility_conditions);
+        if (!visibility.ok) return bad(c, visibility.code, 422);
+        setValues.push(visibility.conditions.length > 0 ? JSON.stringify(visibility.conditions) : null);
+      } else {
+        setValues.push((body as Record<string, unknown>)[k]);
+      }
     }
   }
   if (setClauses.length === 0) {
@@ -931,6 +1129,7 @@ interface SlotDbRow {
   starts_at: string;
   is_active: number;
   deleted_at: string | null;
+  visibility_conditions: string | null;
 }
 
 const JST_OFFSET_MS = 9 * 3600_000;
@@ -1161,13 +1360,16 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
 
   const slot = await c.env.DB
     .prepare(
-      `SELECT id, event_id, starts_at, is_active, deleted_at
+      `SELECT id, event_id, starts_at, is_active, deleted_at, visibility_conditions
          FROM event_slots WHERE id = ? AND event_id = ? AND deleted_at IS NULL`,
     )
     .bind(body.slot_id, event.id)
     .first<SlotDbRow>();
   if (!slot || slot.is_active !== 1) return finalize(409, { error: 'slot_inactive' });
   if (new Date(slot.starts_at).getTime() <= Date.now()) return finalize(410, { error: 'slot_started' });
+  if (!slotVisibilityMatches(slot.visibility_conditions, formAnswers.answers)) {
+    return finalize(409, { error: 'slot_condition_mismatch' });
+  }
 
   // Pre-flight friend-limit check は identity_key ベースに統合済 (後段の
   // sameIdentityActive ブロック参照)。friend_id ベースの単一アカウント

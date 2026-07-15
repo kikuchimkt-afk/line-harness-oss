@@ -3,7 +3,7 @@
 import { type ReactNode, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot } from '@/lib/api'
+import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot, type SlotVisibilityCondition } from '@/lib/api'
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
 import { generateBulkSlots, type BulkSlotInput } from './bulk-slot-generator'
@@ -67,6 +67,36 @@ function parseEventFormFields(raw: EventDetail['booking_form_fields']): EventBoo
   } catch {
     return []
   }
+}
+
+function parseSlotVisibilityConditions(raw: EventSlot['visibility_conditions']): SlotVisibilityCondition[] {
+  if (Array.isArray(raw)) return raw.filter((item) => item && item.fieldId && Array.isArray(item.values))
+  if (typeof raw !== 'string' || !raw.trim()) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is SlotVisibilityCondition => {
+          const candidate = item as Partial<SlotVisibilityCondition>
+          return typeof candidate.fieldId === 'string' && Array.isArray(candidate.values)
+        })
+      : []
+  } catch {
+    return []
+  }
+}
+
+function getSlotVisibilityLabel(slot: EventSlot, fields: EventBookingFormField[]): string {
+  const conditions = parseSlotVisibilityConditions(slot.visibility_conditions)
+  if (conditions.length === 0) return '全員に表示'
+  return conditions.map((condition) => {
+    const field = fields.find((f) => f.id === condition.fieldId)
+    const label = field?.label ?? condition.fieldId
+    return `${label}: ${condition.values.join('・')}`
+  }).join(' / ')
+}
+
+function selectableConditionFields(fields: EventBookingFormField[]): EventBookingFormField[] {
+  return fields.filter((field) => (field.type === 'select' || field.type === 'checkbox') && (field.options?.length ?? 0) > 0)
 }
 
 function makeFormFieldId(): string {
@@ -443,6 +473,7 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
             <SlotsTab
               accountId={accountId}
               eventId={eventId}
+              fields={parseEventFormFields(draft.booking_form_fields)}
               slots={slots}
               setSlots={setSlots}
             />
@@ -881,11 +912,13 @@ function BookingFormFieldsEditor({
 function SlotsTab({
   accountId,
   eventId,
+  fields,
   slots,
   setSlots,
 }: {
   accountId: string
   eventId: string | null
+  fields: EventBookingFormField[]
   slots: EventSlot[]
   setSlots: (s: EventSlot[]) => void
 }) {
@@ -998,7 +1031,7 @@ function SlotsTab({
     if (!eventId) return
     const targets = slots.filter((s) => selectedSlotIds.has(s.id))
     if (targets.length === 0) return
-    if (!input.changeTime && !input.changeCapacity && !input.changeActive) {
+    if (!input.changeTime && !input.changeCapacity && !input.changeActive && !input.changeVisibility) {
       alert('変更する項目を1つ以上選んでください。')
       return
     }
@@ -1020,6 +1053,7 @@ function SlotsTab({
         }
         if (input.changeCapacity) body.capacity = input.capacity
         if (input.changeActive) body.is_active = input.isActive
+        if (input.changeVisibility) body.visibility_conditions = input.visibilityConditions
         await eventsApi.updateSlot(accountId, eventId, slot.id, body)
       }
       await refresh()
@@ -1116,6 +1150,7 @@ function SlotsTab({
                 <th className="text-left px-3 py-2 font-medium">日時</th>
                 <th className="text-left px-3 py-2 font-medium">定員</th>
                 <th className="text-left px-3 py-2 font-medium">予約数</th>
+                <th className="text-left px-3 py-2 font-medium">表示条件</th>
                 <th className="text-left px-3 py-2 font-medium">状態</th>
                 <th className="text-right px-3 py-2 font-medium">操作</th>
               </tr>
@@ -1137,6 +1172,15 @@ function SlotsTab({
                   </td>
                   <td className="px-3 py-2 text-gray-700">{s.capacity ?? '無制限'}</td>
                   <td className="px-3 py-2 text-gray-700">{s.active_count ?? 0}</td>
+                  <td className="px-3 py-2 text-gray-700">
+                    <span className={`inline-flex rounded-full px-2 py-1 text-xs ${
+                      parseSlotVisibilityConditions(s.visibility_conditions).length > 0
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'bg-gray-100 text-gray-600'
+                    }`}>
+                      {getSlotVisibilityLabel(s, fields)}
+                    </span>
+                  </td>
                   <td className="px-3 py-2">
                     <button
                       onClick={() => toggleActive(s)}
@@ -1168,6 +1212,7 @@ function SlotsTab({
 
       {showAdd && (
         <AddSlotDialog
+          fields={fields}
           onClose={() => setShowAdd(false)}
           onSubmit={async (s) => {
             await eventsApi.createSlots(accountId, eventId, [s])
@@ -1195,6 +1240,7 @@ function SlotsTab({
       {showBulkEdit && (
         <BulkEditSlotsDialog
           slots={selectedSlots}
+          fields={fields}
           onClose={() => setShowBulkEdit(false)}
           onSubmit={bulkUpdateSlots}
         />
@@ -1211,14 +1257,97 @@ interface SlotBulkEditInput {
   capacity: number | null
   changeActive: boolean
   isActive: number
+  changeVisibility: boolean
+  visibilityConditions: SlotVisibilityCondition[]
+}
+
+function SlotVisibilityEditor({
+  fields,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  fields: EventBookingFormField[]
+  value: SlotVisibilityCondition[]
+  onChange: (value: SlotVisibilityCondition[]) => void
+  disabled?: boolean
+}) {
+  const candidates = selectableConditionFields(fields)
+  const condition = value[0]
+  const selectedField = candidates.find((field) => field.id === condition?.fieldId) ?? null
+  const selectedValues = selectedField ? condition?.values ?? [] : []
+
+  function setField(fieldId: string) {
+    if (!fieldId) {
+      onChange([])
+      return
+    }
+    const field = candidates.find((item) => item.id === fieldId)
+    const firstOption = field?.options?.[0]
+    onChange(field && firstOption ? [{ fieldId: field.id, operator: 'in', values: [firstOption] }] : [])
+  }
+
+  function toggleValue(option: string) {
+    if (!selectedField) return
+    const next = selectedValues.includes(option)
+      ? selectedValues.filter((item) => item !== option)
+      : [...selectedValues, option]
+    onChange(next.length > 0 ? [{ fieldId: selectedField.id, operator: 'in', values: next }] : [])
+  }
+
+  if (candidates.length === 0) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+        先に「概要」タブの予約フォーム項目で、選択式またはチェック式の質問を作ると、枠の出し分け条件に使えます。
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3">
+      <label className="block text-sm font-medium text-gray-700">この枠を見せる条件</label>
+      <select
+        value={selectedField?.id ?? ''}
+        onChange={(e) => setField(e.target.value)}
+        disabled={disabled}
+        className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+      >
+        <option value="">全員に表示する</option>
+        {candidates.map((field) => (
+          <option key={field.id} value={field.id}>{field.label}</option>
+        ))}
+      </select>
+      {selectedField && (
+        <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+          {(selectedField.options ?? []).map((option) => (
+            <label key={option} className="flex items-center gap-2 rounded-lg bg-white px-2 py-1.5 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={selectedValues.includes(option)}
+                onChange={() => toggleValue(option)}
+                disabled={disabled}
+                className="rounded border-gray-300"
+              />
+              {option}
+            </label>
+          ))}
+        </div>
+      )}
+      <p className="mt-2 text-xs text-gray-500">
+        何も選ばない場合は、今まで通りすべての友だちに表示されます。
+      </p>
+    </div>
+  )
 }
 
 function BulkEditSlotsDialog({
   slots,
+  fields,
   onClose,
   onSubmit,
 }: {
   slots: EventSlot[]
+  fields: EventBookingFormField[]
   onClose: () => void
   onSubmit: (input: SlotBulkEditInput) => Promise<void>
 }) {
@@ -1230,12 +1359,16 @@ function BulkEditSlotsDialog({
   const [capacity, setCapacity] = useState(first?.capacity == null ? '' : String(first.capacity))
   const [changeActive, setChangeActive] = useState(false)
   const [isActive, setIsActive] = useState(first?.is_active === 0 ? '0' : '1')
+  const [changeVisibility, setChangeVisibility] = useState(false)
+  const [visibilityConditions, setVisibilityConditions] = useState<SlotVisibilityCondition[]>(
+    first ? parseSlotVisibilityConditions(first.visibility_conditions) : [],
+  )
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
   async function submit() {
     setErr(null)
-    if (!changeTime && !changeCapacity && !changeActive) {
+    if (!changeTime && !changeCapacity && !changeActive && !changeVisibility) {
       setErr('変更する項目を1つ以上選んでください。')
       return
     }
@@ -1259,6 +1392,8 @@ function BulkEditSlotsDialog({
         capacity: cap,
         changeActive,
         isActive: Number(isActive),
+        changeVisibility,
+        visibilityConditions,
       })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -1347,6 +1482,26 @@ function BulkEditSlotsDialog({
                 <option value="0">停止する</option>
               </select>
             </label>
+
+            <div className="block rounded-lg border border-gray-200 p-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={changeVisibility}
+                  onChange={(e) => setChangeVisibility(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm font-medium text-gray-900">表示条件を変更する</span>
+              </div>
+              <div className="mt-2">
+                <SlotVisibilityEditor
+                  fields={fields}
+                  value={visibilityConditions}
+                  onChange={setVisibilityConditions}
+                  disabled={!changeVisibility}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="mt-5 flex justify-end gap-2">
@@ -1368,17 +1523,20 @@ function BulkEditSlotsDialog({
 }
 
 function AddSlotDialog({
+  fields,
   onClose,
   onSubmit,
 }: {
+  fields: EventBookingFormField[]
   onClose: () => void
-  onSubmit: (s: { starts_at: string; ends_at: string; capacity: number | null }) => Promise<void>
+  onSubmit: (s: { starts_at: string; ends_at: string; capacity: number | null; visibility_conditions?: SlotVisibilityCondition[] | null }) => Promise<void>
 }) {
   const todayJst = new Date(jstNow().getTime() + 9 * 3600_000).toISOString().slice(0, 10)
   const [date, setDate] = useState(todayJst)
   const [startTime, setStartTime] = useState('10:00')
   const [endTime, setEndTime] = useState('12:00')
   const [capacity, setCapacity] = useState<string>('')
+  const [visibilityConditions, setVisibilityConditions] = useState<SlotVisibilityCondition[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -1391,7 +1549,12 @@ function AddSlotDialog({
       if (s >= e) throw new Error('開始時刻 < 終了時刻')
       const cap = capacity === '' ? null : Number(capacity)
       if (cap != null && (!Number.isInteger(cap) || cap < 1)) throw new Error('定員は1以上の整数')
-      await onSubmit({ starts_at: s, ends_at: e, capacity: cap })
+      await onSubmit({
+        starts_at: s,
+        ends_at: e,
+        capacity: cap,
+        visibility_conditions: visibilityConditions.length > 0 ? visibilityConditions : null,
+      })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1445,6 +1608,11 @@ function AddSlotDialog({
               className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
             />
           </label>
+          <SlotVisibilityEditor
+            fields={fields}
+            value={visibilityConditions}
+            onChange={setVisibilityConditions}
+          />
         </div>
         <div className="flex justify-end gap-2 mt-5">
           <button onClick={onClose} className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">

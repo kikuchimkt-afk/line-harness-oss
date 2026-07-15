@@ -14,6 +14,7 @@ export interface SlotWithRemaining {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  visibility_conditions?: string | null;
   active_count: number;
   remaining: number | null;
 }
@@ -31,6 +32,7 @@ interface SlotRow {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  visibility_conditions?: string | null;
 }
 
 interface BookingCountRow {
@@ -53,7 +55,7 @@ export async function getSlotsWithRemaining(
   }
   const slotsResult = await db
     .prepare(
-      `SELECT id, event_id, starts_at, ends_at, capacity, is_active, sort_order
+      `SELECT id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions
          FROM event_slots
         WHERE ${conditions.join(' AND ')}
         ORDER BY sort_order ASC, starts_at ASC`,

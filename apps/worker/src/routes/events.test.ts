@@ -77,6 +77,7 @@ interface SlotRow {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  visibility_conditions?: string | null;
   deleted_at: string | null;
 }
 
@@ -583,6 +584,18 @@ function makeEventDb(state: {
               );
             return { results: items as unknown as T[] };
           }
+          // duplicate event: copy source slots
+          if (sql.includes('FROM event_slots') && sql.includes('visibility_conditions')) {
+            const [event_id] = bound as [string];
+            const items = (state.slots ?? [])
+              .filter((s) => s.event_id === event_id && s.deleted_at == null)
+              .sort((a, b) =>
+                a.sort_order !== b.sort_order
+                  ? a.sort_order - b.sort_order
+                  : a.starts_at.localeCompare(b.starts_at),
+              );
+            return { results: items as unknown as T[] };
+          }
           return { results: [] };
         },
         async run() {
@@ -655,11 +668,11 @@ function makeEventDb(state: {
           }
           if (sql.startsWith('INSERT INTO event_slots')) {
             const [
-              id, event_id, starts_at, ends_at, capacity, is_active, sort_order,
-            ] = bound as [string, string, string, string, number | null, number, number];
+              id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions,
+            ] = bound as [string, string, string, string, number | null, number, number, string | null | undefined];
             (state.slots ?? []).push({
               id, event_id, starts_at, ends_at, capacity,
-              is_active, sort_order, deleted_at: null,
+              is_active, sort_order, visibility_conditions: visibility_conditions ?? null, deleted_at: null,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -936,6 +949,53 @@ describe('POST /api/events/admin/events', () => {
     expect(body.line_account_id).toBe('la1');
   });
 
+  test('POST duplicate creates unpublished copy with slots but no bookings', async () => {
+    const visibility = JSON.stringify([{ fieldId: 'level', operator: 'in', values: ['5級'] }]);
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          name: 'Original',
+          is_published: 1,
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T11:00:00Z',
+          capacity: 4,
+          is_active: 1,
+          sort_order: 2,
+          visibility_conditions: visibility,
+          deleted_at: null,
+        },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', status: 'confirmed' },
+      ],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/duplicate?account_id=la1', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as EventRow;
+    expect(body.id).not.toBe('e1');
+    expect(body.name).toBe('Original のコピー');
+    expect(body.is_published).toBe(0);
+    expect(state.events).toHaveLength(2);
+    expect(state.bookings).toHaveLength(1);
+    const copiedSlot = state.slots.find((slot) => slot.event_id === body.id);
+    expect(copiedSlot?.capacity).toBe(4);
+    expect(copiedSlot?.visibility_conditions).toBe(visibility);
+  });
+
   test('422 invalid_target_type', async () => {
     const app = setupApp({ events: [] });
     const res = await app.request('/api/events/admin/events?account_id=la1', {
@@ -1170,6 +1230,32 @@ describe('event_slots admin', () => {
     expect(state.slots).toHaveLength(2);
   });
 
+  test('POST stores slot visibility conditions', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [] as SlotRow[],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        slots: [
+          {
+            starts_at: '2099-06-01T10:00:00Z',
+            ends_at: '2099-06-01T12:00:00Z',
+            capacity: 5,
+            visibility_conditions: [{ fieldId: 'level', operator: 'in', values: ['5級'] }],
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '[]')).toEqual([
+      { fieldId: 'level', operator: 'in', values: ['5級'] },
+    ]);
+  });
+
   test('POST 422 when slots empty', async () => {
     const state = { events: [baseEvent({ id: 'e1', line_account_id: 'la1' })], slots: [] };
     const app = setupApp(state);
@@ -1223,6 +1309,23 @@ describe('event_slots admin', () => {
     expect(res.status).toBe(200);
     expect(state.slots[0].capacity).toBe(10);
     expect(state.slots[0].is_active).toBe(0);
+  });
+
+  test('PUT updates slot visibility conditions', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, visibility_conditions: null, deleted_at: null }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots/s1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility_conditions: [{ fieldId: 'level', operator: 'in', values: ['4級'] }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '[]')).toEqual([
+      { fieldId: 'level', operator: 'in', values: ['4級'] },
+    ]);
   });
 
   test('PUT 422 when range becomes invalid (only ends_at provided)', async () => {
@@ -1681,6 +1784,48 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('slot_full');
+  });
+
+  test('409 slot_condition_mismatch when answers do not match slot visibility', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          is_published: 1,
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T12:00:00Z',
+          capacity: null,
+          is_active: 1,
+          sort_order: 0,
+          visibility_conditions: JSON.stringify([{ fieldId: 'level', operator: 'in', values: ['5級'] }]),
+          deleted_at: null,
+        },
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1', form_answers: { level: '4級' } }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('slot_condition_mismatch');
+    expect(state.bookings ?? []).toHaveLength(0);
   });
 
   test('409 over_friend_limit when max_bookings_per_friend (>1) reached', async () => {

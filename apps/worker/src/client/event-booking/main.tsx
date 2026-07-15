@@ -2,7 +2,7 @@
 // apps/worker/src/client/main.ts (?page=event&id=<eventId> or ?page=event-me).
 // Mirrors salon-booking design language (LINE 緑 + sb-card + fade animations).
 
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import './styles.css';
 
@@ -56,6 +56,13 @@ interface EventSlot {
   is_active: number;
   active_count: number;
   remaining: number | null;
+  visibility_conditions?: SlotVisibilityCondition[] | string | null;
+}
+
+interface SlotVisibilityCondition {
+  fieldId: string;
+  operator: 'in';
+  values: string[];
 }
 
 interface MyBooking {
@@ -149,6 +156,48 @@ function parseFormFields(raw: EventDetail['booking_form_fields']): EventBookingF
   }
 }
 
+function parseSlotVisibilityConditions(raw: EventSlot['visibility_conditions']): SlotVisibilityCondition[] {
+  if (Array.isArray(raw)) return raw.filter((item) => item && item.fieldId && Array.isArray(item.values));
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is SlotVisibilityCondition => {
+          const candidate = item as Partial<SlotVisibilityCondition>;
+          return typeof candidate.fieldId === 'string' && Array.isArray(candidate.values);
+        })
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function answerValuesForCondition(answers: FormAnswers, fieldId: string): string[] {
+  const value = answers[fieldId];
+  if (Array.isArray(value)) return value.map((item) => item.trim()).filter(Boolean);
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  return [];
+}
+
+function slotVisibilityMatches(slot: EventSlot, answers: FormAnswers): boolean {
+  const conditions = parseSlotVisibilityConditions(slot.visibility_conditions);
+  if (conditions.length === 0) return true;
+  return conditions.every((condition) => {
+    const answerValues = answerValuesForCondition(answers, condition.fieldId);
+    return answerValues.some((value) => condition.values.includes(value));
+  });
+}
+
+function slotVisibilityFieldIds(slots: EventSlot[]): Set<string> {
+  const ids = new Set<string>();
+  for (const slot of slots) {
+    for (const condition of parseSlotVisibilityConditions(slot.visibility_conditions)) {
+      ids.add(condition.fieldId);
+    }
+  }
+  return ids;
+}
+
 function getTextAnswer(answers: FormAnswers, id: string): string {
   const value = answers[id];
   return typeof value === 'string' ? value : '';
@@ -183,13 +232,14 @@ function EventDetailScreen({
 }: {
   ctx: EventBookingContext;
   eventId: string;
-  onPickSlots: (slots: EventSlot[], event: EventDetail) => void;
+  onPickSlots: (slots: EventSlot[], event: EventDetail, answers: FormAnswers) => void;
   onGoHistory: () => void;
 }) {
   const [event, setEvent] = useState<EventDetail | null>(null);
   const [slots, setSlots] = useState<EventSlot[]>([]);
   const [myActive, setMyActive] = useState<MyBooking[]>([]);
   const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
+  const [conditionAnswers, setConditionAnswers] = useState<FormAnswers>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -227,10 +277,28 @@ function EventDetailScreen({
     return () => { cancelled = true; };
   }, [ctx, eventId]);
 
+  const formFields = useMemo(
+    () => (event ? parseFormFields(event.booking_form_fields) : []),
+    [event],
+  );
+  const conditionFieldIds = useMemo(() => slotVisibilityFieldIds(slots), [slots]);
+  const conditionFields = useMemo(
+    () => formFields.filter((field) => conditionFieldIds.has(field.id)),
+    [conditionFieldIds, formFields],
+  );
+  const visibleSlots = useMemo(
+    () => slots.filter((slot) => slotVisibilityMatches(slot, conditionAnswers)),
+    [slots, conditionAnswers],
+  );
+
   useEffect(() => {
-    const availableIds = new Set(slots.map((slot) => slot.id));
+    const availableIds = new Set(visibleSlots.map((slot) => slot.id));
     setSelectedSlotIds((prev) => prev.filter((slotId) => availableIds.has(slotId)));
-  }, [slots]);
+  }, [visibleSlots]);
+
+  function setConditionAnswer(id: string, value: string | string[]) {
+    setConditionAnswers((prev) => ({ ...prev, [id]: value }));
+  }
 
   if (loading) return <Spinner />;
   if (error || !event) {
@@ -279,7 +347,7 @@ function EventDetailScreen({
   const activeCountForLimit = Math.max(myActive.length, existingBooking ? 1 : 0);
   const remainingSelectable = max == null ? Number.POSITIVE_INFINITY : Math.max(0, max - activeCountForLimit);
   const overLimit = remainingSelectable <= 0;
-  const selectedSlots = slots.filter((slot) => selectedSlotIds.includes(slot.id));
+  const selectedSlots = visibleSlots.filter((slot) => selectedSlotIds.includes(slot.id));
 
   function toggleSlot(slot: EventSlot) {
     const full = slot.remaining != null && slot.remaining <= 0;
@@ -340,18 +408,75 @@ function EventDetailScreen({
           </div>
         )}
 
+        {conditionFields.length > 0 && (
+          <div className="mt-5">
+            <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">予約内容を選択</h2>
+            <p className="text-xs text-gray-500 mb-3 px-1">
+              選んだ内容に合わせて、予約できる日時だけを表示します。
+            </p>
+            <div className="space-y-3">
+              {conditionFields.map((field) => (
+                <div key={field.id} className="eb-card">
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                    {field.label}
+                  </label>
+                  {field.type === 'checkbox' ? (
+                    <div className="space-y-2">
+                      {(field.options ?? []).map((option) => {
+                        const selected = getListAnswer(conditionAnswers, field.id).includes(option);
+                        return (
+                          <label key={option} className="flex items-center gap-2 text-sm text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(e) => {
+                                const current = getListAnswer(conditionAnswers, field.id);
+                                setConditionAnswer(
+                                  field.id,
+                                  e.target.checked
+                                    ? [...current, option]
+                                    : current.filter((x) => x !== option),
+                                );
+                              }}
+                              className="rounded border-gray-300"
+                            />
+                            {option}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <select
+                      value={getTextAnswer(conditionAnswers, field.id)}
+                      onChange={(e) => setConditionAnswer(field.id, e.target.value)}
+                      className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                    >
+                      <option value="">選択してください</option>
+                      {(field.options ?? []).map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="mt-5">
           <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">日時を選択</h2>
           <p className="text-xs text-gray-500 mb-3 px-1">
             参加したい日時を複数選べます。必要事項の入力は次の画面で1回だけです。
           </p>
-          {slots.length === 0 ? (
+          {visibleSlots.length === 0 ? (
             <div className="eb-card text-center text-sm text-gray-500">
-              現在予約可能な枠はありません。
+              {conditionFields.length > 0
+                ? '上の項目を選ぶと、予約できる日時が表示されます。'
+                : '現在予約可能な枠はありません。'}
             </div>
           ) : (
             <ul className="space-y-2">
-              {slots.map((s) => {
+              {visibleSlots.map((s) => {
                 const full = s.remaining != null && s.remaining <= 0;
                 const selected = selectedSlotIds.includes(s.id);
                 const selectionLimitReached = selectedSlotIds.length >= remainingSelectable;
@@ -388,13 +513,13 @@ function EventDetailScreen({
           )}
         </div>
 
-        {slots.length > 0 && !overLimit && (
+        {visibleSlots.length > 0 && !overLimit && (
           <div className="eb-selection-panel">
             <div className="text-xs text-gray-600">
               選択中: <span className="font-bold text-gray-900">{selectedSlots.length}</span> 件
             </div>
             <button
-              onClick={() => onPickSlots(selectedSlots, event)}
+              onClick={() => onPickSlots(selectedSlots, event, conditionAnswers)}
               disabled={selectedSlots.length === 0}
               className="eb-primary-btn"
             >
@@ -411,21 +536,25 @@ function ConfirmScreen({
   ctx,
   event,
   slots,
+  initialAnswers,
   onBack,
   onDone,
 }: {
   ctx: EventBookingContext;
   event: EventDetail;
   slots: EventSlot[];
+  initialAnswers: FormAnswers;
   onBack: () => void;
   onDone: (status: string, count: number, failedCount?: number) => void;
 }) {
   const [note, setNote] = useState('');
-  const [answers, setAnswers] = useState<FormAnswers>({});
+  const [answers, setAnswers] = useState<FormAnswers>(initialAnswers);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idemKey] = useState(uid);
   const formFields = parseFormFields(event.booking_form_fields);
+  const conditionFieldIds = slotVisibilityFieldIds(slots);
+  const remainingFormFields = formFields.filter((field) => !conditionFieldIds.has(field.id));
 
   function setAnswer(id: string, value: string | string[]) {
     setAnswers((prev) => ({ ...prev, [id]: value }));
@@ -454,6 +583,7 @@ function ConfirmScreen({
       case 'over_friend_limit': return 'このイベントへの予約上限に達しています。';
       case 'slot_started': return 'この枠は既に開始されています。';
       case 'slot_inactive': return 'この枠は受付を締め切りました。';
+      case 'slot_condition_mismatch': return '入力内容に合わない日時が含まれています。日時を選び直してください。';
       case 'event_unpublished': return 'このイベントは現在受付を停止しています。';
       case 'unauthorized':
       case 'friend_not_found':
@@ -565,13 +695,13 @@ function ConfirmScreen({
         </div>
       )}
 
-      {formFields.length > 0 && (
+      {remainingFormFields.length > 0 && (
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-bold text-gray-900">必要事項</h2>
             <p className="text-xs text-gray-500 mt-1">参加に必要な内容をご入力ください。</p>
           </div>
-          {formFields.map((field) => (
+          {remainingFormFields.map((field) => (
             <div key={field.id}>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
                 {field.label}
@@ -853,7 +983,7 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
 
 type Screen =
   | { kind: 'detail'; eventId: string }
-  | { kind: 'confirm'; event: EventDetail; slots: EventSlot[] }
+  | { kind: 'confirm'; event: EventDetail; slots: EventSlot[]; initialAnswers: FormAnswers }
   | { kind: 'done'; status: string; count: number; failedCount?: number }
   | { kind: 'history' };
 
@@ -882,7 +1012,7 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
           <EventDetailScreen
             ctx={ctx}
             eventId={screen.eventId}
-            onPickSlots={(slots, event) => setScreen({ kind: 'confirm', event, slots })}
+            onPickSlots={(slots, event, initialAnswers) => setScreen({ kind: 'confirm', event, slots, initialAnswers })}
             onGoHistory={() => setScreen({ kind: 'history' })}
           />
         )}
@@ -891,6 +1021,7 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
             ctx={ctx}
             event={screen.event}
             slots={screen.slots}
+            initialAnswers={screen.initialAnswers}
             onBack={() => setScreen({ kind: 'detail', eventId: screen.event.id })}
             onDone={(status, count, failedCount) => setScreen({ kind: 'done', status, count, failedCount })}
           />

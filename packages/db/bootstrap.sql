@@ -311,6 +311,7 @@ CREATE TABLE event_slots (
   capacity    INTEGER,
   is_active   INTEGER NOT NULL DEFAULT 1,
   sort_order  INTEGER NOT NULL DEFAULT 0,
+  visibility_conditions TEXT CHECK (visibility_conditions IS NULL OR json_valid(visibility_conditions)),
   deleted_at  TEXT,
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
