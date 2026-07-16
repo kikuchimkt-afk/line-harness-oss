@@ -4,11 +4,16 @@
 // Inputs are JST (Asia/Tokyo); outputs are UTC ISO8601 (Z-suffixed) ready
 // to POST to /api/events/admin/events/:id/slots.
 
+export interface TimePattern {
+  start: string;
+  end: string;
+}
+
 export interface BulkSlotInput {
   start_date: string; // YYYY-MM-DD (JST)
   end_date: string;   // YYYY-MM-DD (JST), inclusive
   weekdays: number[]; // 0=Sun ... 6=Sat
-  time_patterns: Array<{ start: string; end: string }>; // HH:MM JST, start < end
+  time_patterns: TimePattern[]; // HH:MM JST, start < end
   capacity: number | null;
 }
 
@@ -19,6 +24,40 @@ export interface GeneratedSlot {
 }
 
 const JST_OFFSET_MIN = 9 * 60;
+
+function hhmmToMinutes(value: string): number | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+function minutesToHHMM(value: number): string {
+  const hour = Math.floor(value / 60);
+  const minute = value % 60;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+export function buildTimeSlotChoices(start: string, end: string, intervalMinutes = 30): TimePattern[] {
+  const startMinutes = hhmmToMinutes(start);
+  const endMinutes = hhmmToMinutes(end);
+  if (startMinutes == null || endMinutes == null) return [];
+  if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1) return [];
+  if (startMinutes >= endMinutes) return [];
+  if (startMinutes % intervalMinutes !== 0 || endMinutes % intervalMinutes !== 0) return [];
+
+  const choices: TimePattern[] = [];
+  for (let cursor = startMinutes; cursor + intervalMinutes <= endMinutes; cursor += intervalMinutes) {
+    choices.push({
+      start: minutesToHHMM(cursor),
+      end: minutesToHHMM(cursor + intervalMinutes),
+    });
+  }
+  return choices;
+}
 
 function jstHHMMToUtcIso(date: string, hhmm: string): string {
   const [h, m] = hhmm.split(':').map(Number);

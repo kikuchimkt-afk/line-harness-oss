@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot, type SlotVisibilityCondition, type SlotVisibilityRule } from '@/lib/api'
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
-import { generateBulkSlots, type BulkSlotInput } from './bulk-slot-generator'
+import { buildTimeSlotChoices, generateBulkSlots, type BulkSlotInput, type TimePattern } from './bulk-slot-generator'
 
 type Tab = 'overview' | 'slots' | 'publish'
 
@@ -1792,26 +1792,57 @@ function BulkSlotDialog({
   const [start, setStart] = useState(todayJst)
   const [end, setEnd] = useState(todayJst)
   const [weekdays, setWeekdays] = useState<number[]>([1, 2, 3, 4, 5])
-  const [patterns, setPatterns] = useState([{ start: '10:00', end: '11:00' }])
+  const [timeInputMode, setTimeInputMode] = useState<'quick' | 'manual'>('quick')
+  const [rangeStart, setRangeStart] = useState('11:00')
+  const [rangeEnd, setRangeEnd] = useState('19:00')
+  const [selectedQuickKeys, setSelectedQuickKeys] = useState<string[]>([])
+  const [manualPatterns, setManualPatterns] = useState<TimePattern[]>([{ start: '10:00', end: '11:00' }])
   const [capacity, setCapacity] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  const quickChoices = buildTimeSlotChoices(rangeStart, rangeEnd)
+  const selectedQuickPatterns = quickChoices.filter((pattern) => selectedQuickKeys.includes(timePatternKey(pattern)))
+  const validManualPatterns = uniqueTimePatterns(
+    manualPatterns.filter((pattern) => pattern.start && pattern.end && pattern.start < pattern.end),
+  )
+  const activePatterns = timeInputMode === 'quick' ? selectedQuickPatterns : validManualPatterns
+  const previewCount = generateBulkSlots({
+    start_date: start,
+    end_date: end,
+    weekdays,
+    time_patterns: activePatterns,
+    capacity: null,
+  }).length
+
   function toggleWeekday(d: number) {
     setWeekdays((ws) => (ws.includes(d) ? ws.filter((x) => x !== d) : [...ws, d]))
+  }
+
+  function toggleQuickChoice(pattern: TimePattern) {
+    const key = timePatternKey(pattern)
+    setSelectedQuickKeys((keys) => (keys.includes(key) ? keys.filter((item) => item !== key) : [...keys, key]))
   }
 
   async function submit() {
     setBusy(true)
     setErr(null)
     try {
+      if (!start || !end || start > end) throw new Error('開始日と終了日を確認してください')
+      if (weekdays.length === 0) throw new Error('予約枠を作る曜日を1つ以上選んでください')
+      if (timeInputMode === 'quick' && quickChoices.length === 0) {
+        throw new Error('時間帯は30分単位で、開始時刻より終了時刻を後にしてください')
+      }
+      if (activePatterns.length === 0) {
+        throw new Error(timeInputMode === 'quick' ? '作成する30分枠を1つ以上選んでください' : '有効な時刻パターンを1つ以上入力してください')
+      }
       const cap = capacity === '' ? null : Number(capacity)
       if (cap != null && (!Number.isInteger(cap) || cap < 1)) throw new Error('定員は1以上の整数')
       await onSubmit({
         start_date: start,
         end_date: end,
         weekdays,
-        time_patterns: patterns.filter((p) => p.start && p.end && p.start < p.end),
+        time_patterns: activePatterns,
         capacity: cap,
       })
     } catch (e) {
@@ -1824,7 +1855,7 @@ function BulkSlotDialog({
   return (
     <DialogPortal>
       <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-        <div className="w-full max-w-3xl rounded-lg bg-white p-5 shadow-xl">
+        <div className="max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
         <h3 className="text-lg font-bold mb-3 text-gray-900">予約枠の一括追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
         <div className="space-y-3">
@@ -1858,41 +1889,150 @@ function BulkSlotDialog({
             </div>
           </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_220px] md:items-start">
-            <div>
-              <span className="text-sm font-medium text-gray-700 block mb-1.5">時刻パターン</span>
-              {patterns.map((p, i) => (
-                <div key={i} className="flex gap-2 mb-1.5 items-center">
-                  <input
-                    type="time"
-                    value={p.start}
-                    onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, start: e.target.value } : x)))}
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                  <span className="text-gray-500">〜</span>
-                  <input
-                    type="time"
-                    value={p.end}
-                    onChange={(e) => setPatterns((ps) => ps.map((x, j) => (j === i ? { ...x, end: e.target.value } : x)))}
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                  {patterns.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => setPatterns((ps) => ps.filter((_, j) => j !== i))}
-                      className="text-red-600 px-2"
-                    >
-                      ×
-                    </button>
+            <div className="space-y-3">
+              <div>
+                <span className="block text-sm font-medium text-gray-700">時刻の選び方</span>
+                <div className="mt-1.5 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTimeInputMode('quick')}
+                    className={`border px-3 py-2 text-sm ${
+                      timeInputMode === 'quick' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-600'
+                    }`}
+                  >
+                    30分枠から選ぶ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTimeInputMode('manual')}
+                    className={`border px-3 py-2 text-sm ${
+                      timeInputMode === 'manual' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-600'
+                    }`}
+                  >
+                    時刻を直接入力
+                  </button>
+                </div>
+              </div>
+
+              {timeInputMode === 'quick' ? (
+                <div className="border border-blue-100 bg-blue-50/50 p-3">
+                  <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
+                    <label>
+                      <span className="block text-xs font-medium text-gray-700">時間帯の開始</span>
+                      <input
+                        type="time"
+                        step={1800}
+                        value={rangeStart}
+                        onChange={(e) => setRangeStart(e.target.value)}
+                        className="mt-1 w-full border border-gray-300 bg-white px-3 py-2 text-sm"
+                      />
+                    </label>
+                    <span className="pb-2 text-gray-500">〜</span>
+                    <label>
+                      <span className="block text-xs font-medium text-gray-700">時間帯の終了</span>
+                      <input
+                        type="time"
+                        step={1800}
+                        value={rangeEnd}
+                        onChange={(e) => setRangeEnd(e.target.value)}
+                        className="mt-1 w-full border border-gray-300 bg-white px-3 py-2 text-sm"
+                      />
+                    </label>
+                  </div>
+
+                  {quickChoices.length > 0 ? (
+                    <>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-gray-700">作成する枠をクリック</span>
+                        <div className="flex gap-3 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedQuickKeys(quickChoices.map(timePatternKey))}
+                            className="text-blue-700 hover:underline"
+                          >
+                            全枠を選択
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedQuickKeys([])}
+                            className="text-gray-600 hover:underline"
+                          >
+                            選択を解除
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                        {quickChoices.map((pattern) => {
+                          const key = timePatternKey(pattern)
+                          const selected = selectedQuickKeys.includes(key)
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              aria-pressed={selected}
+                              onClick={() => toggleQuickChoice(pattern)}
+                              className={`min-h-10 border px-2 py-2 text-xs ${
+                                selected
+                                  ? 'border-blue-500 bg-blue-600 text-white'
+                                  : 'border-gray-300 bg-white text-gray-700 hover:border-blue-300 hover:bg-blue-50'
+                              }`}
+                            >
+                              {pattern.start}〜{pattern.end}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <p className="mt-2 text-xs text-gray-600">選択中：1日あたり {selectedQuickPatterns.length}枠</p>
+                    </>
+                  ) : (
+                    <p className="mt-3 border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                      開始・終了時刻は00分または30分にし、終了時刻を開始時刻より後にしてください。
+                    </p>
                   )}
                 </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => setPatterns((ps) => [...ps, { start: '14:00', end: '15:00' }])}
-                className="text-sm text-blue-600 hover:underline"
-              >
-                ＋ パターン追加
-              </button>
+              ) : (
+                <div>
+                  <span className="mb-1.5 block text-sm font-medium text-gray-700">時刻パターン</span>
+                  {manualPatterns.map((pattern, index) => (
+                    <div key={index} className="mb-1.5 flex items-center gap-2">
+                      <input
+                        type="time"
+                        value={pattern.start}
+                        onChange={(e) => setManualPatterns((items) => items.map((item, itemIndex) => (
+                          itemIndex === index ? { ...item, start: e.target.value } : item
+                        )))}
+                        className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      />
+                      <span className="text-gray-500">〜</span>
+                      <input
+                        type="time"
+                        value={pattern.end}
+                        onChange={(e) => setManualPatterns((items) => items.map((item, itemIndex) => (
+                          itemIndex === index ? { ...item, end: e.target.value } : item
+                        )))}
+                        className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      />
+                      {manualPatterns.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setManualPatterns((items) => items.filter((_, itemIndex) => itemIndex !== index))}
+                          className="px-2 text-red-600"
+                          aria-label={`時刻パターン${index + 1}を削除`}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setManualPatterns((items) => [...items, { start: '14:00', end: '15:00' }])}
+                    className="text-sm text-blue-600 hover:underline"
+                  >
+                    ＋ パターン追加
+                  </button>
+                </div>
+              )}
             </div>
             <label className="block">
               <span className="text-sm font-medium text-gray-700">定員（空欄=無制限）</span>
@@ -1904,6 +2044,9 @@ function BulkSlotDialog({
                 className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               />
             </label>
+          </div>
+          <div className="border border-pink-100 bg-pink-50/40 px-3 py-2 text-sm text-gray-700">
+            生成予定：{previewCount}枠（1日あたり {activePatterns.length}枠）
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-4">
@@ -1922,6 +2065,20 @@ function BulkSlotDialog({
       </div>
     </DialogPortal>
   )
+}
+
+function timePatternKey(pattern: TimePattern): string {
+  return `${pattern.start}-${pattern.end}`
+}
+
+function uniqueTimePatterns(patterns: TimePattern[]): TimePattern[] {
+  const seen = new Set<string>()
+  return patterns.filter((pattern) => {
+    const key = timePatternKey(pattern)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function jstHHMMToUtcIso(date: string, hhmm: string): string {
