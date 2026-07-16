@@ -214,24 +214,43 @@ interface SlotVisibilityCondition {
   values: string[];
 }
 
+interface SlotVisibilityRule {
+  logic: 'and' | 'or';
+  conditions: SlotVisibilityCondition[];
+}
+
 function normalizeSlotVisibilityConditions(
   value: unknown,
-): { ok: true; conditions: SlotVisibilityCondition[] } | { ok: false; code: string } {
-  if (value == null || value === '') return { ok: true, conditions: [] };
+): { ok: true; rule: SlotVisibilityRule } | { ok: false; code: string } {
+  if (value == null || value === '') return { ok: true, rule: { logic: 'and', conditions: [] } };
   let source: unknown = value;
   if (typeof value === 'string') {
-    if (!value.trim()) return { ok: true, conditions: [] };
+    if (!value.trim()) return { ok: true, rule: { logic: 'and', conditions: [] } };
     try {
       source = JSON.parse(value) as unknown;
     } catch {
       return { ok: false, code: 'invalid_slot_visibility_conditions' };
     }
   }
-  if (!Array.isArray(source) || source.length > 10) {
+  let logic: SlotVisibilityRule['logic'] = 'and';
+  let rawConditions: unknown = source;
+  // Plain arrays are the original format and always keep AND behavior.
+  if (!Array.isArray(source)) {
+    if (source == null || typeof source !== 'object') {
+      return { ok: false, code: 'invalid_slot_visibility_conditions' };
+    }
+    const candidate = source as Record<string, unknown>;
+    if (candidate.logic !== 'and' && candidate.logic !== 'or') {
+      return { ok: false, code: 'invalid_slot_visibility_logic' };
+    }
+    logic = candidate.logic;
+    rawConditions = candidate.conditions;
+  }
+  if (!Array.isArray(rawConditions) || rawConditions.length > 10) {
     return { ok: false, code: 'invalid_slot_visibility_conditions' };
   }
   const conditions: SlotVisibilityCondition[] = [];
-  for (const raw of source) {
+  for (const raw of rawConditions) {
     if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
       return { ok: false, code: 'invalid_slot_visibility_condition' };
     }
@@ -253,12 +272,12 @@ function normalizeSlotVisibilityConditions(
     }
     conditions.push({ fieldId, operator: 'in', values });
   }
-  return { ok: true, conditions };
+  return { ok: true, rule: { logic, conditions } };
 }
 
-function parseSlotVisibilityConditions(raw: unknown): SlotVisibilityCondition[] {
+function parseSlotVisibilityRule(raw: unknown): SlotVisibilityRule {
   const normalized = normalizeSlotVisibilityConditions(raw);
-  return normalized.ok ? normalized.conditions : [];
+  return normalized.ok ? normalized.rule : { logic: 'and', conditions: [] };
 }
 
 function answerValuesForCondition(answer: string | string[] | undefined): string[] {
@@ -268,12 +287,13 @@ function answerValuesForCondition(answer: string | string[] | undefined): string
 }
 
 function slotVisibilityMatches(rawConditions: unknown, answers: Record<string, string | string[]>): boolean {
-  const conditions = parseSlotVisibilityConditions(rawConditions);
-  if (conditions.length === 0) return true;
-  return conditions.every((condition) => {
+  const rule = parseSlotVisibilityRule(rawConditions);
+  if (rule.conditions.length === 0) return true;
+  const matches = (condition: SlotVisibilityCondition) => {
     const answerValues = answerValuesForCondition(answers[condition.fieldId]);
     return answerValues.some((value) => condition.values.includes(value));
-  });
+  };
+  return rule.logic === 'or' ? rule.conditions.some(matches) : rule.conditions.every(matches);
 }
 
 function validateEventInput(
@@ -867,7 +887,7 @@ events.post('/api/events/admin/events/:id/slots', async (c) => {
         s.capacity ?? null,
         s.is_active ?? 1,
         s.sort_order ?? 0,
-        visibility.conditions.length > 0 ? JSON.stringify(visibility.conditions) : null,
+        visibility.rule.conditions.length > 0 ? JSON.stringify(visibility.rule) : null,
       )
       .run();
     const row = await c.env.DB.prepare(`SELECT * FROM event_slots WHERE id = ?`).bind(id).first();
@@ -909,7 +929,7 @@ events.put('/api/events/admin/events/:id/slots/:slotId', async (c) => {
       if (k === 'visibility_conditions') {
         const visibility = normalizeSlotVisibilityConditions(body.visibility_conditions);
         if (!visibility.ok) return bad(c, visibility.code, 422);
-        setValues.push(visibility.conditions.length > 0 ? JSON.stringify(visibility.conditions) : null);
+        setValues.push(visibility.rule.conditions.length > 0 ? JSON.stringify(visibility.rule) : null);
       } else {
         setValues.push((body as Record<string, unknown>)[k]);
       }

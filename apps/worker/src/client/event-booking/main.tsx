@@ -56,13 +56,18 @@ interface EventSlot {
   is_active: number;
   active_count: number;
   remaining: number | null;
-  visibility_conditions?: SlotVisibilityCondition[] | string | null;
+  visibility_conditions?: SlotVisibilityRule | SlotVisibilityCondition[] | string | null;
 }
 
 interface SlotVisibilityCondition {
   fieldId: string;
   operator: 'in';
   values: string[];
+}
+
+interface SlotVisibilityRule {
+  logic: 'and' | 'or';
+  conditions: SlotVisibilityCondition[];
 }
 
 interface MyBooking {
@@ -156,20 +161,41 @@ function parseFormFields(raw: EventDetail['booking_form_fields']): EventBookingF
   }
 }
 
-function parseSlotVisibilityConditions(raw: EventSlot['visibility_conditions']): SlotVisibilityCondition[] {
-  if (Array.isArray(raw)) return raw.filter((item) => item && item.fieldId && Array.isArray(item.values));
-  if (typeof raw !== 'string' || !raw.trim()) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is SlotVisibilityCondition => {
-          const candidate = item as Partial<SlotVisibilityCondition>;
-          return typeof candidate.fieldId === 'string' && Array.isArray(candidate.values);
-        })
+function parseSlotVisibilityConditionList(raw: unknown): SlotVisibilityCondition[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const candidate = item as Partial<SlotVisibilityCondition>;
+    if (typeof candidate.fieldId !== 'string' || !Array.isArray(candidate.values)) return [];
+    const values = candidate.values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    return values.length > 0
+      ? [{ fieldId: candidate.fieldId, operator: 'in' as const, values }]
       : [];
-  } catch {
-    return [];
+  });
+}
+
+function parseSlotVisibilityRule(raw: EventSlot['visibility_conditions']): SlotVisibilityRule {
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return { logic: 'and', conditions: [] };
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      return { logic: 'and', conditions: [] };
+    }
   }
+  // Existing array-only data keeps the previous AND behavior.
+  if (Array.isArray(parsed)) {
+    return { logic: 'and', conditions: parseSlotVisibilityConditionList(parsed) };
+  }
+  if (parsed && typeof parsed === 'object') {
+    const candidate = parsed as Partial<SlotVisibilityRule>;
+    return {
+      logic: candidate.logic === 'or' ? 'or' : 'and',
+      conditions: parseSlotVisibilityConditionList(candidate.conditions),
+    };
+  }
+  return { logic: 'and', conditions: [] };
 }
 
 function answerValuesForCondition(answers: FormAnswers, fieldId: string): string[] {
@@ -180,18 +206,19 @@ function answerValuesForCondition(answers: FormAnswers, fieldId: string): string
 }
 
 function slotVisibilityMatches(slot: EventSlot, answers: FormAnswers): boolean {
-  const conditions = parseSlotVisibilityConditions(slot.visibility_conditions);
-  if (conditions.length === 0) return true;
-  return conditions.every((condition) => {
+  const rule = parseSlotVisibilityRule(slot.visibility_conditions);
+  if (rule.conditions.length === 0) return true;
+  const matches = (condition: SlotVisibilityCondition) => {
     const answerValues = answerValuesForCondition(answers, condition.fieldId);
     return answerValues.some((value) => condition.values.includes(value));
-  });
+  };
+  return rule.logic === 'or' ? rule.conditions.some(matches) : rule.conditions.every(matches);
 }
 
 function slotVisibilityFieldIds(slots: EventSlot[]): Set<string> {
   const ids = new Set<string>();
   for (const slot of slots) {
-    for (const condition of parseSlotVisibilityConditions(slot.visibility_conditions)) {
+    for (const condition of parseSlotVisibilityRule(slot.visibility_conditions).conditions) {
       ids.add(condition.fieldId);
     }
   }

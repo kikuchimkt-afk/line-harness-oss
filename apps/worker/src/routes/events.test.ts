@@ -1251,9 +1251,10 @@ describe('event_slots admin', () => {
       }),
     });
     expect(res.status).toBe(201);
-    expect(JSON.parse(state.slots[0].visibility_conditions ?? '[]')).toEqual([
-      { fieldId: 'level', operator: 'in', values: ['5級'] },
-    ]);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '{}')).toEqual({
+      logic: 'and',
+      conditions: [{ fieldId: 'level', operator: 'in', values: ['5級'] }],
+    });
   });
 
   test('POST 422 when slots empty', async () => {
@@ -1320,12 +1321,24 @@ describe('event_slots admin', () => {
     const res = await app.request('/api/events/admin/events/e1/slots/s1?account_id=la1', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ visibility_conditions: [{ fieldId: 'level', operator: 'in', values: ['4級'] }] }),
+      body: JSON.stringify({
+        visibility_conditions: {
+          logic: 'or',
+          conditions: [
+            { fieldId: 'level', operator: 'in', values: ['4級'] },
+            { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+          ],
+        },
+      }),
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(state.slots[0].visibility_conditions ?? '[]')).toEqual([
-      { fieldId: 'level', operator: 'in', values: ['4級'] },
-    ]);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '{}')).toEqual({
+      logic: 'or',
+      conditions: [
+        { fieldId: 'level', operator: 'in', values: ['4級'] },
+        { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+      ],
+    });
   });
 
   test('PUT 422 when range becomes invalid (only ends_at provided)', async () => {
@@ -1786,7 +1799,7 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(body.error).toBe('slot_full');
   });
 
-  test('409 slot_condition_mismatch when answers do not match slot visibility', async () => {
+  test('OR slot visibility accepts a booking when any condition matches', async () => {
     const state = {
       events: [
         baseEvent({
@@ -1795,6 +1808,7 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
           is_published: 1,
           booking_form_fields: JSON.stringify([
             { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+            { id: 'school', label: '教室', type: 'select', required: true, options: ['藍住教室', '北島中央'] },
           ]),
         }),
       ],
@@ -1807,7 +1821,61 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
           capacity: null,
           is_active: 1,
           sort_order: 0,
-          visibility_conditions: JSON.stringify([{ fieldId: 'level', operator: 'in', values: ['5級'] }]),
+          visibility_conditions: JSON.stringify({
+            logic: 'or',
+            conditions: [
+              { fieldId: 'level', operator: 'in', values: ['5級'] },
+              { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+            ],
+          }),
+          deleted_at: null,
+        },
+      ],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({
+        slot_id: 's1',
+        form_answers: { level: '4級', school: '藍住教室' },
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(state.bookings).toHaveLength(1);
+  });
+
+  test('409 slot_condition_mismatch when legacy AND conditions are not all matched', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          is_published: 1,
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+            { id: 'school', label: '教室', type: 'select', required: true, options: ['藍住教室', '北島中央'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T12:00:00Z',
+          capacity: null,
+          is_active: 1,
+          sort_order: 0,
+          visibility_conditions: JSON.stringify([
+            { fieldId: 'level', operator: 'in', values: ['4級'] },
+            { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+          ]),
           deleted_at: null,
         },
       ],
@@ -1820,7 +1888,7 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
-      body: JSON.stringify({ slot_id: 's1', form_answers: { level: '4級' } }),
+      body: JSON.stringify({ slot_id: 's1', form_answers: { level: '4級', school: '北島中央' } }),
     });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };

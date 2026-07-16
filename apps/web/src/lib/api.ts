@@ -1635,6 +1635,13 @@ export interface SlotVisibilityCondition {
   values: string[];
 }
 
+export type SlotVisibilityLogic = 'and' | 'or';
+
+export interface SlotVisibilityRule {
+  logic: SlotVisibilityLogic;
+  conditions: SlotVisibilityCondition[];
+}
+
 export interface EventSlot {
   id: string;
   event_id: string;
@@ -1643,7 +1650,9 @@ export interface EventSlot {
   capacity: number | null;
   is_active: number;
   sort_order: number;
-  visibility_conditions?: SlotVisibilityCondition[] | string | null;
+  // Older slots store a plain condition array. Newer slots store a rule with
+  // an explicit AND/OR choice. Both shapes remain readable for compatibility.
+  visibility_conditions?: SlotVisibilityRule | SlotVisibilityCondition[] | string | null;
   active_count?: number;
 }
 
@@ -1710,7 +1719,7 @@ export const eventsApi = {
       capacity: number | null;
       is_active?: number;
       sort_order?: number;
-      visibility_conditions?: SlotVisibilityCondition[] | null;
+      visibility_conditions?: SlotVisibilityRule | SlotVisibilityCondition[] | null;
     }>,
   ) =>
     fetchApi<{ items: EventSlot[] }>(

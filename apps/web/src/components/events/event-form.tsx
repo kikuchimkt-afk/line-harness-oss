@@ -3,7 +3,7 @@
 import { type ReactNode, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot, type SlotVisibilityCondition } from '@/lib/api'
+import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, type EventDetail, type EventSlot, type SlotVisibilityCondition, type SlotVisibilityRule } from '@/lib/api'
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
 import { generateBulkSlots, type BulkSlotInput } from './bulk-slot-generator'
@@ -69,30 +69,52 @@ function parseEventFormFields(raw: EventDetail['booking_form_fields']): EventBoo
   }
 }
 
-function parseSlotVisibilityConditions(raw: EventSlot['visibility_conditions']): SlotVisibilityCondition[] {
-  if (Array.isArray(raw)) return raw.filter((item) => item && item.fieldId && Array.isArray(item.values))
-  if (typeof raw !== 'string' || !raw.trim()) return []
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is SlotVisibilityCondition => {
-          const candidate = item as Partial<SlotVisibilityCondition>
-          return typeof candidate.fieldId === 'string' && Array.isArray(candidate.values)
-        })
+function parseSlotVisibilityConditionList(raw: unknown): SlotVisibilityCondition[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const candidate = item as Partial<SlotVisibilityCondition>
+    if (typeof candidate.fieldId !== 'string' || !Array.isArray(candidate.values)) return []
+    const values = candidate.values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    return values.length > 0
+      ? [{ fieldId: candidate.fieldId, operator: 'in' as const, values }]
       : []
-  } catch {
-    return []
+  })
+}
+
+function parseSlotVisibilityRule(raw: EventSlot['visibility_conditions']): SlotVisibilityRule {
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return { logic: 'and', conditions: [] }
+    try {
+      parsed = JSON.parse(raw) as unknown
+    } catch {
+      return { logic: 'and', conditions: [] }
+    }
   }
+  // Existing slots stored only an array. They keep their original AND behavior.
+  if (Array.isArray(parsed)) {
+    return { logic: 'and', conditions: parseSlotVisibilityConditionList(parsed) }
+  }
+  if (parsed && typeof parsed === 'object') {
+    const candidate = parsed as Partial<SlotVisibilityRule>
+    return {
+      logic: candidate.logic === 'or' ? 'or' : 'and',
+      conditions: parseSlotVisibilityConditionList(candidate.conditions),
+    }
+  }
+  return { logic: 'and', conditions: [] }
 }
 
 function getSlotVisibilityLabel(slot: EventSlot, fields: EventBookingFormField[]): string {
-  const conditions = parseSlotVisibilityConditions(slot.visibility_conditions)
-  if (conditions.length === 0) return '全員に表示'
-  return conditions.map((condition) => {
+  const rule = parseSlotVisibilityRule(slot.visibility_conditions)
+  if (rule.conditions.length === 0) return '全員に表示'
+  const connector = rule.logic === 'or' ? ' または ' : ' かつ '
+  return rule.conditions.map((condition) => {
     const field = fields.find((f) => f.id === condition.fieldId)
     const label = field?.label ?? condition.fieldId
     return `${label}: ${condition.values.join('・')}`
-  }).join(' / ')
+  }).join(connector)
 }
 
 function selectableConditionFields(fields: EventBookingFormField[]): EventBookingFormField[] {
@@ -1053,7 +1075,9 @@ function SlotsTab({
         }
         if (input.changeCapacity) body.capacity = input.capacity
         if (input.changeActive) body.is_active = input.isActive
-        if (input.changeVisibility) body.visibility_conditions = input.visibilityConditions
+        if (input.changeVisibility) {
+          body.visibility_conditions = input.visibilityRule.conditions.length > 0 ? input.visibilityRule : null
+        }
         await eventsApi.updateSlot(accountId, eventId, slot.id, body)
       }
       await refresh()
@@ -1174,7 +1198,7 @@ function SlotsTab({
                   <td className="px-3 py-2 text-gray-700">{s.active_count ?? 0}</td>
                   <td className="px-3 py-2 text-gray-700">
                     <span className={`inline-flex rounded-full px-2 py-1 text-xs ${
-                      parseSlotVisibilityConditions(s.visibility_conditions).length > 0
+                      parseSlotVisibilityRule(s.visibility_conditions).conditions.length > 0
                         ? 'bg-blue-50 text-blue-700'
                         : 'bg-gray-100 text-gray-600'
                     }`}>
@@ -1258,7 +1282,7 @@ interface SlotBulkEditInput {
   changeActive: boolean
   isActive: number
   changeVisibility: boolean
-  visibilityConditions: SlotVisibilityCondition[]
+  visibilityRule: SlotVisibilityRule
 }
 
 function SlotVisibilityEditor({
@@ -1268,37 +1292,77 @@ function SlotVisibilityEditor({
   disabled = false,
 }: {
   fields: EventBookingFormField[]
-  value: SlotVisibilityCondition[]
-  onChange: (value: SlotVisibilityCondition[]) => void
+  value: SlotVisibilityRule
+  onChange: (value: SlotVisibilityRule) => void
   disabled?: boolean
 }) {
   const candidates = selectableConditionFields(fields)
-  const condition = value[0]
-  const selectedField = candidates.find((field) => field.id === condition?.fieldId) ?? null
-  const selectedValues = selectedField ? condition?.values ?? [] : []
+  const hasConditions = value.conditions.length > 0
 
-  function setField(fieldId: string) {
-    if (!fieldId) {
-      onChange([])
-      return
-    }
-    const field = candidates.find((item) => item.id === fieldId)
-    const firstOption = field?.options?.[0]
-    onChange(field && firstOption ? [{ fieldId: field.id, operator: 'in', values: [firstOption] }] : [])
+  function conditionForField(field: EventBookingFormField): SlotVisibilityCondition | null {
+    const firstOption = field.options?.[0]
+    return firstOption ? { fieldId: field.id, operator: 'in', values: [firstOption] } : null
   }
 
-  function toggleValue(option: string) {
-    if (!selectedField) return
-    const next = selectedValues.includes(option)
-      ? selectedValues.filter((item) => item !== option)
-      : [...selectedValues, option]
-    onChange(next.length > 0 ? [{ fieldId: selectedField.id, operator: 'in', values: next }] : [])
+  function enableConditions() {
+    const first = candidates[0] ? conditionForField(candidates[0]) : null
+    onChange({ logic: value.logic, conditions: first ? [first] : [] })
+  }
+
+  function setField(index: number, fieldId: string) {
+    const field = candidates.find((item) => item.id === fieldId)
+    const replacement = field ? conditionForField(field) : null
+    if (!replacement) return
+    onChange({
+      ...value,
+      conditions: value.conditions.map((condition, conditionIndex) => (
+        conditionIndex === index ? replacement : condition
+      )),
+    })
+  }
+
+  function toggleValue(index: number, option: string) {
+    const condition = value.conditions[index]
+    if (!condition) return
+    const nextValues = condition.values.includes(option)
+      ? condition.values.filter((item) => item !== option)
+      : [...condition.values, option]
+    // Every condition must retain at least one choice.
+    if (nextValues.length === 0) return
+    onChange({
+      ...value,
+      conditions: value.conditions.map((item, conditionIndex) => (
+        conditionIndex === index ? { ...item, values: nextValues } : item
+      )),
+    })
+  }
+
+  function addCondition() {
+    const used = new Set(value.conditions.map((condition) => condition.fieldId))
+    const field = candidates.find((candidate) => !used.has(candidate.id))
+    const next = field ? conditionForField(field) : null
+    if (!next) return
+    onChange({ ...value, conditions: [...value.conditions, next] })
+  }
+
+  function removeCondition(index: number) {
+    onChange({ ...value, conditions: value.conditions.filter((_, conditionIndex) => conditionIndex !== index) })
   }
 
   if (candidates.length === 0) {
     return (
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
         先に「概要」タブの予約フォーム項目で、選択式またはチェック式の質問を作ると、枠の出し分け条件に使えます。
+        {value.conditions.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange({ logic: value.logic, conditions: [] })}
+            disabled={disabled}
+            className="mt-2 block border border-amber-300 bg-white px-3 py-1.5 text-xs text-amber-900 disabled:opacity-50"
+          >
+            条件を解除して全員に表示
+          </button>
+        )}
       </div>
     )
   }
@@ -1306,31 +1370,116 @@ function SlotVisibilityEditor({
   return (
     <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3">
       <label className="block text-sm font-medium text-gray-700">この枠を見せる条件</label>
-      <select
-        value={selectedField?.id ?? ''}
-        onChange={(e) => setField(e.target.value)}
-        disabled={disabled}
-        className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
-      >
-        <option value="">全員に表示する</option>
-        {candidates.map((field) => (
-          <option key={field.id} value={field.id}>{field.label}</option>
-        ))}
-      </select>
-      {selectedField && (
-        <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          {(selectedField.options ?? []).map((option) => (
-            <label key={option} className="flex items-center gap-2 rounded-lg bg-white px-2 py-1.5 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={selectedValues.includes(option)}
-                onChange={() => toggleValue(option)}
-                disabled={disabled}
-                className="rounded border-gray-300"
-              />
-              {option}
-            </label>
-          ))}
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => onChange({ logic: value.logic, conditions: [] })}
+          disabled={disabled}
+          className={`border px-3 py-2 text-sm disabled:opacity-50 ${
+            !hasConditions ? 'border-blue-500 bg-white text-blue-700' : 'border-gray-300 bg-white text-gray-600'
+          }`}
+        >
+          全員に表示
+        </button>
+        <button
+          type="button"
+          onClick={enableConditions}
+          disabled={disabled}
+          className={`border px-3 py-2 text-sm disabled:opacity-50 ${
+            hasConditions ? 'border-blue-500 bg-white text-blue-700' : 'border-gray-300 bg-white text-gray-600'
+          }`}
+        >
+          条件で絞り込む
+        </button>
+      </div>
+
+      {hasConditions && (
+        <div className="mt-3 space-y-3">
+          <fieldset disabled={disabled}>
+            <legend className="text-xs font-medium text-gray-700">条件の組み合わせ</legend>
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <label className={`flex cursor-pointer items-start gap-2 border bg-white p-2 text-sm ${value.logic === 'and' ? 'border-blue-500' : 'border-gray-200'}`}>
+                <input
+                  type="radio"
+                  name="slot-visibility-logic"
+                  checked={value.logic === 'and'}
+                  onChange={() => onChange({ ...value, logic: 'and' })}
+                  className="mt-0.5"
+                />
+                <span><strong>すべて満たす</strong><span className="block text-xs text-gray-500">AND（かつ）</span></span>
+              </label>
+              <label className={`flex cursor-pointer items-start gap-2 border bg-white p-2 text-sm ${value.logic === 'or' ? 'border-blue-500' : 'border-gray-200'}`}>
+                <input
+                  type="radio"
+                  name="slot-visibility-logic"
+                  checked={value.logic === 'or'}
+                  onChange={() => onChange({ ...value, logic: 'or' })}
+                  className="mt-0.5"
+                />
+                <span><strong>どれか満たす</strong><span className="block text-xs text-gray-500">OR（または）</span></span>
+              </label>
+            </div>
+          </fieldset>
+
+          {value.conditions.map((condition, index) => {
+            const selectedField = candidates.find((field) => field.id === condition.fieldId) ?? null
+            const usedByOthers = new Set(value.conditions.filter((_, conditionIndex) => conditionIndex !== index).map((item) => item.fieldId))
+            return (
+              <div key={`${condition.fieldId}-${index}`} className="border border-blue-100 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-gray-600">条件 {index + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeCondition(index)}
+                    disabled={disabled}
+                    className="text-xs text-red-600 disabled:opacity-50"
+                  >
+                    削除
+                  </button>
+                </div>
+                <select
+                  value={condition.fieldId}
+                  onChange={(e) => setField(index, e.target.value)}
+                  disabled={disabled}
+                  className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50"
+                >
+                  {candidates.map((field) => (
+                    <option key={field.id} value={field.id} disabled={usedByOthers.has(field.id)}>{field.label}</option>
+                  ))}
+                </select>
+                {selectedField ? (
+                  <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                    {(selectedField.options ?? []).map((option) => (
+                      <label key={option} className="flex items-center gap-2 rounded-lg bg-blue-50/40 px-2 py-1.5 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={condition.values.includes(option)}
+                          onChange={() => toggleValue(index, option)}
+                          disabled={disabled}
+                          className="rounded border-gray-300"
+                        />
+                        {option}
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-red-600">元の質問が見つかりません。この条件を削除してください。</p>
+                )}
+              </div>
+            )
+          })}
+
+          <button
+            type="button"
+            onClick={addCondition}
+            disabled={disabled || value.conditions.length >= Math.min(candidates.length, 10)}
+            className="w-full border border-dashed border-blue-300 bg-white px-3 py-2 text-sm text-blue-700 disabled:opacity-40"
+          >
+            ＋ 条件を追加
+          </button>
+          <p className="text-xs text-gray-500">
+            1つの質問内で複数の選択肢を選んだ場合は、そのいずれかに当てはまれば一致します。
+          </p>
         </div>
       )}
       <p className="mt-2 text-xs text-gray-500">
@@ -1360,8 +1509,8 @@ function BulkEditSlotsDialog({
   const [changeActive, setChangeActive] = useState(false)
   const [isActive, setIsActive] = useState(first?.is_active === 0 ? '0' : '1')
   const [changeVisibility, setChangeVisibility] = useState(false)
-  const [visibilityConditions, setVisibilityConditions] = useState<SlotVisibilityCondition[]>(
-    first ? parseSlotVisibilityConditions(first.visibility_conditions) : [],
+  const [visibilityRule, setVisibilityRule] = useState<SlotVisibilityRule>(
+    first ? parseSlotVisibilityRule(first.visibility_conditions) : { logic: 'and', conditions: [] },
   )
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -1393,7 +1542,7 @@ function BulkEditSlotsDialog({
         changeActive,
         isActive: Number(isActive),
         changeVisibility,
-        visibilityConditions,
+        visibilityRule,
       })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -1405,7 +1554,7 @@ function BulkEditSlotsDialog({
   return (
     <DialogPortal>
       <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-        <div className="w-full max-w-2xl rounded-lg bg-white p-5 shadow-xl">
+        <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
           <h3 className="text-lg font-bold text-gray-900">選択した予約枠を一括変更</h3>
           <p className="mt-1 text-sm text-gray-600">{slots.length}件の予約枠に同じ変更を反映します。</p>
           {err && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-700">{err}</div>}
@@ -1496,8 +1645,8 @@ function BulkEditSlotsDialog({
               <div className="mt-2">
                 <SlotVisibilityEditor
                   fields={fields}
-                  value={visibilityConditions}
-                  onChange={setVisibilityConditions}
+                  value={visibilityRule}
+                  onChange={setVisibilityRule}
                   disabled={!changeVisibility}
                 />
               </div>
@@ -1529,14 +1678,14 @@ function AddSlotDialog({
 }: {
   fields: EventBookingFormField[]
   onClose: () => void
-  onSubmit: (s: { starts_at: string; ends_at: string; capacity: number | null; visibility_conditions?: SlotVisibilityCondition[] | null }) => Promise<void>
+  onSubmit: (s: { starts_at: string; ends_at: string; capacity: number | null; visibility_conditions?: SlotVisibilityRule | null }) => Promise<void>
 }) {
   const todayJst = new Date(jstNow().getTime() + 9 * 3600_000).toISOString().slice(0, 10)
   const [date, setDate] = useState(todayJst)
   const [startTime, setStartTime] = useState('10:00')
   const [endTime, setEndTime] = useState('12:00')
   const [capacity, setCapacity] = useState<string>('')
-  const [visibilityConditions, setVisibilityConditions] = useState<SlotVisibilityCondition[]>([])
+  const [visibilityRule, setVisibilityRule] = useState<SlotVisibilityRule>({ logic: 'and', conditions: [] })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -1553,7 +1702,7 @@ function AddSlotDialog({
         starts_at: s,
         ends_at: e,
         capacity: cap,
-        visibility_conditions: visibilityConditions.length > 0 ? visibilityConditions : null,
+        visibility_conditions: visibilityRule.conditions.length > 0 ? visibilityRule : null,
       })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -1565,7 +1714,7 @@ function AddSlotDialog({
   return (
     <DialogPortal>
       <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-        <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+        <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4 text-gray-900">予約枠を追加</h3>
         {err && <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded-lg mb-3 text-sm">{err}</div>}
         <div className="space-y-3">
@@ -1610,8 +1759,8 @@ function AddSlotDialog({
           </label>
           <SlotVisibilityEditor
             fields={fields}
-            value={visibilityConditions}
-            onChange={setVisibilityConditions}
+            value={visibilityRule}
+            onChange={setVisibilityRule}
           />
         </div>
         <div className="flex justify-end gap-2 mt-5">
