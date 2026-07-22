@@ -8,6 +8,7 @@ import Header from '@/components/layout/header'
 import CcPromptButton from '@/components/cc-prompt-button'
 import FlexPreviewComponent from '@/components/flex-preview'
 import FriendInfoSidebar from '@/components/chats/friend-info-sidebar'
+import ChatImageMessage from '@/components/chats/chat-image-message'
 import ImageUploader, { type ImageUploaderValue } from '@/components/shared/image-uploader'
 
 interface Chat {
@@ -215,6 +216,9 @@ function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
     }
     if (msg.messageType === 'sticker') {
       return <StickerMessageImage content={msg.content} />
+    }
+    if (msg.messageType === 'image') {
+      return <ChatImageMessage content={msg.content} isIncoming={msg.direction === 'incoming'} />
     }
     return `[${msg.messageType}]`
   }
@@ -947,14 +951,7 @@ export default function ChatsPage() {
                         </div>
                       )
                     } else if (msg.messageType === 'image') {
-                      try {
-                        const parsed = JSON.parse(msg.content)
-                        bubbleContent = (
-                          <img src={parsed.originalContentUrl || parsed.previewImageUrl} alt="" className="max-w-[200px] rounded" />
-                        )
-                      } catch {
-                        bubbleContent = <span>🖼️ [画像]</span>
-                      }
+                      bubbleContent = <ChatImageMessage content={msg.content} isIncoming={!isOutgoing} />
                     } else if (msg.messageType === 'sticker') {
                       bubbleContent = <StickerMessageImage content={msg.content} />
                     } else {

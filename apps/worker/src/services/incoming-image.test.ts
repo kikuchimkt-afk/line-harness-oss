@@ -4,7 +4,10 @@ import { fetchAndStoreIncomingImage } from './incoming-image.js';
 function makeR2Stub() {
   const store = new Map<string, { data: ArrayBuffer; contentType: string }>();
   return {
-    put: vi.fn(async (key: string, data: ArrayBuffer, opts: { httpMetadata?: { contentType?: string } }) => {
+    put: vi.fn(async (key: string, data: ArrayBuffer, opts: {
+      httpMetadata?: { contentType?: string };
+      customMetadata?: { originalFilename?: string };
+    }) => {
       store.set(key, { data, contentType: opts.httpMetadata?.contentType ?? '' });
       return null;
     }),
@@ -41,6 +44,7 @@ describe('fetchAndStoreIncomingImage', () => {
     const [key, , opts] = r2.put.mock.calls[0];
     expect(key).toBe('incoming-acc-1-msg-xyz.jpg');
     expect(opts.httpMetadata.contentType).toBe('image/jpeg');
+    expect(opts.customMetadata.originalFilename).toBe('LINE-image.jpg');
     expect(result?.originalContentUrl).toBe('https://worker.example.com/images/incoming-acc-1-msg-xyz.jpg');
     expect(result?.previewImageUrl).toBe(result?.originalContentUrl);
   });
