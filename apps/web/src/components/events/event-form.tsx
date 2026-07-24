@@ -7,6 +7,7 @@ import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, 
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
 import { buildTimeSlotChoices, generateBulkSlots, type BulkSlotInput, type TimePattern } from './bulk-slot-generator'
+import { formatEventSlotDateTime, formatEventSlotTime } from './event-date-format'
 
 type Tab = 'overview' | 'slots' | 'publish'
 
@@ -41,13 +42,6 @@ export interface EventFormProps {
 
 function jstNow(): Date {
   return new Date(Date.now())
-}
-
-function formatJpDateTime(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleString('ja-JP', {
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  })
 }
 
 function isoToJstDate(iso: string): string {
@@ -1187,12 +1181,12 @@ function SlotsTab({
                       type="checkbox"
                       checked={selectedSlotIds.has(s.id)}
                       onChange={() => toggleSlotSelected(s.id)}
-                      aria-label={`${formatJpDateTime(s.starts_at)} の予約枠を選択`}
+                      aria-label={`${formatEventSlotDateTime(s.starts_at)} の予約枠を選択`}
                       className="rounded border-gray-300"
                     />
                   </td>
                   <td className="px-3 py-2 text-gray-800">
-                    {formatJpDateTime(s.starts_at)} 〜 {formatJpDateTime(s.ends_at).slice(-5)}
+                    {formatEventSlotDateTime(s.starts_at)} ～ {formatEventSlotTime(s.ends_at)}
                   </td>
                   <td className="px-3 py-2 text-gray-700">{s.capacity ?? '無制限'}</td>
                   <td className="px-3 py-2 text-gray-700">{s.active_count ?? 0}</td>
