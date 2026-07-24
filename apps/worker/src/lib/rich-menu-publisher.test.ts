@@ -72,6 +72,33 @@ describe('resolveSwitcherActions', () => {
 });
 
 describe('toLineRichMenuAction', () => {
+  it('電話番号を LINE の tel URI action として公開する', () => {
+    const action = toLineRichMenuAction({
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+      actionType: 'uri',
+      actionData: {
+        kind: 'phone',
+        phoneNumber: '088-600-8922',
+        uri: 'tel:0886008922',
+      },
+    });
+
+    expect(action).toEqual({
+      type: 'uri',
+      uri: 'tel:0886008922',
+    });
+  });
+
+  it('不正な電話番号は LINE 公開前に拒否する', () => {
+    expect(() =>
+      toLineRichMenuAction({
+        bounds: { x: 0, y: 0, width: 100, height: 100 },
+        actionType: 'uri',
+        actionData: { kind: 'phone', uri: 'tel:088-ABC' },
+      }),
+    ).toThrow(/8 to 15 digits/);
+  });
+
   it('text_image の内部データを LINE postback action に変換する', () => {
     const action = toLineRichMenuAction({
       bounds: { x: 0, y: 0, width: 100, height: 100 },

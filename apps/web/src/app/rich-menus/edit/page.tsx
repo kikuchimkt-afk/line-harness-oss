@@ -7,6 +7,11 @@ import Header from '@/components/layout/header'
 import { api } from '@/lib/api'
 import { CanvasEditor, type Area } from '@/components/rich-menus/canvas-editor'
 import { AreaProperties } from '@/components/rich-menus/area-properties'
+import {
+  buildPhoneUri,
+  isPhoneActionData,
+  phoneInputFromActionData,
+} from '@/components/rich-menus/phone-action'
 
 type Page = {
   id: string
@@ -251,6 +256,19 @@ function Editor({
   }
 
   async function handlePublish() {
+    const invalidPhonePage = pages.find((page) =>
+      page.areas.some((area) => {
+        if (area.actionType !== 'uri' || !isPhoneActionData(area.actionData)) return false
+        return !buildPhoneUri(phoneInputFromActionData(area.actionData))
+      }),
+    )
+    if (invalidPhonePage) {
+      setError(
+        `「${invalidPhonePage.name}」の電話番号が未入力または不完全です。電話番号を数字8〜15桁で入力してください。`,
+      )
+      return
+    }
+
     if (!confirm(
       'このリッチメニューを LINE 公式アカウントに登録します。\n\n' +
         '※ この操作だけでは友だちのトーク画面にはまだ表示されません。\n' +
@@ -476,7 +494,14 @@ function Editor({
               onPreviewAction={(area) => {
                 if (area.actionType === 'uri') {
                   const uri = (area.actionData as { uri?: string }).uri
-                  if (uri) window.open(uri, '_blank')
+                  if (uri?.toLowerCase().startsWith('tel:')) {
+                    const number = phoneInputFromActionData(area.actionData)
+                    if (window.confirm(`${number} へ電話しますか？`)) {
+                      window.location.href = uri
+                    }
+                  } else if (uri) {
+                    window.open(uri, '_blank')
+                  }
                 } else if (area.actionType === 'richmenuswitch') {
                   const targetId = (area.actionData as { targetPageId?: string }).targetPageId
                   if (targetId && pages.some((p) => p.id === targetId)) {

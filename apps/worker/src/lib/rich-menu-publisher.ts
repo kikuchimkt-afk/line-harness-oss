@@ -111,6 +111,9 @@ export function toLineRichMenuAction(area: AreaInput): Record<string, unknown> {
   if (area.actionType === 'uri') {
     const uri = stringValue(area.actionData.uri);
     if (!uri) throw new Error('uri action missing uri');
+    if (uri.toLowerCase().startsWith('tel:') && !/^tel:\+?\d{8,15}$/i.test(uri)) {
+      throw new Error('tel uri must contain 8 to 15 digits');
+    }
     return { type: 'uri', uri };
   }
 

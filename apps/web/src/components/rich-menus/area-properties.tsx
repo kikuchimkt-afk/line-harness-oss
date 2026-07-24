@@ -3,9 +3,14 @@
 import { useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import type { Area } from './canvas-editor'
+import {
+  buildPhoneUri,
+  isPhoneActionData,
+  phoneInputFromActionData,
+} from './phone-action'
 
 type PageOption = { id: string; name: string }
-type ActionSelectValue = Area['actionType'] | 'text_image'
+type ActionSelectValue = Area['actionType'] | 'phone' | 'text_image'
 
 const TEXT_IMAGE_POSTBACK_PREFIX = 'lh:richmenu:text-image:'
 
@@ -27,6 +32,8 @@ function defaultActionData(type: ActionSelectValue): Record<string, unknown> {
   switch (type) {
     case 'uri':
       return { uri: '' }
+    case 'phone':
+      return { kind: 'phone', phoneNumber: '', uri: '' }
     case 'message':
       return { text: '' }
     case 'postback':
@@ -70,10 +77,14 @@ function NumField({
 
 export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
   const data = (area.actionData ?? {}) as Record<string, unknown>
-  const selectedAction: ActionSelectValue =
-    area.actionType === 'postback' && data.kind === 'text_image'
-      ? 'text_image'
-      : area.actionType
+  let selectedAction: ActionSelectValue = area.actionType
+  if (area.actionType === 'uri' && isPhoneActionData(data)) {
+    selectedAction = 'phone'
+  } else if (area.actionType === 'postback' && data.kind === 'text_image') {
+    selectedAction = 'text_image'
+  }
+  const phoneInput = phoneInputFromActionData(data)
+  const phoneUri = buildPhoneUri(phoneInput)
   const image = data.image && typeof data.image === 'object'
     ? data.image as { originalContentUrl?: string; previewImageUrl?: string }
     : null
@@ -138,14 +149,18 @@ export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
           value={selectedAction}
           onChange={(e) => {
             const next = e.target.value as ActionSelectValue
+            let actionType: Area['actionType'] = next as Area['actionType']
+            if (next === 'text_image') actionType = 'postback'
+            if (next === 'phone') actionType = 'uri'
             onUpdate({
-              actionType: next === 'text_image' ? 'postback' : next,
+              actionType,
               actionData: defaultActionData(next),
             })
           }}
           className="mt-0.5 block w-full border border-gray-300 rounded px-2 py-1 text-sm"
         >
           <option value="uri">URL を開く (uri)</option>
+          <option value="phone">電話をかける</option>
           <option value="message">テキスト送信 (message)</option>
           <option value="text_image">テキスト＋画像を送る</option>
           <option value="postback">postback</option>
@@ -153,7 +168,7 @@ export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
         </select>
       </label>
 
-      {area.actionType === 'uri' && (
+      {selectedAction === 'uri' && (
         <label className="block">
           <span className="text-xs text-gray-500">URL</span>
           <input
@@ -166,6 +181,45 @@ export function AreaProperties({ area, pages, onUpdate, onDelete }: Props) {
           <p className="mt-1 text-[11px] text-gray-500">
             LINE 配信用 URL は tracked link (短縮 URL) 経由を推奨。
           </p>
+        </label>
+      )}
+
+      {selectedAction === 'phone' && (
+        <label className="block rounded-lg border border-sky-100 bg-sky-50/60 p-3">
+          <span className="text-xs font-medium text-gray-700">電話番号</span>
+          <input
+            type="tel"
+            inputMode="tel"
+            value={phoneInput}
+            onChange={(e) => {
+              const phoneNumber = e.target.value
+              onUpdate({
+                actionData: {
+                  ...data,
+                  kind: 'phone',
+                  phoneNumber,
+                  uri: buildPhoneUri(phoneNumber) ?? '',
+                },
+              })
+            }}
+            placeholder="例: 088-600-8922"
+            aria-invalid={phoneInput.length > 0 && !phoneUri}
+            className="mt-1 block w-full rounded border border-sky-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-200"
+          />
+          {phoneInput.length > 0 && !phoneUri ? (
+            <p className="mt-1 text-[11px] text-red-600">
+              電話番号を数字8〜15桁で入力してください。
+            </p>
+          ) : (
+            <p className="mt-1 text-[11px] text-gray-500">
+              LINEでタップすると電話アプリが開き、発信前に端末の確認画面が表示されます。
+            </p>
+          )}
+          {phoneUri && (
+            <p className="mt-1 text-[11px] font-medium text-sky-700">
+              発信先: {phoneInput}
+            </p>
+          )}
         </label>
       )}
 
