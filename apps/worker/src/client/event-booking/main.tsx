@@ -235,6 +235,35 @@ function getListAnswer(answers: FormAnswers, id: string): string[] {
   return Array.isArray(value) ? value : [];
 }
 
+function hasAnswer(field: EventBookingFormField, answers: FormAnswers): boolean {
+  const value = answers[field.id];
+  if (field.type === 'checkbox') {
+    return Array.isArray(value) && value.length > 0;
+  }
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function validateAnswersBeforeSlotDisplay(
+  fields: EventBookingFormField[],
+  conditionFieldIds: Set<string>,
+  answers: FormAnswers,
+): string | null {
+  for (const field of fields) {
+    if ((field.required || conditionFieldIds.has(field.id)) && !hasAnswer(field, answers)) {
+      return field.type === 'checkbox'
+        ? `${field.label}を選択してください`
+        : `${field.label}を入力してください`;
+    }
+  }
+  return null;
+}
+
+function displayAnswer(field: EventBookingFormField, answers: FormAnswers): string {
+  const value = answers[field.id];
+  if (Array.isArray(value)) return value.join('、');
+  return typeof value === 'string' && value.trim() ? value.trim() : '未入力';
+}
+
 function uid(): string {
   return crypto.randomUUID();
 }
@@ -254,11 +283,13 @@ function Spinner() {
 function EventDetailScreen({
   ctx,
   eventId,
+  initialAnswers = {},
   onPickSlots,
   onGoHistory,
 }: {
   ctx: EventBookingContext;
   eventId: string;
+  initialAnswers?: FormAnswers;
   onPickSlots: (slots: EventSlot[], event: EventDetail, answers: FormAnswers) => void;
   onGoHistory: () => void;
 }) {
@@ -266,7 +297,9 @@ function EventDetailScreen({
   const [slots, setSlots] = useState<EventSlot[]>([]);
   const [myActive, setMyActive] = useState<MyBooking[]>([]);
   const [selectedSlotIds, setSelectedSlotIds] = useState<string[]>([]);
-  const [conditionAnswers, setConditionAnswers] = useState<FormAnswers>({});
+  const [answers, setAnswers] = useState<FormAnswers>(initialAnswers);
+  const [slotsRevealed, setSlotsRevealed] = useState(Object.keys(initialAnswers).length > 0);
+  const [formError, setFormError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -309,13 +342,10 @@ function EventDetailScreen({
     [event],
   );
   const conditionFieldIds = useMemo(() => slotVisibilityFieldIds(slots), [slots]);
-  const conditionFields = useMemo(
-    () => formFields.filter((field) => conditionFieldIds.has(field.id)),
-    [conditionFieldIds, formFields],
-  );
+  const shouldShowSlots = formFields.length === 0 || slotsRevealed;
   const visibleSlots = useMemo(
-    () => slots.filter((slot) => slotVisibilityMatches(slot, conditionAnswers)),
-    [slots, conditionAnswers],
+    () => shouldShowSlots ? slots.filter((slot) => slotVisibilityMatches(slot, answers)) : [],
+    [answers, shouldShowSlots, slots],
   );
 
   useEffect(() => {
@@ -323,8 +353,22 @@ function EventDetailScreen({
     setSelectedSlotIds((prev) => prev.filter((slotId) => availableIds.has(slotId)));
   }, [visibleSlots]);
 
-  function setConditionAnswer(id: string, value: string | string[]) {
-    setConditionAnswers((prev) => ({ ...prev, [id]: value }));
+  function setAnswer(id: string, value: string | string[]) {
+    setAnswers((prev) => ({ ...prev, [id]: value }));
+    setFormError(null);
+    setSelectedSlotIds([]);
+    if (formFields.length > 0) setSlotsRevealed(false);
+  }
+
+  function revealMatchingSlots() {
+    const validationError = validateAnswersBeforeSlotDisplay(formFields, conditionFieldIds, answers);
+    if (validationError) {
+      setFormError(validationError);
+      setSlotsRevealed(false);
+      return;
+    }
+    setFormError(null);
+    setSlotsRevealed(true);
   }
 
   if (loading) return <Spinner />;
@@ -435,30 +479,51 @@ function EventDetailScreen({
           </div>
         )}
 
-        {conditionFields.length > 0 && (
+        {formFields.length > 0 && (
           <div className="mt-5">
-            <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">予約内容を選択</h2>
+            <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">1. 必要事項を入力</h2>
             <p className="text-xs text-gray-500 mb-3 px-1">
-              選んだ内容に合わせて、予約できる日時だけを表示します。
+              先に必要事項をご入力ください。回答内容に合う日時だけを次に表示します。
             </p>
             <div className="space-y-3">
-              {conditionFields.map((field) => (
+              {formFields.map((field) => (
                 <div key={field.id} className="eb-card">
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">
                     {field.label}
+                    {field.required && <span className="text-red-500 ml-1">*</span>}
                   </label>
-                  {field.type === 'checkbox' ? (
+                  {field.type === 'textarea' ? (
+                    <textarea
+                      value={getTextAnswer(answers, field.id)}
+                      onChange={(e) => setAnswer(field.id, e.target.value)}
+                      rows={4}
+                      maxLength={2000}
+                      placeholder={field.placeholder || '入力してください'}
+                      className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                    />
+                  ) : field.type === 'select' ? (
+                    <select
+                      value={getTextAnswer(answers, field.id)}
+                      onChange={(e) => setAnswer(field.id, e.target.value)}
+                      className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
+                    >
+                      <option value="">選択してください</option>
+                      {(field.options ?? []).map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  ) : field.type === 'checkbox' ? (
                     <div className="space-y-2">
                       {(field.options ?? []).map((option) => {
-                        const selected = getListAnswer(conditionAnswers, field.id).includes(option);
+                        const selected = getListAnswer(answers, field.id).includes(option);
                         return (
                           <label key={option} className="flex items-center gap-2 text-sm text-gray-700">
                             <input
                               type="checkbox"
                               checked={selected}
                               onChange={(e) => {
-                                const current = getListAnswer(conditionAnswers, field.id);
-                                setConditionAnswer(
+                                const current = getListAnswer(answers, field.id);
+                                setAnswer(
                                   field.id,
                                   e.target.checked
                                     ? [...current, option]
@@ -473,32 +538,42 @@ function EventDetailScreen({
                       })}
                     </div>
                   ) : (
-                    <select
-                      value={getTextAnswer(conditionAnswers, field.id)}
-                      onChange={(e) => setConditionAnswer(field.id, e.target.value)}
+                    <input
+                      type="text"
+                      value={getTextAnswer(answers, field.id)}
+                      onChange={(e) => setAnswer(field.id, e.target.value)}
+                      maxLength={2000}
+                      placeholder={field.placeholder || '入力してください'}
                       className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
-                    >
-                      <option value="">選択してください</option>
-                      {(field.options ?? []).map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
+                    />
                   )}
                 </div>
               ))}
             </div>
+            {formError && (
+              <div className="mt-3 bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-sm">
+                {formError}
+              </div>
+            )}
+            <button onClick={revealMatchingSlots} className="eb-primary-btn mt-4">
+              入力内容に合う日時を表示
+            </button>
           </div>
         )}
 
         <div className="mt-5">
-          <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">日時を選択</h2>
+          <h2 className="text-sm font-bold text-gray-900 mb-2 px-1">
+            {formFields.length > 0 ? '2. 日時を選択' : '日時を選択'}
+          </h2>
           <p className="text-xs text-gray-500 mb-3 px-1">
-            参加したい日時を複数選べます。必要事項の入力は次の画面で1回だけです。
+            参加したい日時を複数選べます。入力内容は確認画面へ引き継がれます。
           </p>
           {visibleSlots.length === 0 ? (
             <div className="eb-card text-center text-sm text-gray-500">
-              {conditionFields.length > 0
-                ? '上の項目を選ぶと、予約できる日時が表示されます。'
+              {formFields.length > 0 && !slotsRevealed
+                ? '必要事項を入力し、「入力内容に合う日時を表示」を押してください。'
+                : formFields.length > 0
+                  ? '入力内容に合う予約可能な日時はありません。'
                 : '現在予約可能な枠はありません。'}
             </div>
           ) : (
@@ -546,7 +621,7 @@ function EventDetailScreen({
               選択中: <span className="font-bold text-gray-900">{selectedSlots.length}</span> 件
             </div>
             <button
-              onClick={() => onPickSlots(selectedSlots, event, conditionAnswers)}
+              onClick={() => onPickSlots(selectedSlots, event, answers)}
               disabled={selectedSlots.length === 0}
               className="eb-primary-btn"
             >
@@ -575,17 +650,11 @@ function ConfirmScreen({
   onDone: (status: string, count: number, failedCount?: number) => void;
 }) {
   const [note, setNote] = useState('');
-  const [answers, setAnswers] = useState<FormAnswers>(initialAnswers);
+  const [answers] = useState<FormAnswers>(initialAnswers);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idemKey] = useState(uid);
   const formFields = parseFormFields(event.booking_form_fields);
-  const conditionFieldIds = slotVisibilityFieldIds(slots);
-  const remainingFormFields = formFields.filter((field) => !conditionFieldIds.has(field.id));
-
-  function setAnswer(id: string, value: string | string[]) {
-    setAnswers((prev) => ({ ...prev, [id]: value }));
-  }
 
   function validateAnswers(): string | null {
     for (const field of formFields) {
@@ -722,75 +791,19 @@ function ConfirmScreen({
         </div>
       )}
 
-      {remainingFormFields.length > 0 && (
-        <div className="space-y-4">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900">必要事項</h2>
-            <p className="text-xs text-gray-500 mt-1">参加に必要な内容をご入力ください。</p>
+      {formFields.length > 0 && (
+        <div className="eb-card">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h2 className="text-sm font-bold text-gray-900">入力内容</h2>
+            <button onClick={onBack} className="text-xs eb-line-green-text underline">
+              入力内容を変更
+            </button>
           </div>
-          {remainingFormFields.map((field) => (
-            <div key={field.id}>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                {field.label}
-                {field.required && <span className="text-red-500 ml-1">*</span>}
-              </label>
-              {field.type === 'textarea' ? (
-                <textarea
-                  value={getTextAnswer(answers, field.id)}
-                  onChange={(e) => setAnswer(field.id, e.target.value)}
-                  rows={4}
-                  maxLength={2000}
-                  placeholder={field.placeholder || '入力してください'}
-                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
-                />
-              ) : field.type === 'select' ? (
-                <select
-                  value={getTextAnswer(answers, field.id)}
-                  onChange={(e) => setAnswer(field.id, e.target.value)}
-                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
-                >
-                  <option value="">選択してください</option>
-                  {(field.options ?? []).map((option) => (
-                    <option key={option} value={option}>{option}</option>
-                  ))}
-                </select>
-              ) : field.type === 'checkbox' ? (
-                <div className="space-y-2">
-                  {(field.options ?? []).map((option) => {
-                    const selected = getListAnswer(answers, field.id).includes(option);
-                    return (
-                      <label key={option} className="flex items-center gap-2 text-sm text-gray-700">
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={(e) => {
-                            const current = getListAnswer(answers, field.id);
-                            setAnswer(
-                              field.id,
-                              e.target.checked
-                                ? [...current, option]
-                                : current.filter((x) => x !== option),
-                            );
-                          }}
-                          className="rounded border-gray-300"
-                        />
-                        {option}
-                      </label>
-                    );
-                  })}
-                </div>
-              ) : (
-                <input
-                  type="text"
-                  value={getTextAnswer(answers, field.id)}
-                  onChange={(e) => setAnswer(field.id, e.target.value)}
-                  maxLength={2000}
-                  placeholder={field.placeholder || '入力してください'}
-                  className="w-full border border-gray-300 rounded-xl p-3 text-sm bg-white"
-                />
-              )}
-            </div>
-          ))}
+          <dl className="space-y-3 text-sm">
+            {formFields.map((field) => (
+              <Row key={field.id} label={field.label} value={displayAnswer(field, answers)} />
+            ))}
+          </dl>
         </div>
       )}
 
@@ -1009,7 +1022,7 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
 // ─── App ──────────────────────────────────────────────────
 
 type Screen =
-  | { kind: 'detail'; eventId: string }
+  | { kind: 'detail'; eventId: string; initialAnswers?: FormAnswers }
   | { kind: 'confirm'; event: EventDetail; slots: EventSlot[]; initialAnswers: FormAnswers }
   | { kind: 'done'; status: string; count: number; failedCount?: number }
   | { kind: 'history' };
@@ -1039,6 +1052,7 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
           <EventDetailScreen
             ctx={ctx}
             eventId={screen.eventId}
+            initialAnswers={screen.initialAnswers}
             onPickSlots={(slots, event, initialAnswers) => setScreen({ kind: 'confirm', event, slots, initialAnswers })}
             onGoHistory={() => setScreen({ kind: 'history' })}
           />
@@ -1049,7 +1063,11 @@ function App({ ctx, initial }: { ctx: EventBookingContext; initial: Screen }) {
             event={screen.event}
             slots={screen.slots}
             initialAnswers={screen.initialAnswers}
-            onBack={() => setScreen({ kind: 'detail', eventId: screen.event.id })}
+            onBack={() => setScreen({
+              kind: 'detail',
+              eventId: screen.event.id,
+              initialAnswers: screen.initialAnswers,
+            })}
             onDone={(status, count, failedCount) => setScreen({ kind: 'done', status, count, failedCount })}
           />
         )}
