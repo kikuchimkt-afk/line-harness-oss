@@ -1,11 +1,11 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import type { Tag } from '@line-crm/shared'
 import type { FriendListItem } from '@/lib/api'
 import { api } from '@/lib/api'
 import FriendListRow from './friend-list-row'
-import FriendProfileModal from './friend-profile-modal'
 import TagBadge from './tag-badge'
 
 interface Props {
@@ -18,11 +18,11 @@ interface Props {
 const TAG_COLORS = ['#F9A8D4', '#FBCFE8', '#FCA5A5', '#FDE68A', '#86EFAC', '#93C5FD', '#C4B5FD']
 
 export default function FriendListTable({ friends, allTags, onRefresh, onTagsChanged }: Props) {
+  const router = useRouter()
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [selectedTagId, setSelectedTagId] = useState('')
   const [newTagName, setNewTagName] = useState('')
   const [newTagColor, setNewTagColor] = useState(TAG_COLORS[0])
-  const [profileFriend, setProfileFriend] = useState<FriendListItem | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -130,7 +130,7 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
                   friend={friend}
                   onTagEditClick={() => toggleExpand(friend.id)}
                   tagEditorOpen={isExpanded}
-                  onProfileEditClick={() => setProfileFriend(friend)}
+                  onProfileEditClick={() => router.push(`/friends/profile?id=${encodeURIComponent(friend.id)}`)}
                 />
 
                 {isExpanded && (
@@ -246,15 +246,6 @@ export default function FriendListTable({ friends, allTags, onRefresh, onTagsCha
         </div>
       </div>
 
-      {profileFriend && (
-        <FriendProfileModal
-          friend={profileFriend}
-          allTags={allTags}
-          onClose={() => setProfileFriend(null)}
-          onSaved={onRefresh}
-          onTagsChanged={onTagsChanged ?? onRefresh}
-        />
-      )}
     </div>
   )
 }

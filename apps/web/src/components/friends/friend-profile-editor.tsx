@@ -41,7 +41,7 @@ function metaString(friend: FriendListItem, key: keyof FriendProfileInput): stri
   return typeof value === 'string' ? value : ''
 }
 
-export default function FriendProfileModal({ friend, allTags, onClose, onSaved, onTagsChanged }: Props) {
+export default function FriendProfileEditor({ friend, allTags, onClose, onSaved, onTagsChanged }: Props) {
   const [form, setForm] = useState<ProfileForm>({
     harnessDisplayName: friend.harnessDisplayName ?? metaString(friend, 'harnessDisplayName'),
     profileType: metaString(friend, 'profileType'),
@@ -153,9 +153,8 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4 py-6">
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-pink-100 bg-white shadow-xl">
-        <div className="flex items-start justify-between gap-4 border-b border-pink-100 px-5 py-4">
+    <div className="mx-auto w-full max-w-5xl">
+        <div className="flex flex-col gap-4 border-b border-pink-100 pb-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             {friend.pictureUrl ? (
               <img
@@ -169,7 +168,7 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
               </div>
             )}
             <div className="min-w-0">
-              <h2 className="truncate text-lg font-bold text-gray-900">友だちプロフィール編集</h2>
+              <h2 className="truncate text-lg font-bold text-gray-900">{effectiveName}</h2>
               <p className="mt-0.5 truncate text-xs text-gray-500">
                 LINE名: {lineDisplayName}
               </p>
@@ -178,20 +177,20 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+            className="self-start rounded-lg border border-pink-200 bg-white/80 px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-pink-50"
           >
-            閉じる
+            一覧に戻る
           </button>
         </div>
 
-        <div className="space-y-5 p-5">
+        <div className="space-y-6 py-6">
           {error && (
             <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
               {error}
             </div>
           )}
 
-          <section className="rounded-lg border border-pink-100 bg-pink-50/40 p-4">
+          <section className="border-b border-pink-100 pb-6">
             <label className="mb-1 block text-xs font-semibold text-pink-900/70">
               L Harness上の表示名
             </label>
@@ -206,7 +205,7 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
             </p>
           </section>
 
-          <section className="grid gap-4 sm:grid-cols-2">
+          <section className="grid gap-4 border-b border-pink-100 pb-6 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-semibold text-gray-600">ふりがな</label>
               <input
@@ -267,7 +266,7 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
             </div>
           </section>
 
-          <section className="rounded-lg border border-pink-100 bg-white/80 p-4">
+          <section className="border-b border-pink-100 pb-6">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
               <div>
                 <h3 className="text-sm font-semibold text-gray-900">タグ</h3>
@@ -355,7 +354,7 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
             </div>
           </section>
 
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-pink-50 pt-4">
+          <div className="flex flex-wrap items-center justify-end gap-2 pb-8">
             <button
               type="button"
               onClick={onClose}
@@ -373,7 +372,6 @@ export default function FriendProfileModal({ friend, allTags, onClose, onSaved, 
             </button>
           </div>
         </div>
-      </div>
     </div>
   )
 }
