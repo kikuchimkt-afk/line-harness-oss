@@ -35,6 +35,15 @@ const notifierMocks = {
 };
 vi.mock('../services/event-booking-notifier.js', () => notifierMocks);
 
+const adminNotifierMocks = {
+  buildEventAdminBookingUrl: vi.fn(
+    (base: string | undefined, eventId: string) =>
+      base ? `${base}/events/bookings?id=${eventId}` : null,
+  ),
+  notifyEventBookingAdminRecipients: vi.fn(),
+};
+vi.mock('../services/event-booking-admin-notifier.js', () => adminNotifierMocks);
+
 const { default: events } = await import('./events.js');
 
 type TestEnv = {
@@ -101,6 +110,7 @@ interface FriendRow {
   id: string;
   line_account_id: string;
   line_user_id: string;
+  display_name?: string | null;
   user_id?: string | null;
   picture_url?: string | null;
 }
@@ -152,6 +162,7 @@ function makeEventDb(state: {
             if (sql.includes('user_id') || sql.includes('picture_url')) {
               return {
                 id: f.id,
+                display_name: f.display_name ?? null,
                 user_id: f.user_id ?? null,
                 picture_url: f.picture_url ?? null,
               } as T;
@@ -492,9 +503,10 @@ function makeEventDb(state: {
                   reminder_hours_before: e.reminder_hours_before,
                   slot_starts_at: s.starts_at,
                   channel_access_token: la.channel_access_token ?? '',
-                  liff_id: la.liff_id ?? null,
-                  line_user_id: f.line_user_id,
-                };
+                   liff_id: la.liff_id ?? null,
+                   line_user_id: f.line_user_id,
+                   friend_display_name: f.display_name ?? null,
+                 };
               })
               .filter((item): item is NonNullable<typeof item> => item !== null)
               .sort((a, b) => a.slot_starts_at.localeCompare(b.slot_starts_at));
@@ -809,6 +821,11 @@ beforeEach(() => {
   for (const fn of Object.values(idempotencyMocks)) fn.mockReset();
   for (const fn of Object.values(reminderMocks)) fn.mockReset();
   for (const fn of Object.values(notifierMocks)) fn.mockReset();
+  for (const fn of Object.values(adminNotifierMocks)) fn.mockReset();
+  adminNotifierMocks.buildEventAdminBookingUrl.mockImplementation(
+    (base: string | undefined, eventId: string) =>
+      base ? `${base}/events/bookings?id=${eventId}` : null,
+  );
   reminderMocks.computeRemindersForBooking.mockReturnValue([]);
 });
 
@@ -1585,6 +1602,16 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'received_confirmed' }),
     );
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledTimes(1);
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        bookingFriendId: 'f1',
+        eventName: 'X',
+        startsAtJstList: ['2099-06-01 19:00'],
+        status: 'confirmed',
+      }),
+    );
     expect(idempotencyMocks.finalizeEventIdempotencyResponse).toHaveBeenCalled();
   });
 
@@ -1694,6 +1721,7 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     });
     expect(res.status).toBe(201);
     expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).not.toHaveBeenCalled();
   });
 
   test('POST summary sends one notification for multiple successful bookings', async () => {
@@ -1727,6 +1755,51 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
         }),
       }),
     );
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledTimes(1);
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        bookingFriendId: 'f1',
+        eventName: 'X',
+        startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
+        status: 'requested',
+      }),
+    );
+  });
+
+  test('POST summary does not send duplicate notices for a cached idempotency key', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 1 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({
+      kind: 'cached',
+      status: 200,
+      body: { ok: true, count: 2 },
+    });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings/summary?liffId=L1', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'Authorization': 'Bearer t',
+        'Idempotency-Key': 'summary-1',
+      },
+      body: JSON.stringify({ booking_ids: ['b1', 'b2'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).not.toHaveBeenCalled();
   });
 
   test('returns idempotent cached response on repeat', async () => {

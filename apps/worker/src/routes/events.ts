@@ -43,6 +43,10 @@ import {
   type EventNotificationKind,
 } from '../services/event-booking-notifier.js';
 import {
+  buildEventAdminBookingUrl,
+  notifyEventBookingAdminRecipients,
+} from '../services/event-booking-admin-notifier.js';
+import {
   canTransition,
   nextStatus,
   type EventBookingAction,
@@ -1192,6 +1196,7 @@ interface EventBookingNotificationRow {
   channel_access_token: string | null;
   liff_id: string | null;
   line_user_id: string;
+  friend_display_name: string | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
 }
@@ -1235,6 +1240,31 @@ async function sendGroupedBookingNotifications(
   }
 }
 
+async function sendGroupedBookingAdminNotifications(
+  db: D1Database,
+  rows: EventBookingNotificationRow[],
+  status: 'requested' | 'confirmed',
+  adminPublicUrl?: string,
+): Promise<void> {
+  const first = rows[0];
+  if (!first?.channel_access_token) return;
+  const startsAtJstList = rows
+    .slice()
+    .sort((a, b) => a.slot_starts_at.localeCompare(b.slot_starts_at))
+    .map((row) => startsAtJst(row.slot_starts_at));
+  await notifyEventBookingAdminRecipients({
+    db,
+    channelAccessToken: first.channel_access_token,
+    lineAccountId: first.line_account_id,
+    bookingFriendId: first.friend_id,
+    friendName: first.friend_display_name,
+    eventName: first.event_name,
+    startsAtJstList,
+    status,
+    adminBookingUrl: buildEventAdminBookingUrl(adminPublicUrl, first.event_id),
+  });
+}
+
 events.post('/api/liff/events/:id/bookings/summary', async (c) => {
   const account_id = await resolveAccountIdFromLiff(c);
   if (!account_id) return bad(c, 'liff_account_resolution_failed', 400);
@@ -1253,7 +1283,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
               e.reminder_day_before_enabled, e.reminder_hours_before,
               s.starts_at AS slot_starts_at,
               la.channel_access_token, la.liff_id,
-              f.line_user_id
+              f.line_user_id, f.display_name AS friend_display_name
          FROM event_bookings b
          JOIN events e ON e.id = b.event_id
          JOIN event_slots s ON s.id = b.slot_id
@@ -1271,10 +1301,53 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
 
   const rows = results ?? [];
   if (rows.length > 0) {
+    const summaryIdempotencyKey = c.req.header('Idempotency-Key');
+    if (summaryIdempotencyKey) {
+      const reservation = await reserveEventIdempotency(c.env.DB, {
+        key: summaryIdempotencyKey,
+        lineAccountId: account_id,
+        friendId: rows[0].friend_id,
+        ttlMinutes: EVENT_IDEMPOTENCY_TTL_MINUTES,
+        now: new Date(),
+      });
+      if (reservation.kind === 'cached') {
+        return c.json(
+          reservation.body as Record<string, unknown>,
+          reservation.status as 200 | 201 | 400 | 409 | 410 | 422,
+        );
+      }
+      if (reservation.kind === 'in_progress') {
+        return bad(c, 'idempotent_in_progress', 429);
+      }
+    }
+
     const kind: EventNotificationKind = rows.some((row) => row.status === 'requested')
       ? 'received_pending'
       : 'received_confirmed';
-    await sendGroupedBookingNotifications(rows, kind);
+    try {
+      await sendGroupedBookingNotifications(rows, kind);
+    } catch (err) {
+      console.error('[event-booking] grouped friend notice failed', err);
+    }
+    try {
+      await sendGroupedBookingAdminNotifications(
+        c.env.DB,
+        rows,
+        kind === 'received_pending' ? 'requested' : 'confirmed',
+        c.env.ADMIN_PUBLIC_URL,
+      );
+    } catch (err) {
+      console.error('[event-booking] grouped admin notice failed', err);
+    }
+    if (summaryIdempotencyKey) {
+      await finalizeEventIdempotencyResponse(c.env.DB, {
+        key: summaryIdempotencyKey,
+        lineAccountId: account_id,
+        friendId: rows[0].friend_id,
+        status: 200,
+        body: { ok: true, count: rows.length },
+      });
+    }
   }
   return c.json({ ok: true, count: rows.length });
 });
@@ -1292,11 +1365,16 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   // 算出に必要 (broadcasts dedup と同じ識別ロジック)。
   const friend = await c.env.DB
     .prepare(
-      `SELECT id, user_id, picture_url FROM friends
+      `SELECT id, user_id, picture_url, display_name FROM friends
         WHERE line_user_id = ? AND line_account_id = ? AND is_following = 1`,
     )
     .bind(callerLineUserId, account_id)
-    .first<{ id: string; user_id: string | null; picture_url: string | null }>();
+    .first<{
+      id: string;
+      user_id: string | null;
+      picture_url: string | null;
+      display_name: string | null;
+    }>();
   if (!friend) return bad(c, 'friend_not_found', 404);
   const bookingFriend = friend;
   const bookingLineUserId = callerLineUserId;
@@ -1552,13 +1630,13 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     await insertRemindersForBooking(c.env.DB, id, reminders);
   }
 
-  // best-effort notification: do not fail the booking if push fails.
-  try {
-    const acc = await c.env.DB
-      .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
-      .bind(account_id)
-      .first<{ channel_access_token: string }>();
-    if (acc?.channel_access_token && body.suppress_notification !== true) {
+  // Notifications are best effort: a push failure must not roll back the booking.
+  const acc = await c.env.DB
+    .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
+    .bind(account_id)
+    .first<{ channel_access_token: string }>();
+  if (acc?.channel_access_token && body.suppress_notification !== true) {
+    try {
       const kind: EventNotificationKind =
         status === 'requested' ? 'received_pending' : 'received_confirmed';
       await sendEventBookingNotification({
@@ -1573,9 +1651,24 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
           bookingHistoryUrl: buildEventBookingHistoryUrl(c.req.query('liffId')),
         },
       });
+    } catch (e) {
+      console.error('[event-booking] friend notice failed', e);
     }
-  } catch (e) {
-    console.error('[event-booking] notify failed', e);
+    try {
+      await notifyEventBookingAdminRecipients({
+        db: c.env.DB,
+        channelAccessToken: acc.channel_access_token,
+        lineAccountId: account_id as string,
+        bookingFriendId: bookingFriend.id,
+        friendName: bookingFriend.display_name,
+        eventName: event.name,
+        startsAtJstList: [startsAtJst(slot.starts_at)],
+        status,
+        adminBookingUrl: buildEventAdminBookingUrl(c.env.ADMIN_PUBLIC_URL, event.id),
+      });
+    } catch (e) {
+      console.error('[event-booking] admin notice failed', e);
+    }
   }
 
   return finalize(201, { id, status });
