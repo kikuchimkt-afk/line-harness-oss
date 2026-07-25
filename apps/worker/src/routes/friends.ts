@@ -25,6 +25,7 @@ import {
   denyIfLineAccountOutsideScope,
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
+import { resolveMessageSource } from '../utils/message-source.js';
 
 const friends = new Hono<Env>();
 
@@ -667,24 +668,43 @@ friends.get('/api/friends/:id/messages', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const denied = await denyIfCannotAccessFriendId(c, friendId, lineAccountId);
     if (denied) return denied;
-    // Fetch the latest 200 messages (DESC) then reverse to ASC for display.
-    // Using ORDER BY ASC LIMIT 200 returns the OLDEST 200 rows, which silently
-    // hides recent activity for chatty friends. Exclude delivery_type='test'
-    // to stay consistent with /api/chats/:id, so the same friend shows the
-    // same history across DirectMessagePanel and the chat panel.
+    // DirectMessagePanel でも個別チャットと同じ全履歴を返す。
+    // 管理者向け test 配信だけは実ユーザーとの会話ではないため除外する。
     const accountSql = lineAccountId ? 'AND line_account_id = ?' : '';
     const bindings: unknown[] = lineAccountId ? [friendId, lineAccountId] : [friendId];
     const result = await c.env.DB
       .prepare(
-        `SELECT id, direction, message_type as messageType, content, created_at as createdAt
+        `SELECT id, direction, message_type as messageType, content,
+                delivery_type, source, broadcast_id, scenario_step_id,
+                created_at as createdAt
          FROM messages_log WHERE friend_id = ?
            AND (delivery_type IS NULL OR delivery_type != 'test')
            ${accountSql}
-         ORDER BY created_at DESC LIMIT 200`,
+         ORDER BY created_at DESC`,
       )
       .bind(...bindings)
-      .all<{ id: string; direction: string; messageType: string; content: string; createdAt: string }>();
-    return c.json({ success: true, data: result.results.reverse() });
+      .all<{
+        id: string;
+        direction: string;
+        messageType: string;
+        content: string;
+        delivery_type: string | null;
+        source: string | null;
+        broadcast_id: string | null;
+        scenario_step_id: string | null;
+        createdAt: string;
+      }>();
+    return c.json({
+      success: true,
+      data: result.results.reverse().map((message) => ({
+        id: message.id,
+        direction: message.direction,
+        messageType: message.messageType,
+        content: message.content,
+        source: resolveMessageSource(message),
+        createdAt: message.createdAt,
+      })),
+    });
   } catch (err) {
     console.error('GET /api/friends/:id/messages error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

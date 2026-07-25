@@ -543,7 +543,16 @@ export interface UploadImageInput {
 }
 
 // ─── Conversations ──────────────────────────────────────
-export type MessageSource = 'user' | 'broadcast' | 'scenario' | 'auto_reply' | 'reminder' | 'manual'
+export type MessageSource =
+  | 'user'
+  | 'broadcast'
+  | 'scenario'
+  | 'auto_reply'
+  | 'automation'
+  | 'reminder'
+  | 'booking'
+  | 'event_booking'
+  | 'manual'
 
 export interface ConversationSummary {
   friendId: string

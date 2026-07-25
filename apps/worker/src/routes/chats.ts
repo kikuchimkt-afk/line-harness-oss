@@ -21,6 +21,7 @@ import {
   denyIfLineAccountOutsideScope,
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
+import { resolveMessageSource } from '../utils/message-source.js';
 
 const chats = new Hono<Env>();
 
@@ -480,19 +481,19 @@ chats.get('/api/chats/:id', async (c) => {
       if (denied) return denied;
     }
 
-    // 新しい1000件を取って昇順に戻す。LIMIT 200 ASC だと古い200件だけで broadcast/scenario 等の
-    // 新しい push が欠落していた（Shu で 481件中 281件欠落のバグあり）。一覧側と同様に test 配信は除外。
-    // 現状の最重量ユーザー(481件)の2倍バッファ。これ以上の履歴はページング未実装（Phase 2 TODO）。
+    // 個別チャットでは、LINEへ実際に送受信した履歴を種別に関係なく全件表示する。
+    // 管理者向け test 配信だけは実ユーザーとの会話ではないため除外する。
     const messageAccountSql = lineAccountId ? 'AND line_account_id = ?' : '';
     const messageBindings: unknown[] = lineAccountId ? [resolvedFriendId, lineAccountId] : [resolvedFriendId];
     const messages = await c.env.DB
       .prepare(
-        `SELECT id, friend_id, direction, message_type, content, created_at
+        `SELECT id, friend_id, direction, message_type, content,
+                delivery_type, source, broadcast_id, scenario_step_id, created_at
          FROM messages_log
          WHERE friend_id = ?
            AND (delivery_type IS NULL OR delivery_type != 'test')
            ${messageAccountSql}
-         ORDER BY created_at DESC LIMIT 1000`,
+         ORDER BY created_at DESC`,
       )
       .bind(...messageBindings)
       .all();
@@ -517,6 +518,7 @@ chats.get('/api/chats/:id', async (c) => {
           direction: m.direction,
           messageType: m.message_type,
           content: m.content,
+          source: resolveMessageSource(m),
           createdAt: m.created_at,
         })),
       },

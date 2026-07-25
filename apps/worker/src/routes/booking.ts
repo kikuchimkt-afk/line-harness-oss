@@ -164,6 +164,8 @@ async function notifyForBooking(
   const row = await db
     .prepare(
       `SELECT b.starts_at,
+              b.friend_id,
+              b.line_account_id,
               m.name AS menu_name,
               s.display_name AS staff_name,
               la.channel_access_token,
@@ -178,6 +180,8 @@ async function notifyForBooking(
     .bind(bookingId)
     .first<{
       starts_at: string;
+      friend_id: string;
+      line_account_id: string;
       menu_name: string;
       staff_name: string;
       channel_access_token: string;
@@ -188,6 +192,9 @@ async function notifyForBooking(
     channelAccessToken: row.channel_access_token,
     toLineUserId: row.line_user_id,
     kind,
+    db,
+    friendId: row.friend_id,
+    lineAccountId: row.line_account_id,
     ctx: {
       menuName: row.menu_name,
       staffName: row.staff_name,

@@ -32,6 +32,7 @@ interface ChatMessage {
   direction: 'incoming' | 'outgoing'
   messageType: string
   content: string
+  source?: string | null
   createdAt: string
 }
 
@@ -104,6 +105,31 @@ function formatYmdSlash(iso: string): string {
   return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`
 }
 
+const automatedMessageSources = new Set([
+  'auto_reply',
+  'automation',
+  'automation_backfill',
+  'broadcast',
+  'scenario',
+  'reminder',
+  'booking',
+  'event_booking',
+])
+
+function isAutomatedOutgoingMessage(message: Pick<ChatMessage, 'direction' | 'source'>): boolean {
+  return message.direction === 'outgoing' && automatedMessageSources.has(message.source ?? '')
+}
+
+function messageBubbleClass(message: Pick<ChatMessage, 'direction' | 'source'>): string {
+  if (message.direction === 'incoming') {
+    return 'bg-white text-gray-900 border border-gray-200'
+  }
+  if (isAutomatedOutgoingMessage(message)) {
+    return 'bg-emerald-50 text-emerald-950 border border-emerald-200'
+  }
+  return 'bg-pink-100 text-pink-950 border border-pink-200'
+}
+
 const ccPrompts = [
   {
     title: 'チャット対応テンプレート',
@@ -135,6 +161,7 @@ interface MessageLog {
   direction: 'incoming' | 'outgoing'
   messageType: string
   content: string
+  source?: string | null
   createdAt: string
 }
 
@@ -182,6 +209,7 @@ function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
         direction: 'outgoing',
         messageType: 'text',
         content: message,
+        source: 'manual',
         createdAt: new Date().toISOString(),
       }])
       setMessage('')
@@ -252,12 +280,10 @@ function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
           messages.map((msg) => (
             <div key={msg.id} className={`flex ${msg.direction === 'outgoing' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[75%] rounded-2xl px-4 py-2 ${
-                msg.direction === 'outgoing'
-                  ? 'bg-green-500 text-white'
-                  : 'bg-gray-100 text-gray-900'
+                messageBubbleClass(msg)
               }`}>
                 <div className="text-sm whitespace-pre-wrap break-words">{renderContent(msg)}</div>
-                <p className={`text-xs mt-1 ${msg.direction === 'outgoing' ? 'text-green-200' : 'text-gray-400'}`}>
+                <p className="text-xs mt-1 text-gray-500">
                   {new Date(msg.createdAt).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
                 </p>
               </div>
@@ -582,6 +608,7 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'image',
               content: imgPayload,
+              source: 'manual',
               createdAt: now,
             },
           ],
@@ -629,6 +656,7 @@ export default function ChatsPage() {
               direction: 'outgoing',
               messageType: 'text',
               content,
+              source: 'manual',
               createdAt: now,
             },
           ],
@@ -984,10 +1012,20 @@ export default function ChatsPage() {
                             <div
                               className={`max-w-[320px] px-3 py-2 text-sm break-words whitespace-pre-wrap ${
                                 isOutgoing
-                                  ? 'rounded-tl-2xl rounded-tr-md rounded-bl-2xl rounded-br-2xl text-white'
-                                  : 'rounded-tl-md rounded-tr-2xl rounded-bl-2xl rounded-br-2xl bg-white text-gray-900'
-                              }`}
-                              style={isOutgoing ? { backgroundColor: '#06C755' } : undefined}
+                                  ? 'rounded-tl-2xl rounded-tr-md rounded-bl-2xl rounded-br-2xl'
+                                  : 'rounded-tl-md rounded-tr-2xl rounded-bl-2xl rounded-br-2xl'
+                              } ${messageBubbleClass(msg)}`}
+                              data-message-source={msg.source ?? (isOutgoing ? 'manual' : 'user')}
+                              data-message-tone={
+                                isOutgoing
+                                  ? (isAutomatedOutgoingMessage(msg) ? 'automated' : 'manual')
+                                  : 'incoming'
+                              }
+                              title={
+                                isOutgoing
+                                  ? (isAutomatedOutgoingMessage(msg) ? '自動送信' : '個別送信')
+                                  : '受信メッセージ'
+                              }
                             >
                               {bubbleContent}
                             </div>

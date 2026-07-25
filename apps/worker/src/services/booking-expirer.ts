@@ -6,6 +6,8 @@ import { REQUEST_TTL_HOURS } from './booking-types.js';
 
 interface StaleRow {
   id: string;
+  friend_id?: string;
+  line_account_id?: string;
   starts_at: string;
   menu_name: string;
   staff_name: string;
@@ -32,7 +34,7 @@ export async function runExpirer(
   const cutoff = new Date(params.now.getTime() - REQUEST_TTL_HOURS * 3600_000).toISOString();
   const stale = await db
     .prepare(
-      `SELECT b.id, b.starts_at,
+      `SELECT b.id, b.friend_id, b.line_account_id, b.starts_at,
               m.name AS menu_name,
               s.display_name AS staff_name,
               la.channel_access_token,
@@ -70,6 +72,9 @@ export async function runExpirer(
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
         kind: 'expired',
+        db,
+        friendId: row.friend_id,
+        lineAccountId: row.line_account_id,
         ctx: {
           menuName: row.menu_name,
           staffName: row.staff_name,

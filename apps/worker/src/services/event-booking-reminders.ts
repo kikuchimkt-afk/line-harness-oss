@@ -97,6 +97,8 @@ export async function cancelPendingRemindersFor(
 interface DueEventReminderRow {
   id: string;
   booking_id: string;
+  friend_id?: string;
+  line_account_id?: string;
   kind: EventReminderKind;
   retry_count: number;
   event_name: string;
@@ -132,6 +134,7 @@ export async function processDueEventReminders(
   const due = await db
     .prepare(
       `SELECT r.id, r.booking_id, r.kind, r.retry_count,
+              b.friend_id, b.line_account_id,
               e.name AS event_name, e.venue_name, e.venue_url, e.reminder_hours_before,
               s.starts_at,
               la.channel_access_token,
@@ -175,6 +178,9 @@ export async function processDueEventReminders(
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
         kind: notificationKindFor(row.kind),
+        db,
+        friendId: row.friend_id,
+        lineAccountId: row.line_account_id,
         ctx: {
           eventName: row.event_name,
           startsAtJst: startsAtJstFmt(row.starts_at),

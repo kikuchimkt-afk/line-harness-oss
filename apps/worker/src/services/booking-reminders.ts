@@ -8,6 +8,8 @@ import { REMINDER_MAX_RETRY } from './booking-types.js';
 interface DueRow {
   id: string;
   booking_id: string;
+  friend_id?: string;
+  line_account_id?: string;
   kind: 'day_before' | 'hours_before';
   retry_count: number;
   starts_at: string;
@@ -39,6 +41,7 @@ export async function processDueReminders(
   const due = await db
     .prepare(
       `SELECT r.id, r.booking_id, r.kind, r.retry_count,
+              b.friend_id, b.line_account_id,
               b.starts_at,
               m.name AS menu_name,
               s.display_name AS staff_name,
@@ -68,6 +71,9 @@ export async function processDueReminders(
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
         kind,
+        db,
+        friendId: row.friend_id,
+        lineAccountId: row.line_account_id,
         ctx: {
           menuName: row.menu_name,
           staffName: row.staff_name,

@@ -1202,6 +1202,7 @@ interface EventBookingNotificationRow {
 }
 
 async function sendGroupedBookingNotifications(
+  db: D1Database,
   rows: EventBookingNotificationRow[],
   kind: EventNotificationKind,
 ): Promise<void> {
@@ -1228,6 +1229,9 @@ async function sendGroupedBookingNotifications(
       channelAccessToken: first.channel_access_token as string,
       toLineUserId: first.line_user_id,
       kind,
+      db,
+      friendId: first.friend_id,
+      lineAccountId: first.line_account_id,
       ctx: {
         eventName: first.event_name,
         startsAtJst: startsAtJst(first.slot_starts_at),
@@ -1325,7 +1329,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
       ? 'received_pending'
       : 'received_confirmed';
     try {
-      await sendGroupedBookingNotifications(rows, kind);
+      await sendGroupedBookingNotifications(c.env.DB, rows, kind);
     } catch (err) {
       console.error('[event-booking] grouped friend notice failed', err);
     }
@@ -1643,6 +1647,9 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
         channelAccessToken: acc.channel_access_token,
         toLineUserId: bookingLineUserId,
         kind,
+        db: c.env.DB,
+        friendId: bookingFriend.id,
+        lineAccountId: account_id as string,
         ctx: {
           eventName: event.name,
           startsAtJst: startsAtJst(slot.starts_at),
@@ -1793,6 +1800,8 @@ async function notifyBookingFriend(
       .prepare(
         `SELECT e.name AS event_name, e.venue_name, e.venue_url,
                 s.starts_at AS slot_starts_at,
+                b.friend_id,
+                b.line_account_id,
                 la.channel_access_token,
                 la.liff_id,
                 f.line_user_id
@@ -1809,6 +1818,8 @@ async function notifyBookingFriend(
         venue_name: string | null;
         venue_url: string | null;
         slot_starts_at: string;
+        friend_id: string;
+        line_account_id: string;
         channel_access_token: string;
         liff_id: string | null;
         line_user_id: string;
@@ -1818,6 +1829,9 @@ async function notifyBookingFriend(
       channelAccessToken: row.channel_access_token,
       toLineUserId: row.line_user_id,
       kind,
+      db,
+      friendId: row.friend_id,
+      lineAccountId: row.line_account_id,
       ctx: {
         eventName: row.event_name,
         startsAtJst: startsAtJst(row.slot_starts_at),
@@ -1920,6 +1934,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
 
   if (updatedRows.length > 0) {
     await sendGroupedBookingNotifications(
+      c.env.DB,
       updatedRows,
       action === 'confirm' ? 'confirmed' : 'rejected',
     );

@@ -1,3 +1,4 @@
+import { jstNow } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
 
 export type NotificationKind =
@@ -41,12 +42,35 @@ export interface SendNotificationParams {
   toLineUserId: string;
   kind: NotificationKind;
   ctx: NotificationContext;
+  db?: D1Database;
+  friendId?: string;
+  lineAccountId?: string | null;
 }
 
 export async function sendBookingNotification(params: SendNotificationParams): Promise<void> {
   const text = renderNotificationText(params.kind, params.ctx);
   const client = new LineClient(params.channelAccessToken);
   await client.pushMessage(params.toLineUserId, [{ type: 'text', text }]);
+  if (params.db && params.friendId) {
+    try {
+      await params.db
+        .prepare(
+          `INSERT INTO messages_log
+             (id, friend_id, direction, message_type, content, source, line_account_id, created_at)
+           VALUES (?, ?, 'outgoing', 'text', ?, 'booking', ?, ?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          params.friendId,
+          text,
+          params.lineAccountId ?? null,
+          jstNow(),
+        )
+        .run();
+    } catch (error) {
+      console.error('[booking-notifier] message history log failed', error);
+    }
+  }
 }
 
 export type BookingNotificationSender = (params: SendNotificationParams) => Promise<void>;
