@@ -155,15 +155,6 @@ function statusLabel(status: string): string {
   return STATUS_TABS.find((t) => t.key === status)?.label ?? status
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
 function safeFileName(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, '_').trim() || 'event-bookings'
 }
@@ -257,7 +248,7 @@ function BookingsInner() {
     return accountLabelById.get(lineAccountId) ?? lineAccountId.slice(0, 8)
   }
 
-  function downloadExcel() {
+  async function downloadExcel() {
     if (!event) return
     const rows = allItems
       .slice()
@@ -291,15 +282,15 @@ function BookingsInner() {
         booking.internal_note ?? '',
       ]),
     ]
-    const table = htmlRows
-      .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ''))}</td>`).join('')}</tr>`)
-      .join('')
-    const html = `<!doctype html><html><head><meta charset="UTF-8"></head><body><table border="1">${table}</table></body></html>`
-    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8' })
+    const { buildXlsxWorkbook } = await import('@/components/events/xlsx-export')
+    const workbook = buildXlsxWorkbook(htmlRows)
+    const blob = new Blob([workbook], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${safeFileName(event.name)}_予約一覧.xls`
+    a.download = `${safeFileName(event.name)}_予約一覧.xlsx`
     document.body.appendChild(a)
     a.click()
     a.remove()
