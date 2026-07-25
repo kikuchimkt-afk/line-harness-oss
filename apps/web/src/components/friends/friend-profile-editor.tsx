@@ -153,7 +153,7 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
   }
 
   return (
-    <div className="mx-auto w-full max-w-5xl">
+    <div className="mx-auto min-w-0 w-full max-w-5xl">
         <div className="flex flex-col gap-4 border-b border-pink-100 pb-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             {friend.pictureUrl ? (
@@ -289,9 +289,9 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
               </p>
             )}
 
-            <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
               <select
-                className="rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
+                className="min-w-0 w-full rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
                 value={selectedTagId}
                 onChange={(e) => setSelectedTagId(e.target.value)}
                 disabled={tagSaving || availableTags.length === 0}
@@ -317,7 +317,7 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
 
             <div className="mt-4 rounded-lg border border-pink-50 bg-pink-50/40 p-3">
               <label className="mb-1 block text-xs font-semibold text-gray-600">新しいタグを作って付ける</label>
-              <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+              <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <input
                   value={newTagName}
                   onChange={(e) => setNewTagName(e.target.value)}
@@ -328,7 +328,7 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
                     }
                   }}
                   placeholder="例：講師 / 体験希望 / 要確認"
-                  className="rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
+                  className="min-w-0 w-full rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
                 />
                 <button
                   type="button"
