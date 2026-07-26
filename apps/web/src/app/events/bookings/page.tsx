@@ -1,6 +1,7 @@
 'use client'
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import Header from '@/components/layout/header'
@@ -159,6 +160,11 @@ function safeFileName(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, '_').trim() || 'event-bookings'
 }
 
+interface ApprovalDialogState {
+  bookingIds: string[]
+  targetCount: number
+}
+
 function BookingsInner() {
   const params = useSearchParams()
   const eventId = params.get('id')
@@ -173,6 +179,8 @@ function BookingsInner() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [approvalDialog, setApprovalDialog] = useState<ApprovalDialogState | null>(null)
+  const [approvalComment, setApprovalComment] = useState('')
 
   const refresh = useCallback(async () => {
     if (!selectedAccountId || !eventId) return
@@ -297,7 +305,57 @@ function BookingsInner() {
     URL.revokeObjectURL(url)
   }
 
-  async function decide(id: string, action: 'confirm' | 'reject') {
+  function openApprovalDialog(bookings: EventBookingItem[]) {
+    const targets = bookings.filter((booking) => booking.status === 'requested')
+    if (targets.length === 0) return
+    setApprovalComment('')
+    setApprovalDialog({
+      bookingIds: targets.map((booking) => booking.id),
+      targetCount: targets.length,
+    })
+  }
+
+  async function submitApproval() {
+    if (!selectedAccountId || !eventId || !approvalDialog) return
+    const comment = approvalComment.trim() || undefined
+    setBusy(true)
+    setError(null)
+    try {
+      if (approvalDialog.bookingIds.length === 1) {
+        await eventsApi.decideBooking(
+          selectedAccountId,
+          eventId,
+          approvalDialog.bookingIds[0],
+          'confirm',
+          undefined,
+          comment,
+        )
+      } else {
+        const result = await eventsApi.bulkDecideBookings(
+          selectedAccountId,
+          eventId,
+          approvalDialog.bookingIds,
+          'confirm',
+          undefined,
+          comment,
+        )
+        if (result.skipped > 0) {
+          window.alert(
+            `${result.updated}件を更新しました。${result.skipped}件はすでに処理済みのためスキップしました。`,
+          )
+        }
+      }
+      setApprovalDialog(null)
+      setApprovalComment('')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function decide(id: string, action: 'reject') {
     if (!selectedAccountId || !eventId) return
     let reason: string | undefined
     if (action === 'reject') {
@@ -320,15 +378,16 @@ function BookingsInner() {
     if (!selectedAccountId || !eventId) return
     const targets = bookings.filter((booking) => booking.status === 'requested')
     if (targets.length === 0) return
-    let reason: string | undefined
-    if (action === 'reject') {
-      const r = window.prompt('まとめて拒否する理由（任意・admin内部メモ。友だちには固定文面）')
-      if (r === null) return
-      reason = r || undefined
+    if (action === 'confirm') {
+      openApprovalDialog(targets)
+      return
     }
-    const label = action === 'confirm' ? '承認' : '拒否'
+    let reason: string | undefined
+    const r = window.prompt('まとめて拒否する理由（任意・admin内部メモ。友だちには固定文面）')
+    if (r === null) return
+    reason = r || undefined
     const ok = window.confirm(
-      `${targets.length}件をまとめて${label}します。\n同じ友だちに複数の予約がある場合、LINE通知は1通にまとまります。\nよろしいですか？`,
+      `${targets.length}件をまとめて拒否します。\n同じ友だちに複数の予約がある場合、LINE通知は1通にまとまります。\nよろしいですか？`,
     )
     if (!ok) return
     setBusy(true)
@@ -537,7 +596,7 @@ function BookingsInner() {
                         {b.status === 'requested' && (
                           <div className="inline-flex gap-1.5">
                             <button
-                              onClick={() => decide(b.id, 'confirm')}
+                              onClick={() => openApprovalDialog([b])}
                               disabled={busy}
                               className="px-3 py-1 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50"
                             >
@@ -757,7 +816,7 @@ function BookingsInner() {
                                 <>
                                   <button
                                     type="button"
-                                    onClick={() => decide(booking.id, 'confirm')}
+                                    onClick={() => openApprovalDialog([booking])}
                                     disabled={busy}
                                     className="rounded-lg bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
                                   >
@@ -813,6 +872,74 @@ function BookingsInner() {
           </div>
         )}
       </div>
+
+      {approvalDialog && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/35 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="approval-comment-title"
+        >
+          <div className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-lg border border-pink-100 bg-white p-5 shadow-xl">
+            <h2 id="approval-comment-title" className="text-lg font-bold text-gray-900">
+              予約を承認する
+            </h2>
+            <p className="mt-1 text-sm text-gray-600">
+              {approvalDialog.targetCount === 1
+                ? 'この予約の確定メッセージを送ります。'
+                : `${approvalDialog.targetCount}件の予約を承認します。同じ友だちへの通知は1通にまとまります。`}
+            </p>
+
+            <div className="mt-5">
+              <label htmlFor="approval-comment" className="block text-sm font-medium text-gray-800">
+                保護者へ送るコメント
+                <span className="ml-1 text-xs font-normal text-gray-500">任意</span>
+              </label>
+              <textarea
+                id="approval-comment"
+                value={approvalComment}
+                onChange={(event) => setApprovalComment(event.target.value)}
+                maxLength={2000}
+                rows={7}
+                autoFocus
+                placeholder={'例：事前にこちらをご確認ください。\nhttps://example.com/preparation'}
+                className="mt-2 w-full resize-y rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-pink-400 focus:ring-2 focus:ring-pink-100"
+              />
+              <div className="mt-1 flex items-start justify-between gap-3 text-xs text-gray-500">
+                <p>入力したURLは、LINE上でタップできるリンクになります。</p>
+                <span className="shrink-0">{approvalComment.length} / 2000</span>
+              </div>
+            </div>
+
+            <div className="mt-5 rounded-lg border border-green-100 bg-green-50/70 p-3 text-xs text-gray-700">
+              コメントは、イベント名・予約日時・予約履歴URLと一緒に確定メッセージへ追加されます。
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setApprovalDialog(null)
+                  setApprovalComment('')
+                }}
+                disabled={busy}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitApproval()}
+                disabled={busy}
+                className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy ? '承認中...' : approvalComment.trim() ? 'コメントを付けて承認' : 'コメントなしで承認'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </>
   )
 }

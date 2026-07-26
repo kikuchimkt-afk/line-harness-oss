@@ -2335,12 +2335,22 @@ describe('admin bookings management', () => {
     const res = await app.request('/api/events/admin/events/e1/bookings/bulk-decide?account_id=la1', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'confirm', booking_ids: ['b1', 'b2'] }),
+      body: JSON.stringify({
+        action: 'confirm',
+        booking_ids: ['b1', 'b2'],
+        comment: '事前資料はこちらです。\nhttps://example.com/materials',
+      }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { updated: number; skipped: number };
     expect(body).toMatchObject({ updated: 2, skipped: 0 });
     expect(state.bookings.map((booking) => booking.status)).toEqual(['confirmed', 'confirmed']);
+    expect(
+      state.bookings.map((booking) => (booking as Record<string, unknown>).internal_note),
+    ).toEqual([
+      '[approval comment] 事前資料はこちらです。\nhttps://example.com/materials',
+      '[approval comment] 事前資料はこちらです。\nhttps://example.com/materials',
+    ]);
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalledTimes(2);
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
@@ -2349,6 +2359,7 @@ describe('admin bookings management', () => {
         ctx: expect.objectContaining({
           bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
           startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
+          approvalComment: '事前資料はこちらです。\nhttps://example.com/materials',
         }),
       }),
     );
@@ -2366,19 +2377,46 @@ describe('admin bookings management', () => {
     const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'confirm' }),
+      body: JSON.stringify({
+        action: 'confirm',
+        comment: '前日までにご確認ください。\nhttps://example.com/guide',
+      }),
     });
     expect(res.status).toBe(200);
     expect(state.bookings[0].status).toBe('confirmed');
+    expect((state.bookings[0] as Record<string, unknown>).internal_note).toBe(
+      '[approval comment] 前日までにご確認ください。\nhttps://example.com/guide',
+    );
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'confirmed',
         ctx: expect.objectContaining({
           bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
+          approvalComment: '前日までにご確認ください。\nhttps://example.com/guide',
         }),
       }),
     );
+  });
+
+  test('POST decide rejects an approval comment longer than 2000 characters', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', comment: 'あ'.repeat(2001) }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_approval_comment' });
+    expect(state.bookings[0].status).toBe('requested');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
   });
 
   test('POST decide reject transitions to rejected and appends reason to internal_note', async () => {

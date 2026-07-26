@@ -61,7 +61,15 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
 
   const lineDisplayName = friend.lineDisplayName || friend.displayName || '名前なし'
   const effectiveName = form.harnessDisplayName.trim() || lineDisplayName
-  const availableTags = allTags.filter((tag) => !assignedTags.some((assigned) => assigned.id === tag.id))
+  const assignedTagIds = new Set(assignedTags.map((tag) => tag.id))
+  const tagOptions = [...allTags]
+  for (const assignedTag of assignedTags) {
+    if (!tagOptions.some((tag) => tag.id === assignedTag.id)) {
+      tagOptions.push(assignedTag)
+    }
+  }
+  tagOptions.sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+  const availableTags = tagOptions.filter((tag) => !assignedTagIds.has(tag.id))
 
   const setField = (key: keyof ProfileForm, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }))
@@ -96,8 +104,8 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
 
   const handleAddTag = async () => {
     if (!selectedTagId || tagSaving) return
-    const tag = allTags.find((item) => item.id === selectedTagId)
-    if (!tag) return
+    const tag = tagOptions.find((item) => item.id === selectedTagId)
+    if (!tag || assignedTagIds.has(tag.id)) return
     setTagSaving(true)
     setError('')
     try {
@@ -294,11 +302,17 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
                 className="min-w-0 w-full rounded-lg border border-pink-100 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-200"
                 value={selectedTagId}
                 onChange={(e) => setSelectedTagId(e.target.value)}
-                disabled={tagSaving || availableTags.length === 0}
+                disabled={tagSaving || tagOptions.length === 0}
               >
                 <option value="">既存タグを選んで追加</option>
-                {availableTags.map((tag) => (
-                  <option key={tag.id} value={tag.id}>{tag.name}</option>
+                {tagOptions.map((tag) => (
+                  <option
+                    key={tag.id}
+                    value={tag.id}
+                    disabled={assignedTagIds.has(tag.id)}
+                  >
+                    {tag.name}{assignedTagIds.has(tag.id) ? '（追加済み）' : ''}
+                  </option>
                 ))}
               </select>
               <button
@@ -311,7 +325,7 @@ export default function FriendProfileEditor({ friend, allTags, onClose, onSaved,
               </button>
             </div>
 
-            {availableTags.length === 0 && allTags.length > 0 && (
+            {availableTags.length === 0 && tagOptions.length > 0 && (
               <p className="mt-2 text-xs text-gray-400">作成済みのタグはすべて付いています。</p>
             )}
 

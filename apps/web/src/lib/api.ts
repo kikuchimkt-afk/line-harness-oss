@@ -1756,10 +1756,11 @@ export const eventsApi = {
     bookingId: string,
     action: 'confirm' | 'reject',
     reason?: string,
+    comment?: string,
   ) =>
     fetchApi<EventBookingItem>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}/decide`, accountId),
-      { method: 'POST', body: JSON.stringify({ action, reason }) },
+      { method: 'POST', body: JSON.stringify({ action, reason, comment }) },
     ),
   bulkDecideBookings: (
     accountId: string,
@@ -1767,10 +1768,14 @@ export const eventsApi = {
     bookingIds: string[],
     action: 'confirm' | 'reject',
     reason?: string,
+    comment?: string,
   ) =>
     fetchApi<{ ok: true; updated: number; skipped: number }>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/bulk-decide`, accountId),
-      { method: 'POST', body: JSON.stringify({ booking_ids: bookingIds, action, reason }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({ booking_ids: bookingIds, action, reason, comment }),
+      },
     ),
   adminCancelBooking: (accountId: string, eventId: string, bookingId: string) =>
     fetchApi<{ ok: true }>(

@@ -17,6 +17,7 @@ export interface EventNotificationContext {
   venueName?: string | null;
   venueUrl?: string | null;
   bookingHistoryUrl?: string | null;
+  approvalComment?: string | null;
   hoursBefore?: number;
 }
 
@@ -34,13 +35,16 @@ export function renderEventNotificationText(
   const historyLine = ctx.bookingHistoryUrl
     ? `\n\n予約履歴はこちら:\n${ctx.bookingHistoryUrl}`
     : '';
+  const approvalCommentLine = ctx.approvalComment
+    ? `\n\n運営からのご案内:\n${ctx.approvalComment}`
+    : '';
   switch (kind) {
     case 'received_pending':
       return `イベント申込みを受け付けました。${detail}\n\n運営の承認をお待ちください。${historyLine}`;
     case 'received_confirmed':
       return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
     case 'confirmed':
-      return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
+      return `イベント予約が確定しました。${detail}${approvalCommentLine}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
     case 'rejected':
       return `申し訳ございません、今回のイベント予約はお受けできませんでした。${detail}`;
     case 'cancelled_by_admin':

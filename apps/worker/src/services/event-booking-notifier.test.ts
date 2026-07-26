@@ -49,6 +49,27 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('予約が確定しました');
   });
 
+  test('後追い承認時に運営コメントとURLを追加できる', () => {
+    const text = renderEventNotificationText('confirmed', {
+      ...baseCtx,
+      approvalComment: '事前にこちらをご確認ください。\nhttps://example.com/preparation',
+    });
+    expect(text).toContain('運営からのご案内:');
+    expect(text).toContain('事前にこちらをご確認ください。');
+    expect(text).toContain('https://example.com/preparation');
+    expect(text.indexOf('運営からのご案内:')).toBeLessThan(
+      text.indexOf('変更・キャンセルは予約履歴画面'),
+    );
+  });
+
+  test('受付時は承認コメントを表示しない', () => {
+    const text = renderEventNotificationText('received_pending', {
+      ...baseCtx,
+      approvalComment: '承認後だけ表示するコメント',
+    });
+    expect(text).not.toContain('承認後だけ表示するコメント');
+  });
+
   test('拒否は固定文面（reason は含まない）', () => {
     const text = renderEventNotificationText('rejected', baseCtx);
     expect(text).toContain('お受けできませんでした');

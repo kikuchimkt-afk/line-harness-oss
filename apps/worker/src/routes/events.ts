@@ -1171,6 +1171,7 @@ function buildEventBookingHistoryUrl(liffId?: string | null): string | null {
 }
 
 const EVENT_BOOKING_BULK_LIMIT = 50;
+const EVENT_APPROVAL_COMMENT_MAX_LENGTH = 2000;
 
 function normalizeBookingIdList(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > EVENT_BOOKING_BULK_LIMIT) {
@@ -1179,6 +1180,36 @@ function normalizeBookingIdList(value: unknown): string[] | null {
   const ids = value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
   if (ids.length === 0) return null;
   return Array.from(new Set(ids));
+}
+
+function normalizeApprovalComment(value: unknown): {
+  valid: boolean;
+  value?: string;
+} {
+  if (value == null || value === '') return { valid: true };
+  if (typeof value !== 'string') return { valid: false };
+  const normalized = value.replace(/\r\n?/g, '\n').trim();
+  if (normalized.length > EVENT_APPROVAL_COMMENT_MAX_LENGTH) {
+    return { valid: false };
+  }
+  return normalized ? { valid: true, value: normalized } : { valid: true };
+}
+
+async function appendBookingInternalNote(
+  db: D1Database,
+  bookingId: string,
+  note: string,
+  updatedAt: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE event_bookings
+          SET internal_note = COALESCE(internal_note || char(10), '') || ?,
+              updated_at = ?
+        WHERE id = ?`,
+    )
+    .bind(note, updatedAt, bookingId)
+    .run();
 }
 
 interface EventBookingNotificationRow {
@@ -1205,6 +1236,7 @@ async function sendGroupedBookingNotifications(
   db: D1Database,
   rows: EventBookingNotificationRow[],
   kind: EventNotificationKind,
+  approvalComment?: string,
 ): Promise<void> {
   const groups = new Map<string, EventBookingNotificationRow[]>();
   for (const row of rows) {
@@ -1239,6 +1271,7 @@ async function sendGroupedBookingNotifications(
         venueName: first.venue_name,
         venueUrl: first.venue_url,
         bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
+        approvalComment,
       },
     });
   }
@@ -1794,6 +1827,7 @@ async function notifyBookingFriend(
   db: D1Database,
   booking_id: string,
   kind: EventNotificationKind,
+  approvalComment?: string,
 ): Promise<void> {
   try {
     const row = await db
@@ -1838,6 +1872,7 @@ async function notifyBookingFriend(
         venueName: row.venue_name,
         venueUrl: row.venue_url,
         bookingHistoryUrl: buildEventBookingHistoryUrl(row.liff_id),
+        approvalComment,
       },
     });
   } catch (e) {
@@ -1855,6 +1890,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     booking_ids?: unknown;
     action?: string;
     reason?: string;
+    comment?: unknown;
   };
   const bookingIds = normalizeBookingIdList(body.booking_ids);
   if (!bookingIds) return bad(c, 'invalid_booking_ids', 422);
@@ -1862,6 +1898,12 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     return bad(c, 'invalid_action', 422);
   }
   const action: EventBookingAction = body.action;
+  const normalizedComment = normalizeApprovalComment(body.comment);
+  if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
+  if (action !== 'confirm' && normalizedComment.value) {
+    return bad(c, 'approval_comment_requires_confirm', 422);
+  }
+  const approvalComment = normalizedComment.value;
   const next = nextStatus('requested' as never, action);
   const placeholders = bookingIds.map(() => '?').join(',');
   const { results } = await c.env.DB
@@ -1910,15 +1952,20 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     }
 
     if (action === 'reject' && body.reason) {
-      await c.env.DB
-        .prepare(
-          `UPDATE event_bookings
-              SET internal_note = COALESCE(internal_note || char(10), '') || ?,
-                  updated_at = ?
-            WHERE id = ?`,
-        )
-        .bind(`[reject reason] ${body.reason}`, nowIso, row.id)
-        .run();
+      await appendBookingInternalNote(
+        c.env.DB,
+        row.id,
+        `[reject reason] ${body.reason}`,
+        nowIso,
+      );
+    }
+    if (action === 'confirm' && approvalComment) {
+      await appendBookingInternalNote(
+        c.env.DB,
+        row.id,
+        `[approval comment] ${approvalComment}`,
+        nowIso,
+      );
     }
 
     if (action === 'confirm') {
@@ -1937,6 +1984,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       c.env.DB,
       updatedRows,
       action === 'confirm' ? 'confirmed' : 'rejected',
+      approvalComment,
     );
   }
   return c.json({ ok: true, updated: updatedRows.length, skipped });
@@ -1951,11 +1999,21 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
   if (!booking) return bad(c, 'not_found', 404);
   if (booking.decided_at != null) return bad(c, 'already_decided', 409);
 
-  const body = (await c.req.json().catch(() => ({}))) as { action?: string; reason?: string };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    action?: string;
+    reason?: string;
+    comment?: unknown;
+  };
   if (body.action !== 'confirm' && body.action !== 'reject') {
     return bad(c, 'invalid_action', 422);
   }
   const action: EventBookingAction = body.action;
+  const normalizedComment = normalizeApprovalComment(body.comment);
+  if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
+  if (action !== 'confirm' && normalizedComment.value) {
+    return bad(c, 'approval_comment_requires_confirm', 422);
+  }
+  const approvalComment = normalizedComment.value;
   if (!canTransition(booking.status as never, action)) return bad(c, 'invalid_state', 409);
   const next = nextStatus(booking.status as never, action);
 
@@ -1975,15 +2033,20 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'already_decided', 409);
 
   if (action === 'reject' && body.reason) {
-    await c.env.DB
-      .prepare(
-        `UPDATE event_bookings
-            SET internal_note = COALESCE(internal_note || char(10), '') || ?,
-                updated_at = ?
-          WHERE id = ?`,
-      )
-      .bind(`[reject reason] ${body.reason}`, nowIso, booking.id)
-      .run();
+    await appendBookingInternalNote(
+      c.env.DB,
+      booking.id,
+      `[reject reason] ${body.reason}`,
+      nowIso,
+    );
+  }
+  if (action === 'confirm' && approvalComment) {
+    await appendBookingInternalNote(
+      c.env.DB,
+      booking.id,
+      `[approval comment] ${approvalComment}`,
+      nowIso,
+    );
   }
 
   if (action === 'confirm') {
@@ -2007,7 +2070,12 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     }
   }
 
-  await notifyBookingFriend(c.env.DB, booking.id, action === 'confirm' ? 'confirmed' : 'rejected');
+  await notifyBookingFriend(
+    c.env.DB,
+    booking.id,
+    action === 'confirm' ? 'confirmed' : 'rejected',
+    approvalComment,
+  );
   const updated = await c.env.DB
     .prepare(`SELECT * FROM event_bookings WHERE id = ?`)
     .bind(booking.id)
