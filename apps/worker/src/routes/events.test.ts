@@ -75,6 +75,7 @@ interface EventRow {
   account_ids?: string | null;
   dedup_priority?: string | null;
   booking_form_fields?: string | null;
+  confirmation_message_extra?: string | null;
   [k: string]: unknown;
 }
 
@@ -211,9 +212,13 @@ function makeEventDb(state: {
               line_user_id: f.line_user_id,
             } as T;
           }
-          // booking action loader: SELECT id, line_account_id, event_id, slot_id, friend_id, status, decided_at FROM event_bookings WHERE id = ? AND event_id = ?
+          // booking action loader with the event's default confirmation message.
           // (multi-account 対応で line_account_id 制約を削除)
-          if (sql.includes('FROM event_bookings\n        WHERE id = ? AND event_id = ?')) {
+          if (
+            sql.includes('FROM event_bookings b') &&
+            sql.includes('e.confirmation_message_extra') &&
+            sql.includes('WHERE b.id = ? AND b.event_id = ?')
+          ) {
             const [id, event_id] = bound as [string, string];
             const b = (state.bookings ?? []).find(
               (x) =>
@@ -221,6 +226,7 @@ function makeEventDb(state: {
                 (x as Record<string, unknown>).event_id === event_id,
             );
             if (!b) return null as T | null;
+            const e = state.events.find((event) => event.id === event_id);
             return {
               id: b.id,
               line_account_id: (b as Record<string, unknown>).line_account_id as string,
@@ -229,6 +235,7 @@ function makeEventDb(state: {
               friend_id: (b as Record<string, unknown>).friend_id as string,
               status: b.status,
               decided_at: ((b as Record<string, unknown>).decided_at as string | null) ?? null,
+              confirmation_message_extra: e?.confirmation_message_extra ?? null,
             } as T;
           }
           // SELECT * FROM event_bookings WHERE id = ?
@@ -501,6 +508,7 @@ function makeEventDb(state: {
                   venue_url: e.venue_url,
                   reminder_day_before_enabled: e.reminder_day_before_enabled,
                   reminder_hours_before: e.reminder_hours_before,
+                  confirmation_message_extra: e.confirmation_message_extra ?? null,
                   slot_starts_at: s.starts_at,
                   channel_access_token: la.channel_access_token ?? '',
                    liff_id: la.liff_id ?? null,
@@ -721,13 +729,14 @@ function makeEventDb(state: {
               reminder_day_before_enabled, reminder_hours_before,
               is_published, sort_order,
               target_type, account_ids, dedup_priority, booking_form_fields,
+              confirmation_message_extra,
             ] = bound as [
               string, string, string, string | null, string | null, string | null,
               string | null, number,
               number | null, number, number | null,
               number, number | null,
               number, number,
-              string, string | null, string | null, string,
+              string, string | null, string | null, string, string | null,
             ];
             const now = new Date().toISOString();
             state.events.push({
@@ -754,6 +763,7 @@ function makeEventDb(state: {
               account_ids,
               dedup_priority,
               booking_form_fields,
+              confirmation_message_extra,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -872,6 +882,7 @@ describe('POST /api/events/admin/events', () => {
           { id: 'student_name', label: '生徒名', type: 'text', required: true },
           { id: 'content', label: '内容', type: 'checkbox', required: true, options: ['宿題', '英検'] },
         ],
+        confirmation_message_extra: '教材はこちらです。\nhttps://example.com/materials',
       }),
     });
     expect(res.status).toBe(201);
@@ -880,6 +891,9 @@ describe('POST /api/events/admin/events', () => {
     expect(body.cancel_deadline_hours_before).toBe(12);
     expect(body.is_published).toBe(1);
     expect(JSON.parse(body.booking_form_fields ?? '[]')).toHaveLength(2);
+    expect(body.confirmation_message_extra).toBe(
+      '教材はこちらです。\nhttps://example.com/materials',
+    );
   });
 
   test('400 when account_id missing', async () => {
@@ -964,6 +978,20 @@ describe('POST /api/events/admin/events', () => {
     expect(typeof body.account_ids === 'string' ? JSON.parse(body.account_ids) : body.account_ids).toEqual(['la1', 'la2']);
     // sentinel: line_account_id = account_ids[0]
     expect(body.line_account_id).toBe('la1');
+  });
+
+  test('422 when confirmation_message_extra is longer than 2000 characters', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'X',
+        confirmation_message_extra: 'a'.repeat(2001),
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_confirmation_message_extra' });
   });
 
   test('POST duplicate creates unpublished copy with slots but no bookings', async () => {
@@ -2399,6 +2427,61 @@ describe('admin bookings management', () => {
     );
   });
 
+  test('POST decide uses the event default message when comment is omitted', async () => {
+    const defaultMessage = '👇️教材PDFのダウンロードはこちら👇️\nhttps://eiken-study-materials-lp.vercel.app/';
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        confirmation_message_extra: defaultMessage,
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm' }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({ approvalComment: defaultMessage }),
+      }),
+    );
+  });
+
+  test('POST decide allows an explicit blank comment to skip the event default', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        confirmation_message_extra: '通常は送る案内',
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', comment: '' }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({ approvalComment: undefined }),
+      }),
+    );
+  });
+
   test('POST decide rejects an approval comment longer than 2000 characters', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
@@ -2576,6 +2659,7 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     account_ids: null,
     dedup_priority: null,
     booking_form_fields: '[]',
+    confirmation_message_extra: null,
     ...over,
   };
 }

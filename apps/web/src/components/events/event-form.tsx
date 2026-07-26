@@ -30,6 +30,7 @@ const DEFAULT_DRAFT: EventDetail = {
   cancel_deadline_hours_before: null,
   reminder_day_before_enabled: 1,
   reminder_hours_before: null,
+  confirmation_message_extra: null,
   is_published: 0,
   sort_order: 0,
   booking_form_fields: [],
@@ -249,6 +250,7 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
         cancel_deadline_hours_before: draft.cancel_deadline_hours_before,
         reminder_day_before_enabled: draft.reminder_day_before_enabled,
         reminder_hours_before: draft.reminder_hours_before,
+        confirmation_message_extra: draft.confirmation_message_extra,
         is_published: draft.is_published,
         sort_order: draft.sort_order,
         booking_form_fields: parseEventFormFields(draft.booking_form_fields),
@@ -2111,6 +2113,36 @@ function PublishTab({
           </div>
         </div>
       </label>
+
+      {draft.requires_approval === 1 && (
+        <div className="rounded-lg border border-pink-200 bg-pink-50/40 p-4">
+          <label
+            htmlFor="confirmation-message-extra"
+            className="block text-sm font-medium text-gray-900"
+          >
+            承認メッセージの既定文
+          </label>
+          <p className="mt-1 text-xs leading-relaxed text-gray-600">
+            予約を承認したとき、保護者へ送る確定メッセージに追加します。
+            承認画面で、その予約だけ文章を変更することもできます。
+          </p>
+          <textarea
+            id="confirmation-message-extra"
+            value={draft.confirmation_message_extra ?? ''}
+            onChange={(e) => update('confirmation_message_extra', e.target.value || null)}
+            maxLength={2000}
+            rows={6}
+            placeholder={'例：\n👇️教材PDFのダウンロードはこちら👇️\nhttps://example.com/materials'}
+            className="mt-3 w-full resize-y rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-pink-400 focus:ring-2 focus:ring-pink-100"
+          />
+          <div className="mt-1 flex items-start justify-between gap-3 text-xs text-gray-500">
+            <p>URLはLINE上でタップできるリンクになります。</p>
+            <span className="shrink-0">
+              {(draft.confirmation_message_extra ?? '').length} / 2000
+            </span>
+          </div>
+        </div>
+      )}
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1.5">

@@ -87,6 +87,7 @@ interface EventInput {
   cancel_deadline_hours_before?: number | null;
   reminder_day_before_enabled?: number;
   reminder_hours_before?: number | null;
+  confirmation_message_extra?: string | null;
   is_published?: number;
   sort_order?: number;
   booking_form_fields?: EventBookingFormField[];
@@ -334,6 +335,12 @@ function validateEventInput(
   if (has('sort_order') && body.sort_order != null) {
     if (!Number.isInteger(body.sort_order)) return { ok: false, code: 'invalid_sort_order' };
   }
+  if (has('confirmation_message_extra') && body.confirmation_message_extra != null) {
+    const message = body.confirmation_message_extra;
+    if (typeof message !== 'string' || message.replace(/\r\n?/g, '\n').trim().length > EVENT_APPROVAL_COMMENT_MAX_LENGTH) {
+      return { ok: false, code: 'invalid_confirmation_message_extra' };
+    }
+  }
   if (has('booking_form_fields')) {
     const fields = normalizeBookingFormFields(body.booking_form_fields);
     if (!fields.ok) return { ok: false, code: fields.code };
@@ -390,8 +397,9 @@ events.post('/api/events/admin/events', async (c) => {
          max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
-         target_type, account_ids, dedup_priority, booking_form_fields
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         target_type, account_ids, dedup_priority, booking_form_fields,
+         confirmation_message_extra
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -413,6 +421,7 @@ events.post('/api/events/admin/events', async (c) => {
       accountIds ? JSON.stringify(accountIds) : null,
       dedupPriority ? JSON.stringify(dedupPriority) : null,
       JSON.stringify(formFields.fields),
+      (body.confirmation_message_extra as string | null | undefined) ?? null,
     )
     .run();
   const row = await c.env.DB
@@ -626,6 +635,7 @@ events.put('/api/events/admin/events/:id', async (c) => {
     'cancel_deadline_hours_before',
     'reminder_day_before_enabled',
     'reminder_hours_before',
+    'confirmation_message_extra',
     'is_published',
     'sort_order',
     'target_type',
@@ -1230,6 +1240,7 @@ interface EventBookingNotificationRow {
   friend_display_name: string | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  confirmation_message_extra: string | null;
 }
 
 async function sendGroupedBookingNotifications(
@@ -1799,6 +1810,7 @@ interface BookingActionRow {
   friend_id: string;
   status: string;
   decided_at: string | null;
+  confirmation_message_extra: string | null;
 }
 
 async function loadBookingForAction(
@@ -1814,9 +1826,11 @@ async function loadBookingForAction(
   // 操作可能にする。
   const row = await db
     .prepare(
-      `SELECT id, line_account_id, event_id, slot_id, friend_id, status, decided_at
-         FROM event_bookings
-        WHERE id = ? AND event_id = ?`,
+      `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              e.confirmation_message_extra
+         FROM event_bookings b
+         JOIN events e ON e.id = b.event_id
+        WHERE b.id = ? AND b.event_id = ?`,
     )
     .bind(booking_id, event_id)
     .first<BookingActionRow>();
@@ -1898,12 +1912,12 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     return bad(c, 'invalid_action', 422);
   }
   const action: EventBookingAction = body.action;
+  const hasApprovalComment = Object.prototype.hasOwnProperty.call(body, 'comment');
   const normalizedComment = normalizeApprovalComment(body.comment);
   if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
   if (action !== 'confirm' && normalizedComment.value) {
     return bad(c, 'approval_comment_requires_confirm', 422);
   }
-  const approvalComment = normalizedComment.value;
   const next = nextStatus('requested' as never, action);
   const placeholders = bookingIds.map(() => '?').join(',');
   const { results } = await c.env.DB
@@ -1911,6 +1925,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
+              e.confirmation_message_extra,
               s.starts_at AS slot_starts_at,
               la.channel_access_token, la.liff_id,
               f.line_user_id
@@ -1927,6 +1942,10 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     .all<EventBookingNotificationRow>();
 
   const rows = results ?? [];
+  const defaultComment = normalizeApprovalComment(rows[0]?.confirmation_message_extra).value;
+  const approvalComment = action === 'confirm'
+    ? (hasApprovalComment ? normalizedComment.value : defaultComment)
+    : undefined;
   const foundIds = new Set(rows.map((row) => row.id));
   let skipped = bookingIds.filter((id) => !foundIds.has(id)).length;
   const updatedRows: EventBookingNotificationRow[] = [];
@@ -2008,12 +2027,16 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     return bad(c, 'invalid_action', 422);
   }
   const action: EventBookingAction = body.action;
+  const hasApprovalComment = Object.prototype.hasOwnProperty.call(body, 'comment');
   const normalizedComment = normalizeApprovalComment(body.comment);
   if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
   if (action !== 'confirm' && normalizedComment.value) {
     return bad(c, 'approval_comment_requires_confirm', 422);
   }
-  const approvalComment = normalizedComment.value;
+  const defaultComment = normalizeApprovalComment(booking.confirmation_message_extra).value;
+  const approvalComment = action === 'confirm'
+    ? (hasApprovalComment ? normalizedComment.value : defaultComment)
+    : undefined;
   if (!canTransition(booking.status as never, action)) return bad(c, 'invalid_state', 409);
   const next = nextStatus(booking.status as never, action);
 

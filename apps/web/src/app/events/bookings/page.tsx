@@ -308,7 +308,7 @@ function BookingsInner() {
   function openApprovalDialog(bookings: EventBookingItem[]) {
     const targets = bookings.filter((booking) => booking.status === 'requested')
     if (targets.length === 0) return
-    setApprovalComment('')
+    setApprovalComment(event?.confirmation_message_extra ?? '')
     setApprovalDialog({
       bookingIds: targets.map((booking) => booking.id),
       targetCount: targets.length,
@@ -317,7 +317,7 @@ function BookingsInner() {
 
   async function submitApproval() {
     if (!selectedAccountId || !eventId || !approvalDialog) return
-    const comment = approvalComment.trim() || undefined
+    const comment = approvalComment.trim()
     setBusy(true)
     setError(null)
     try {
@@ -895,6 +895,11 @@ function BookingsInner() {
                 保護者へ送るコメント
                 <span className="ml-1 text-xs font-normal text-gray-500">任意</span>
               </label>
+              {event?.confirmation_message_extra && (
+                <p className="mt-1 text-xs text-gray-500">
+                  イベント設定の既定文を読み込みました。この承認だけ内容を変更できます。
+                </p>
+              )}
               <textarea
                 id="approval-comment"
                 value={approvalComment}

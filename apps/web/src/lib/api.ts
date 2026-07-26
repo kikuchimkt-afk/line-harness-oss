@@ -1580,6 +1580,7 @@ export interface EventListItem {
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  confirmation_message_extra?: string | null;
   is_published: number;
   sort_order: number;
   created_at: string;
@@ -1607,6 +1608,7 @@ export interface EventDetail {
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  confirmation_message_extra?: string | null;
   is_published: number;
   sort_order: number;
   booking_form_fields?: EventBookingFormField[] | string | null;
