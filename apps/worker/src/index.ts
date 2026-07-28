@@ -641,15 +641,16 @@ async function scheduled(
     console.error('event-booking-reminders error:', e);
   }
 
-  // Event-booking expirer — 6h cron tick.
+  // Event-booking cleanup — approval requests stay pending until an operator
+  // decides; only expired duplicate-submit keys are purged on this tick.
   if (event.cron === '0 */6 * * *') {
     try {
       const result = await runEventBookingExpirer(env.DB, { now: new Date() });
       console.log(
-        `[event-booking-expirer] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
+        `[event-booking-cleanup] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
       );
     } catch (e) {
-      console.error('event-booking-expirer error:', e);
+      console.error('event-booking-cleanup error:', e);
     }
   }
 

@@ -75,7 +75,7 @@ function memDB(state: { bookings: BookingRow[]; reminders: ReminderRow[]; idem: 
 }
 
 describe('runEventBookingExpirer', () => {
-  test('expires requested bookings older than 24h', async () => {
+  test('keeps requested bookings pending even when older than 24h', async () => {
     const now = new Date('2026-05-09T12:00:00Z');
     const stale = '2026-05-08T11:00:00Z'; // > 24h ago
     const fresh = '2026-05-09T11:30:00Z'; // 30min ago
@@ -88,12 +88,12 @@ describe('runEventBookingExpirer', () => {
       idem: [{ key: 'k1', expires_at: '2026-05-09T00:00:00Z' }],
     };
     const result = await runEventBookingExpirer(memDB(state), { now });
-    expect(result.expired).toBe(1);
-    expect(state.bookings[0].status).toBe('expired');
+    expect(result.expired).toBe(0);
+    expect(state.bookings[0].status).toBe('requested');
     expect(state.bookings[1].status).toBe('requested');
   });
 
-  test('cancels related pending reminders', async () => {
+  test('does not cancel reminders for pending approval requests', async () => {
     const now = new Date('2026-05-09T12:00:00Z');
     const state = {
       bookings: [{ id: 'b1', status: 'requested', requested_at: '2026-05-08T00:00:00Z', decided_at: null, updated_at: null }],
@@ -105,7 +105,7 @@ describe('runEventBookingExpirer', () => {
       idem: [],
     };
     await runEventBookingExpirer(memDB(state), { now });
-    expect(state.reminders[0].status).toBe('cancelled');
+    expect(state.reminders[0].status).toBe('pending');
     expect(state.reminders[1].status).toBe('sent');
     expect(state.reminders[2].status).toBe('pending');
   });
