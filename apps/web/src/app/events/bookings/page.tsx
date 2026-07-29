@@ -160,9 +160,33 @@ function safeFileName(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, '_').trim() || 'event-bookings'
 }
 
-interface ApprovalDialogState {
+interface DecisionDialogState {
   bookingIds: string[]
   targetCount: number
+  action: 'confirm' | 'reject'
+}
+
+function dateTimeLocalValue(date: Date): string {
+  const offsetMs = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16)
+}
+
+function defaultScheduledNotificationTime(now = new Date()): string {
+  const next = new Date(now)
+  const hour = next.getHours()
+  if (hour >= 21) {
+    next.setDate(next.getDate() + 1)
+    next.setHours(9, 0, 0, 0)
+  } else if (hour < 8) {
+    next.setHours(9, 0, 0, 0)
+  } else {
+    next.setMinutes(Math.ceil((next.getMinutes() + 15) / 30) * 30, 0, 0)
+    if (next.getHours() >= 21) {
+      next.setDate(next.getDate() + 1)
+      next.setHours(9, 0, 0, 0)
+    }
+  }
+  return dateTimeLocalValue(next)
 }
 
 function BookingsInner() {
@@ -179,8 +203,13 @@ function BookingsInner() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [approvalDialog, setApprovalDialog] = useState<ApprovalDialogState | null>(null)
+  const [decisionDialog, setDecisionDialog] = useState<DecisionDialogState | null>(null)
   const [approvalComment, setApprovalComment] = useState('')
+  const [notificationMode, setNotificationMode] = useState<'now' | 'scheduled'>('now')
+  const [notificationScheduledAt, setNotificationScheduledAt] = useState(
+    () => defaultScheduledNotificationTime(),
+  )
+  const [notificationDisabled, setNotificationDisabled] = useState(false)
 
   const refresh = useCallback(async () => {
     if (!selectedAccountId || !eventId) return
@@ -305,39 +334,72 @@ function BookingsInner() {
     URL.revokeObjectURL(url)
   }
 
-  function openApprovalDialog(bookings: EventBookingItem[]) {
+  function openDecisionDialog(
+    bookings: EventBookingItem[],
+    action: 'confirm' | 'reject',
+  ) {
     const targets = bookings.filter((booking) => booking.status === 'requested')
     if (targets.length === 0) return
-    setApprovalComment(event?.confirmation_message_extra ?? '')
-    setApprovalDialog({
+    setApprovalComment(action === 'confirm' ? event?.confirmation_message_extra ?? '' : '')
+    setNotificationMode('now')
+    setNotificationScheduledAt(defaultScheduledNotificationTime())
+    setNotificationDisabled(false)
+    setDecisionDialog({
       bookingIds: targets.map((booking) => booking.id),
       targetCount: targets.length,
+      action,
     })
   }
 
-  async function submitApproval() {
-    if (!selectedAccountId || !eventId || !approvalDialog) return
-    const comment = approvalComment.trim()
+  function openApprovalDialog(bookings: EventBookingItem[]) {
+    openDecisionDialog(bookings, 'confirm')
+  }
+
+  function closeDecisionDialog() {
+    setDecisionDialog(null)
+    setApprovalComment('')
+    setNotificationMode('now')
+    setNotificationDisabled(false)
+  }
+
+  async function submitDecision() {
+    if (!selectedAccountId || !eventId || !decisionDialog) return
+    const note = approvalComment.trim()
+    let notifyAt: string | undefined
+    if (notificationMode === 'scheduled') {
+      const parsed = new Date(notificationScheduledAt)
+      if (!notificationScheduledAt || !Number.isFinite(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+        setError('送信日時は現在より後の日時を指定してください。')
+        return
+      }
+      notifyAt = parsed.toISOString()
+    }
+    const notification = {
+      notify_at: notifyAt,
+      notification_disabled: notificationDisabled,
+    }
     setBusy(true)
     setError(null)
     try {
-      if (approvalDialog.bookingIds.length === 1) {
+      if (decisionDialog.bookingIds.length === 1) {
         await eventsApi.decideBooking(
           selectedAccountId,
           eventId,
-          approvalDialog.bookingIds[0],
-          'confirm',
-          undefined,
-          comment,
+          decisionDialog.bookingIds[0],
+          decisionDialog.action,
+          decisionDialog.action === 'reject' ? note || undefined : undefined,
+          decisionDialog.action === 'confirm' ? note : undefined,
+          notification,
         )
       } else {
         const result = await eventsApi.bulkDecideBookings(
           selectedAccountId,
           eventId,
-          approvalDialog.bookingIds,
-          'confirm',
-          undefined,
-          comment,
+          decisionDialog.bookingIds,
+          decisionDialog.action,
+          decisionDialog.action === 'reject' ? note || undefined : undefined,
+          decisionDialog.action === 'confirm' ? note : undefined,
+          notification,
         )
         if (result.skipped > 0) {
           window.alert(
@@ -345,27 +407,7 @@ function BookingsInner() {
           )
         }
       }
-      setApprovalDialog(null)
-      setApprovalComment('')
-      await refresh()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function decide(id: string, action: 'reject') {
-    if (!selectedAccountId || !eventId) return
-    let reason: string | undefined
-    if (action === 'reject') {
-      const r = window.prompt('拒否理由（任意・admin内部メモ。友だちには固定文面）')
-      if (r === null) return
-      reason = r || undefined
-    }
-    setBusy(true)
-    try {
-      await eventsApi.decideBooking(selectedAccountId, eventId, id, action, reason)
+      closeDecisionDialog()
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -378,37 +420,7 @@ function BookingsInner() {
     if (!selectedAccountId || !eventId) return
     const targets = bookings.filter((booking) => booking.status === 'requested')
     if (targets.length === 0) return
-    if (action === 'confirm') {
-      openApprovalDialog(targets)
-      return
-    }
-    let reason: string | undefined
-    const r = window.prompt('まとめて拒否する理由（任意・admin内部メモ。友だちには固定文面）')
-    if (r === null) return
-    reason = r || undefined
-    const ok = window.confirm(
-      `${targets.length}件をまとめて拒否します。\n同じ友だちに複数の予約がある場合、LINE通知は1通にまとまります。\nよろしいですか？`,
-    )
-    if (!ok) return
-    setBusy(true)
-    setError(null)
-    try {
-      const result = await eventsApi.bulkDecideBookings(
-        selectedAccountId,
-        eventId,
-        targets.map((booking) => booking.id),
-        action,
-        reason,
-      )
-      await refresh()
-      if (result.skipped > 0) {
-        window.alert(`${result.updated}件を更新しました。${result.skipped}件はすでに処理済みのためスキップしました。`)
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
+    openDecisionDialog(targets, action)
   }
 
   async function adminCancel(id: string) {
@@ -603,7 +615,7 @@ function BookingsInner() {
                               承認
                             </button>
                             <button
-                              onClick={() => decide(b.id, 'reject')}
+                              onClick={() => openDecisionDialog([b], 'reject')}
                               disabled={busy}
                               className="px-3 py-1 bg-gray-500 text-white rounded-lg text-xs font-medium hover:bg-gray-600 disabled:opacity-50"
                             >
@@ -824,7 +836,7 @@ function BookingsInner() {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => decide(booking.id, 'reject')}
+                                    onClick={() => openDecisionDialog([booking], 'reject')}
                                     disabled={busy}
                                     className="rounded-lg bg-gray-500 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600 disabled:opacity-50"
                                   >
@@ -873,29 +885,31 @@ function BookingsInner() {
         )}
       </div>
 
-      {approvalDialog && typeof document !== 'undefined' && createPortal(
+      {decisionDialog && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/35 p-4"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="approval-comment-title"
+          aria-labelledby="decision-title"
         >
-          <div className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-lg border border-pink-100 bg-white p-5 shadow-xl">
-            <h2 id="approval-comment-title" className="text-lg font-bold text-gray-900">
-              予約を承認する
+          <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg border border-pink-100 bg-white p-5 shadow-xl">
+            <h2 id="decision-title" className="text-lg font-bold text-gray-900">
+              予約を{decisionDialog.action === 'confirm' ? '承認' : '拒否'}する
             </h2>
             <p className="mt-1 text-sm text-gray-600">
-              {approvalDialog.targetCount === 1
-                ? 'この予約の確定メッセージを送ります。'
-                : `${approvalDialog.targetCount}件の予約を承認します。同じ友だちへの通知は1通にまとまります。`}
+              {decisionDialog.targetCount === 1
+                ? `この予約の${decisionDialog.action === 'confirm' ? '確定' : '拒否'}メッセージを送ります。`
+                : `${decisionDialog.targetCount}件の予約をまとめて${decisionDialog.action === 'confirm' ? '承認' : '拒否'}します。同じ友だちへの通知は1通にまとまります。`}
             </p>
 
             <div className="mt-5">
               <label htmlFor="approval-comment" className="block text-sm font-medium text-gray-800">
-                保護者へ送るコメント
+                {decisionDialog.action === 'confirm'
+                  ? '保護者へ送るコメント'
+                  : '拒否理由（管理者用メモ）'}
                 <span className="ml-1 text-xs font-normal text-gray-500">任意</span>
               </label>
-              {event?.confirmation_message_extra && (
+              {decisionDialog.action === 'confirm' && event?.confirmation_message_extra && (
                 <p className="mt-1 text-xs text-gray-500">
                   イベント設定の既定文を読み込みました。この承認だけ内容を変更できます。
                 </p>
@@ -907,26 +921,95 @@ function BookingsInner() {
                 maxLength={2000}
                 rows={7}
                 autoFocus
-                placeholder={'例：事前にこちらをご確認ください。\nhttps://example.com/preparation'}
+                placeholder={
+                  decisionDialog.action === 'confirm'
+                    ? '例：事前にこちらをご確認ください。\nhttps://example.com/preparation'
+                    : '例：定員に達したため（この内容は友だちには表示されません）'
+                }
                 className="mt-2 w-full resize-y rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-pink-400 focus:ring-2 focus:ring-pink-100"
               />
               <div className="mt-1 flex items-start justify-between gap-3 text-xs text-gray-500">
-                <p>入力したURLは、LINE上でタップできるリンクになります。</p>
+                <p>
+                  {decisionDialog.action === 'confirm'
+                    ? '入力したURLは、LINE上でタップできるリンクになります。'
+                    : '友だちには固定の拒否メッセージが送られます。'}
+                </p>
                 <span className="shrink-0">{approvalComment.length} / 2000</span>
               </div>
             </div>
 
+            <fieldset className="mt-5 rounded-lg border border-pink-100 bg-pink-50/40 p-4">
+              <legend className="px-1 text-sm font-medium text-gray-800">LINE連絡の送信タイミング</legend>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNotificationMode('now')}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                    notificationMode === 'now'
+                      ? 'border-pink-400 bg-pink-100 text-pink-800'
+                      : 'border-gray-200 bg-white text-gray-700 hover:bg-pink-50'
+                  }`}
+                >
+                  今すぐ送る
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNotificationMode('scheduled')}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                    notificationMode === 'scheduled'
+                      ? 'border-pink-400 bg-pink-100 text-pink-800'
+                      : 'border-gray-200 bg-white text-gray-700 hover:bg-pink-50'
+                  }`}
+                >
+                  日時を指定
+                </button>
+              </div>
+
+              {notificationMode === 'scheduled' && (
+                <div className="mt-3">
+                  <label htmlFor="notification-scheduled-at" className="block text-xs font-medium text-gray-700">
+                    送信日時
+                  </label>
+                  <input
+                    id="notification-scheduled-at"
+                    type="datetime-local"
+                    value={notificationScheduledAt}
+                    min={dateTimeLocalValue(new Date(Date.now() + 60_000))}
+                    onChange={(event) => setNotificationScheduledAt(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-100"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    5分間隔で送信を確認するため、指定時刻から最大5分ほど遅れる場合があります。
+                  </p>
+                </div>
+              )}
+
+              <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-green-100 bg-green-50/70 p-3">
+                <input
+                  type="checkbox"
+                  checked={notificationDisabled}
+                  onChange={(event) => setNotificationDisabled(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-pink-500"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-gray-800">
+                    通知音を鳴らさず送る
+                  </span>
+                  <span className="mt-0.5 block text-xs text-gray-600">
+                    メッセージは通常どおり届きますが、端末のプッシュ通知や通知音を出しません。
+                  </span>
+                </span>
+              </label>
+            </fieldset>
+
             <div className="mt-5 rounded-lg border border-green-100 bg-green-50/70 p-3 text-xs text-gray-700">
-              コメントは、イベント名・予約日時・予約履歴URLと一緒に確定メッセージへ追加されます。
+              予約状態はこの操作ですぐに変更されます。LINE連絡だけが、選んだタイミングで送信されます。
             </div>
 
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setApprovalDialog(null)
-                  setApprovalComment('')
-                }}
+                onClick={closeDecisionDialog}
                 disabled={busy}
                 className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
@@ -934,11 +1017,17 @@ function BookingsInner() {
               </button>
               <button
                 type="button"
-                onClick={() => void submitApproval()}
+                onClick={() => void submitDecision()}
                 disabled={busy}
-                className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className={`rounded-lg px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+                  decisionDialog.action === 'confirm'
+                    ? 'bg-green-600 hover:bg-green-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                }`}
               >
-                {busy ? '承認中...' : approvalComment.trim() ? 'コメントを付けて承認' : 'コメントなしで承認'}
+                {busy
+                  ? `${decisionDialog.action === 'confirm' ? '承認' : '拒否'}中...`
+                  : `${decisionDialog.action === 'confirm' ? '承認' : '拒否'}を確定`}
               </button>
             </div>
           </div>

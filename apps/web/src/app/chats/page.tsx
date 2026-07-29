@@ -90,6 +90,29 @@ function formatDatetime(iso: string | null): string {
   })
 }
 
+function dateTimeLocalValue(date: Date): string {
+  const offsetMs = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16)
+}
+
+function defaultScheduledSendTime(now = new Date()): string {
+  const next = new Date(now)
+  const hour = next.getHours()
+  if (hour >= 21) {
+    next.setDate(next.getDate() + 1)
+    next.setHours(9, 0, 0, 0)
+  } else if (hour < 8) {
+    next.setHours(9, 0, 0, 0)
+  } else {
+    next.setMinutes(Math.ceil((next.getMinutes() + 15) / 30) * 30, 0, 0)
+    if (next.getHours() >= 21) {
+      next.setDate(next.getDate() + 1)
+      next.setHours(9, 0, 0, 0)
+    }
+  }
+  return dateTimeLocalValue(next)
+}
+
 function sameYmd(aIso: string, bIso: string): boolean {
   const a = new Date(aIso)
   const b = new Date(bIso)
@@ -356,6 +379,12 @@ export default function ChatsPage() {
   const [error, setError] = useState('')
   const [messageContent, setMessageContent] = useState('')
   const [pendingImage, setPendingImage] = useState<ImageUploaderValue | null>(null)
+  const [deliveryMode, setDeliveryMode] = useState<'now' | 'scheduled'>('now')
+  const [scheduledSendAt, setScheduledSendAt] = useState(
+    () => defaultScheduledSendTime(),
+  )
+  const [notificationDisabled, setNotificationDisabled] = useState(false)
+  const [sendFeedback, setSendFeedback] = useState('')
   const [sending, setSending] = useState(false)
   const sendLockRef = useRef(false)
   const [notes, setNotes] = useState('')
@@ -558,6 +587,7 @@ export default function ChatsPage() {
     setSelectedChatId(chatId)
     setMessageContent('')
     setPendingImage(null)
+    setSendFeedback('')
   }
 
   const triggerLoadingAnimation = useCallback(async (chatId: string) => {
@@ -583,116 +613,118 @@ export default function ChatsPage() {
   const handleSendMessage = async () => {
     if (!selectedChatId || sending || sendLockRef.current) return
     if (!messageContent.trim() && !pendingImage) return
-    const sendingChatId = selectedChatId  // capture the chat id for this send
+
+    const isScheduled = deliveryMode === 'scheduled'
+    const scheduledDate = isScheduled ? new Date(scheduledSendAt) : null
+    if (
+      isScheduled
+      && (!scheduledDate
+        || Number.isNaN(scheduledDate.getTime())
+        || scheduledDate.getTime() <= Date.now())
+    ) {
+      setError('送信日時は現在より後の日時を指定してください。')
+      return
+    }
+
+    const sendingChatId = selectedChatId
+    const deliveryOptions = {
+      scheduled_at: scheduledDate?.toISOString() ?? null,
+      notification_disabled: notificationDisabled,
+    }
     sendLockRef.current = true
     setSending(true)
+    setError('')
+    setSendFeedback('')
+
+    const applyImmediateMessage = (
+      messageType: 'text' | 'image',
+      content: string,
+      sentAt: string,
+    ) => {
+      setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
+        ...prev,
+        lastMessageAt: sentAt,
+        status: 'in_progress',
+        messages: [
+          ...(prev.messages ?? []),
+          {
+            id: crypto.randomUUID(),
+            direction: 'outgoing',
+            messageType,
+            content,
+            source: 'manual',
+            createdAt: sentAt,
+          },
+        ],
+      } : prev)
+      setChats((prev) => {
+        if (!prev.some((chat) => chat.id === sendingChatId)) return prev
+        const updated = prev.map((chat) => chat.id === sendingChatId ? {
+          ...chat,
+          lastMessageAt: sentAt,
+          status: 'in_progress' as const,
+          lastMessageContent: messageType === 'image' ? '[画像]' : content,
+          lastMessageDirection: 'outgoing' as const,
+          lastMessageType: messageType,
+        } : chat)
+        let filtered = statusFilterRef.current === 'all'
+          ? updated
+          : updated.filter((chat) => chat.status === statusFilterRef.current)
+        if (unansweredOnlyRef.current) {
+          filtered = filtered.filter((chat) => chat.id !== sendingChatId)
+        }
+        return [...filtered].sort((a, b) => {
+          const at = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
+          const bt = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
+          return bt - at
+        })
+      })
+    }
+
     try {
-      const now = new Date().toISOString()
-      // --- Image send path (runs first when image is present) ---
       if (pendingImage && pendingImage.mode === 'line-image') {
         const imgPayload = JSON.stringify({
           originalContentUrl: pendingImage.originalContentUrl,
           previewImageUrl: pendingImage.previewImageUrl,
         })
-        await api.chats.send(sendingChatId, { messageType: 'image', content: imgPayload }, { accountId: selectedAccountId || undefined })
+        await api.chats.send(
+          sendingChatId,
+          { messageType: 'image', content: imgPayload, ...deliveryOptions },
+          { accountId: selectedAccountId || undefined },
+        )
         setPendingImage(null)
-        // Optimistic update for image
-        setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
-          ...prev,
-          lastMessageAt: now,
-          status: 'in_progress',
-          messages: [
-            ...(prev.messages ?? []),
-            {
-              id: crypto.randomUUID(),
-              direction: 'outgoing',
-              messageType: 'image',
-              content: imgPayload,
-              source: 'manual',
-              createdAt: now,
-            },
-          ],
-        } : prev)
-        setChats((prev) => {
-          const exists = prev.some((c) => c.id === sendingChatId)
-          if (!exists) return prev
-          const currentFilter = statusFilterRef.current
-          const currentUnansweredOnly = unansweredOnlyRef.current
-          const updated = prev.map((c) => c.id === sendingChatId ? {
-            ...c,
-            lastMessageAt: now,
-            status: 'in_progress' as const,
-            lastMessageContent: '[画像]',
-            lastMessageDirection: 'outgoing' as const,
-            lastMessageType: 'image' as const,
-          } : c)
-          let filtered = currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter)
-          if (currentUnansweredOnly) {
-            // 未対応モードでは、自分が返信したばかりの chat はもう未対応ではないのでリストから除外
-            filtered = filtered.filter((c) => c.id !== sendingChatId)
-          }
-          return [...filtered].sort((a, b) => {
-            const at = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
-            const bt = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
-            return bt - at
-          })
-        })
+        if (!isScheduled) {
+          applyImmediateMessage('image', imgPayload, new Date().toISOString())
+        }
       }
-      // --- Text send path (runs independently — both paths execute when both image and text are present) ---
+
       if (messageContent.trim()) {
         const content = messageContent.trim()
-        await api.chats.send(sendingChatId, { content }, { accountId: selectedAccountId || undefined })
+        await api.chats.send(
+          sendingChatId,
+          { content, ...deliveryOptions },
+          { accountId: selectedAccountId || undefined },
+        )
         setMessageContent('')
-        // Optimistic update: append message locally instead of refetching (prevents scroll jump / full reload feel)
-        // Only mutate chatDetail if it still corresponds to the chat we just sent to
-        setChatDetail((prev) => (prev && prev.id === sendingChatId) ? {
-          ...prev,
-          lastMessageAt: now,
-          status: 'in_progress',
-          messages: [
-            ...(prev.messages ?? []),
-            {
-              id: crypto.randomUUID(),
-              direction: 'outgoing',
-              messageType: 'text',
-              content,
-              source: 'manual',
-              createdAt: now,
-            },
-          ],
-        } : prev)
-        setChats((prev) => {
-          // Skip reconciliation if the list no longer contains this chat (e.g. tab changed mid-send)
-          const exists = prev.some((c) => c.id === sendingChatId)
-          if (!exists) return prev
-          const currentFilter = statusFilterRef.current
-          const currentUnansweredOnly = unansweredOnlyRef.current
-          const updated = prev.map((c) => c.id === sendingChatId ? {
-            ...c,
-            lastMessageAt: now,
-            status: 'in_progress' as const,
-            // 一覧の preview も即時更新する。incoming 優先ロジックで上書きされ得るが、
-            // 楽観 UI では「operator が今送った文面」が一瞬見えるのが期待動作。
-            // 次回 loadChats() で server 側の真の最新 (incoming 優先) に reconcile される。
-            lastMessageContent: content,
-            lastMessageDirection: 'outgoing' as const,
-            lastMessageType: 'text' as const,
-          } : c)
-          // Drop rows that no longer match the current tab (e.g. replying from 未読 moves chat to in_progress)
-          let filtered = currentFilter === 'all' ? updated : updated.filter((c) => c.status === currentFilter)
-          if (currentUnansweredOnly) {
-            // 未対応モードでは、自分が返信したばかりの chat はもう未対応ではないのでリストから除外
-            filtered = filtered.filter((c) => c.id !== sendingChatId)
-          }
-          return [...filtered].sort((a, b) => {
-            const at = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
-            const bt = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
-            return bt - at
-          })
-        })
+        if (!isScheduled) {
+          applyImmediateMessage('text', content, new Date().toISOString())
+        }
+      }
+
+      if (isScheduled && scheduledDate) {
+        setSendFeedback(
+          `${scheduledDate.toLocaleString('ja-JP', {
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })} に送信予約しました。`,
+        )
+      } else if (notificationDisabled) {
+        setSendFeedback('通知音なしで送信しました。')
       }
     } catch {
-      setError('メッセージの送信に失敗しました。')
+      setError('メッセージの送信または送信予約に失敗しました。')
     } finally {
       setSending(false)
       sendLockRef.current = false
@@ -1103,6 +1135,65 @@ export default function ChatsPage() {
                     <span>Shift+Enter</span>
                   </label>
                 </div>
+                <div className="mb-3 rounded-lg border border-pink-200 bg-pink-50/60 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-gray-700">送信タイミング</span>
+                    <button
+                      type="button"
+                      onClick={() => setDeliveryMode('now')}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium ${
+                        deliveryMode === 'now'
+                          ? 'border-pink-400 bg-pink-100 text-pink-800'
+                          : 'border-gray-200 bg-white text-gray-600'
+                      }`}
+                    >
+                      今すぐ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeliveryMode('scheduled')
+                        setScheduledSendAt(defaultScheduledSendTime())
+                      }}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium ${
+                        deliveryMode === 'scheduled'
+                          ? 'border-pink-400 bg-pink-100 text-pink-800'
+                          : 'border-gray-200 bg-white text-gray-600'
+                      }`}
+                    >
+                      日時を指定
+                    </button>
+                    {deliveryMode === 'scheduled' && (
+                      <input
+                        type="datetime-local"
+                        value={scheduledSendAt}
+                        min={dateTimeLocalValue(new Date(Date.now() + 60_000))}
+                        onChange={(event) => setScheduledSendAt(event.target.value)}
+                        className="rounded-md border border-pink-200 bg-white px-2 py-1.5 text-xs text-gray-800"
+                      />
+                    )}
+                    <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={notificationDisabled}
+                        onChange={(event) => setNotificationDisabled(event.target.checked)}
+                        className="accent-pink-500"
+                      />
+                      通知音なし
+                    </label>
+                  </div>
+                  <p className="mt-2 text-[11px] text-gray-500">
+                    「通知音なし」でもメッセージは届きます。相手の端末で通知音やプッシュ通知を鳴らしません。
+                  </p>
+                  {deliveryMode === 'scheduled' && (
+                    <p className="mt-1 text-[11px] text-gray-500">
+                      5分間隔で送信を確認するため、指定時刻から最大5分ほど遅れる場合があります。
+                    </p>
+                  )}
+                  {sendFeedback && (
+                    <p className="mt-2 text-xs font-medium text-emerald-700">{sendFeedback}</p>
+                  )}
+                </div>
                 <div className="mb-2">
                   <ImageUploader
                     mode="line-image"
@@ -1143,7 +1234,11 @@ export default function ChatsPage() {
                     className="px-4 py-2 text-sm font-medium text-white rounded-lg transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ backgroundColor: '#06C755' }}
                   >
-                    {sending ? '送信中...' : '送信'}
+                    {sending
+                      ? '処理中...'
+                      : deliveryMode === 'scheduled'
+                        ? '送信予約'
+                        : '送信'}
                   </button>
                 </div>
               </div>

@@ -74,4 +74,23 @@ describe('notification message history', () => {
     expect(records[0][2]).toContain('イベント申込みを受け付けました');
     expect(records[0][3]).toBe('account-2');
   });
+
+  test('passes the muted-notification option to LINE', async () => {
+    await sendEventBookingNotification({
+      channelAccessToken: 'token',
+      toLineUserId: 'line-user',
+      kind: 'confirmed',
+      notificationDisabled: true,
+      ctx: {
+        eventName: '英検オンライン勉強会',
+        startsAtJst: '2026-07-25 16:00',
+      },
+    });
+
+    expect(pushMessage).toHaveBeenCalledWith(
+      'line-user',
+      [expect.objectContaining({ type: 'text' })],
+      { notificationDisabled: true },
+    );
+  });
 });

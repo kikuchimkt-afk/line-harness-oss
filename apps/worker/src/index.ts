@@ -18,6 +18,8 @@ import { processInsightFetch } from './services/insight-fetcher.js';
 import { processDueReminders } from './services/booking-reminders.js';
 import { runExpirer } from './services/booking-expirer.js';
 import { processDueEventReminders } from './services/event-booking-reminders.js';
+import { processDueEventBookingDecisionNotifications } from './services/event-booking-decision-notifications.js';
+import { processDueScheduledChatMessages } from './services/scheduled-chat-messages.js';
 import { runEventBookingExpirer } from './services/event-booking-expirer.js';
 import { sendEventBookingNotification } from './services/event-booking-notifier.js';
 import { sendBookingNotification } from './services/booking-notifier.js';
@@ -639,6 +641,36 @@ async function scheduled(
     }
   } catch (e) {
     console.error('event-booking-reminders error:', e);
+  }
+
+  // Scheduled approval/rejection notices use the same five-minute cron tick.
+  try {
+    const result = await processDueEventBookingDecisionNotifications(env.DB, {
+      now: new Date(),
+      sender: sendEventBookingNotification,
+    });
+    if (result.sent + result.failed > 0) {
+      console.log(
+        `[event-booking-decision-notifications] sent=${result.sent} failed=${result.failed}`,
+      );
+    }
+  } catch (e) {
+    console.error('event-booking-decision-notifications error:', e);
+  }
+
+  // Scheduled operator-chat messages use the same five-minute cron tick.
+  try {
+    const result = await processDueScheduledChatMessages(env.DB, {
+      now: new Date(),
+      defaultChannelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
+    });
+    if (result.sent + result.failed > 0) {
+      console.log(
+        `[scheduled-chat-messages] sent=${result.sent} failed=${result.failed}`,
+      );
+    }
+  } catch (e) {
+    console.error('scheduled-chat-messages error:', e);
   }
 
   // Event-booking cleanup — approval requests stay pending until an operator

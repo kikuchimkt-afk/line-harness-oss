@@ -191,7 +191,7 @@ CREATE TABLE "broadcasts" (
   sent_at            TEXT,
   total_count        INTEGER NOT NULL DEFAULT 0,
   success_count      INTEGER NOT NULL DEFAULT 0,
-  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   line_account_id    TEXT,
   alt_text           TEXT,
   line_request_id    TEXT,
@@ -201,8 +201,10 @@ CREATE TABLE "broadcasts" (
   account_ids        TEXT CHECK (account_ids IS NULL OR json_valid(account_ids)),
   dedup_priority     TEXT CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)),
   target_friend_ids  TEXT CHECK (target_friend_ids IS NULL OR json_valid(target_friend_ids)),
-  failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids))
-, dedup_progress TEXT, batch_lock_at TEXT);
+  failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)),
+  dedup_progress     TEXT CHECK (dedup_progress IS NULL OR json_valid(dedup_progress)),
+  batch_lock_at      TEXT
+);
 
 CREATE TABLE calendar_bookings (
   id             TEXT PRIMARY KEY,
@@ -221,13 +223,14 @@ CREATE TABLE calendar_bookings (
 CREATE TABLE chats (
   id            TEXT PRIMARY KEY,
   friend_id     TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
+  line_account_id TEXT,
   operator_id   TEXT REFERENCES operators (id) ON DELETE SET NULL,
   status        TEXT NOT NULL DEFAULT 'unread' CHECK (status IN ('unread', 'in_progress', 'resolved')),
   notes         TEXT,
   last_message_at TEXT,
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
-, line_account_id TEXT);
+);
 
 CREATE TABLE conversion_events (
   id                  TEXT PRIMARY KEY,
@@ -258,6 +261,26 @@ CREATE TABLE entry_routes (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 , pool_id TEXT REFERENCES traffic_pools (id) ON DELETE SET NULL, intro_template_id TEXT REFERENCES message_templates (id) ON DELETE SET NULL, run_account_friend_add_scenarios INTEGER NOT NULL DEFAULT 1);
+
+CREATE TABLE event_booking_decision_notifications (
+  id                     TEXT PRIMARY KEY,
+  line_account_id        TEXT NOT NULL,
+  event_id               TEXT NOT NULL,
+  friend_id              TEXT NOT NULL,
+  kind                   TEXT NOT NULL CHECK (kind IN ('confirmed','rejected')),
+  context_json           TEXT NOT NULL CHECK (json_valid(context_json)),
+  scheduled_at           TEXT NOT NULL,
+  notification_disabled  INTEGER NOT NULL DEFAULT 0 CHECK (notification_disabled IN (0, 1)),
+  status                 TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','sent','failed','failed_permanent','cancelled')),
+  retry_count            INTEGER NOT NULL DEFAULT 0,
+  sent_at                TEXT,
+  last_error             TEXT,
+  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
+  FOREIGN KEY (event_id) REFERENCES events(id),
+  FOREIGN KEY (friend_id) REFERENCES friends(id)
+);
 
 CREATE TABLE event_booking_idempotency_keys (
   key              TEXT PRIMARY KEY,
@@ -296,7 +319,7 @@ CREATE TABLE event_bookings (
   cancelled_at          TEXT,
   cancelled_by          TEXT CHECK (cancelled_by IN ('friend','admin','system')),
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')), identity_key TEXT,
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')), identity_key TEXT, form_answers TEXT NOT NULL DEFAULT '{}',
   FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
   FOREIGN KEY (event_id) REFERENCES events(id),
   FOREIGN KEY (slot_id) REFERENCES event_slots(id),
@@ -311,10 +334,9 @@ CREATE TABLE event_slots (
   capacity    INTEGER,
   is_active   INTEGER NOT NULL DEFAULT 1,
   sort_order  INTEGER NOT NULL DEFAULT 0,
-  visibility_conditions TEXT CHECK (visibility_conditions IS NULL OR json_valid(visibility_conditions)),
   deleted_at  TEXT,
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')), visibility_conditions TEXT CHECK (visibility_conditions IS NULL OR json_valid(visibility_conditions)),
   FOREIGN KEY (event_id) REFERENCES events(id)
 );
 
@@ -341,7 +363,7 @@ CREATE TABLE events (
   CHECK (target_type IN ('single', 'multi-account-dedup')), account_ids TEXT
   CHECK (account_ids IS NULL OR json_valid(account_ids)), dedup_priority TEXT
   CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)), failed_account_ids TEXT
-  CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)), confirmation_message_extra TEXT, reminder_message_extra TEXT, og_title TEXT, og_description TEXT, og_image_url TEXT,
+  CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)), confirmation_message_extra TEXT, reminder_message_extra TEXT, og_title TEXT, og_description TEXT, og_image_url TEXT, booking_form_fields TEXT NOT NULL DEFAULT '[]',
   FOREIGN KEY (line_account_id) REFERENCES line_accounts(id)
 );
 
@@ -420,19 +442,24 @@ CREATE TABLE friend_tags (
   PRIMARY KEY (friend_id, tag_id)
 );
 
-CREATE TABLE friends (
-  id               TEXT PRIMARY KEY,
-  line_user_id     TEXT NOT NULL,
-  display_name     TEXT,
-  picture_url      TEXT,
-  status_message   TEXT,
-  is_following     INTEGER NOT NULL DEFAULT 1,
-  user_id          TEXT,
-  ig_igsid         TEXT,
-  score            INTEGER NOT NULL DEFAULT 0,
-  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
-, ref_code TEXT, metadata TEXT NOT NULL DEFAULT '{}', line_account_id TEXT REFERENCES line_accounts(id), first_tracked_link_id TEXT REFERENCES tracked_links (id) ON DELETE SET NULL, UNIQUE(line_account_id, line_user_id));
+CREATE TABLE "friends" (
+  id                    TEXT PRIMARY KEY,
+  line_user_id          TEXT NOT NULL,
+  display_name          TEXT,
+  picture_url           TEXT,
+  status_message        TEXT,
+  is_following          INTEGER NOT NULL DEFAULT 1,
+  user_id               TEXT,
+  ig_igsid              TEXT,
+  score                 INTEGER NOT NULL DEFAULT 0,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  ref_code              TEXT,
+  metadata              TEXT NOT NULL DEFAULT '{}',
+  line_account_id       TEXT REFERENCES line_accounts(id),
+  first_tracked_link_id TEXT REFERENCES tracked_links (id) ON DELETE SET NULL,
+  UNIQUE(line_account_id, line_user_id)
+);
 
 CREATE TABLE google_calendar_connections (
   id            TEXT PRIMARY KEY,
@@ -667,6 +694,26 @@ CREATE TABLE scenarios (
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 , line_account_id TEXT);
 
+CREATE TABLE scheduled_chat_messages (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  friend_id TEXT NOT NULL,
+  line_account_id TEXT,
+  message_type TEXT NOT NULL CHECK (message_type IN ('text', 'image', 'flex')),
+  content TEXT NOT NULL,
+  scheduled_at TEXT NOT NULL,
+  notification_disabled INTEGER NOT NULL DEFAULT 0 CHECK (notification_disabled IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'sent', 'failed', 'failed_permanent', 'cancelled')),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  sent_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+  FOREIGN KEY (friend_id) REFERENCES friends(id) ON DELETE CASCADE,
+  FOREIGN KEY (line_account_id) REFERENCES line_accounts(id) ON DELETE CASCADE
+);
+
 CREATE TABLE scoring_rules (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,
@@ -694,6 +741,13 @@ CREATE TABLE staff (
   FOREIGN KEY (line_account_id) REFERENCES line_accounts(id)
 );
 
+CREATE TABLE staff_account_permissions (
+  staff_id        TEXT NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+  line_account_id TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  PRIMARY KEY (staff_id, line_account_id)
+);
+
 CREATE TABLE staff_members (
   id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
@@ -703,13 +757,6 @@ CREATE TABLE staff_members (
   is_active  INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
-);
-
-CREATE TABLE staff_account_permissions (
-  staff_id        TEXT NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
-  line_account_id TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
-  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  PRIMARY KEY (staff_id, line_account_id)
 );
 
 CREATE TABLE staff_menus (
@@ -843,13 +890,13 @@ CREATE INDEX idx_calendar_bookings_friend ON calendar_bookings (friend_id);
 
 CREATE INDEX idx_calendar_bookings_start ON calendar_bookings (start_at);
 
+CREATE INDEX idx_chats_account_friend_created ON chats (line_account_id, friend_id, created_at);
+
 CREATE INDEX idx_chats_friend ON chats (friend_id);
 
 CREATE INDEX idx_chats_operator ON chats (operator_id);
 
 CREATE INDEX idx_chats_status ON chats (status);
-
-CREATE INDEX IF NOT EXISTS idx_chats_account_friend_created ON chats (line_account_id, friend_id, created_at);
 
 CREATE INDEX idx_conversion_events_affiliate ON conversion_events (affiliate_code);
 
@@ -860,6 +907,9 @@ CREATE INDEX idx_conversion_events_point ON conversion_events (conversion_point_
 CREATE INDEX idx_entry_routes_pool ON entry_routes (pool_id);
 
 CREATE INDEX idx_entry_routes_ref ON entry_routes (ref_code);
+
+CREATE INDEX idx_event_booking_decision_notifications_due
+  ON event_booking_decision_notifications (status, scheduled_at);
 
 CREATE INDEX idx_event_booking_idempotency_expires ON event_booking_idempotency_keys (expires_at);
 
@@ -902,6 +952,8 @@ CREATE INDEX idx_friend_scores_friend ON friend_scores (friend_id);
 
 CREATE INDEX idx_friend_tags_tag_id ON friend_tags (tag_id);
 
+CREATE INDEX idx_friends_account_line_user_id ON friends (line_account_id, line_user_id);
+
 CREATE INDEX idx_friends_ig_igsid ON friends (ig_igsid);
 
 CREATE INDEX idx_friends_line_user_id ON friends (line_user_id);
@@ -921,6 +973,8 @@ CREATE INDEX idx_link_clicks_link ON link_clicks (tracked_link_id);
 
 CREATE INDEX idx_menus_account_sort ON menus (line_account_id, sort_order);
 
+CREATE INDEX idx_messages_log_account_friend_created ON messages_log (line_account_id, friend_id, created_at);
+
 CREATE INDEX idx_messages_log_broadcast_id ON messages_log(broadcast_id);
 
 CREATE INDEX idx_messages_log_created_at ON messages_log (created_at);
@@ -930,8 +984,6 @@ CREATE INDEX idx_messages_log_friend_direction_created ON messages_log (friend_i
 CREATE INDEX idx_messages_log_friend_id ON messages_log (friend_id);
 
 CREATE INDEX idx_messages_log_friend_source ON messages_log (friend_id, source);
-
-CREATE INDEX IF NOT EXISTS idx_messages_log_account_friend_created ON messages_log (line_account_id, friend_id, created_at);
 
 CREATE INDEX idx_notifications_created ON notifications (created_at);
 
@@ -953,15 +1005,19 @@ CREATE INDEX idx_rich_menu_pages_group    ON rich_menu_pages(group_id, order_ind
 
 CREATE INDEX idx_scenario_steps_scenario_id ON scenario_steps (scenario_id);
 
+CREATE INDEX idx_scheduled_chat_messages_due
+  ON scheduled_chat_messages(status, scheduled_at);
+
 CREATE INDEX idx_shifts_staff_date ON staff_shifts (staff_id, work_date);
+
+CREATE INDEX idx_staff_account_permissions_account
+  ON staff_account_permissions(line_account_id);
 
 CREATE INDEX idx_staff_account_sort ON staff (line_account_id, sort_order);
 
 CREATE UNIQUE INDEX idx_staff_members_api_key ON staff_members(api_key);
 
 CREATE INDEX idx_staff_members_role ON staff_members(role);
-
-CREATE INDEX idx_staff_account_permissions_account ON staff_account_permissions(line_account_id);
 
 CREATE INDEX idx_stripe_events_friend ON stripe_events (friend_id);
 

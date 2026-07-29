@@ -51,7 +51,14 @@
     "043_events_og.sql",
     "044_forms_og.sql",
     "045_menus_auto_tag.sql",
-    "046_staff_account_permissions.sql"
+    "046_staff_account_permissions.sql",
+    "047_messages_log_account_scope_indexes.sql",
+    "048_account_scoped_friends.sql",
+    "049_broadcast_selected_friends.sql",
+    "050_event_booking_form_fields.sql",
+    "051_event_slot_visibility_conditions.sql",
+    "052_event_booking_decision_notifications.sql",
+    "053_scheduled_chat_messages.sql"
   ],
-  "migrationCount": 52
+  "migrationCount": 59
 }

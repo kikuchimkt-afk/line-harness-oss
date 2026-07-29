@@ -35,6 +35,14 @@ const notifierMocks = {
 };
 vi.mock('../services/event-booking-notifier.js', () => notifierMocks);
 
+const decisionNotificationMocks = {
+  enqueueEventBookingDecisionNotification: vi.fn(),
+};
+vi.mock(
+  '../services/event-booking-decision-notifications.js',
+  () => decisionNotificationMocks,
+);
+
 const adminNotifierMocks = {
   buildEventAdminBookingUrl: vi.fn(
     (base: string | undefined, eventId: string) =>
@@ -207,6 +215,9 @@ function makeEventDb(state: {
               venue_name: e.venue_name,
               venue_url: e.venue_url,
               slot_starts_at: s.starts_at,
+              event_id: b.event_id,
+              friend_id: (b as Record<string, unknown>).friend_id,
+              line_account_id: (b as Record<string, unknown>).line_account_id,
               channel_access_token: la.channel_access_token ?? '',
               liff_id: la.liff_id ?? null,
               line_user_id: f.line_user_id,
@@ -831,6 +842,7 @@ beforeEach(() => {
   for (const fn of Object.values(idempotencyMocks)) fn.mockReset();
   for (const fn of Object.values(reminderMocks)) fn.mockReset();
   for (const fn of Object.values(notifierMocks)) fn.mockReset();
+  for (const fn of Object.values(decisionNotificationMocks)) fn.mockReset();
   for (const fn of Object.values(adminNotifierMocks)) fn.mockReset();
   adminNotifierMocks.buildEventAdminBookingUrl.mockImplementation(
     (base: string | undefined, eventId: string) =>
@@ -2423,6 +2435,71 @@ describe('admin bookings management', () => {
           bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
           approvalComment: '前日までにご確認ください。\nhttps://example.com/guide',
         }),
+      }),
+    );
+  });
+
+  test('POST decide can schedule a muted confirmation notification', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'confirm',
+        notify_at: '2099-05-10T00:00:00.000Z',
+        notification_disabled: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('confirmed');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(
+      decisionNotificationMocks.enqueueEventBookingDecisionNotification,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        eventId: 'e1',
+        friendId: 'f1',
+        kind: 'confirmed',
+        scheduledAt: '2099-05-10T00:00:00.000Z',
+        notificationDisabled: true,
+      }),
+    );
+  });
+
+  test('POST decide passes mute option to an immediate rejection notification', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'reject',
+        reason: '日程の再調整が必要です',
+        notification_disabled: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'rejected',
+        notificationDisabled: true,
       }),
     );
   });

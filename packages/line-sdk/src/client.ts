@@ -75,8 +75,15 @@ export class LineClient {
 
   // ─── Messaging ───────────────────────────────────────────────────────────
 
-  async pushMessage(to: string, messages: Message[]): Promise<unknown> {
+  async pushMessage(
+    to: string,
+    messages: Message[],
+    options?: { notificationDisabled?: boolean },
+  ): Promise<unknown> {
     const body: PushMessageRequest = { to, messages };
+    if (options?.notificationDisabled !== undefined) {
+      body.notificationDisabled = options.notificationDisabled;
+    }
     const { data } = await this.request('POST', '/v2/bot/message/push', body);
     return data;
   }

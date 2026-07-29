@@ -781,9 +781,25 @@ export const api = {
         body: JSON.stringify(data),
       })
     },
-    send: (id: string, data: { content: string; messageType?: string }, params?: { accountId?: string }) => {
+    send: (
+      id: string,
+      data: {
+        content: string
+        messageType?: string
+        scheduled_at?: string | null
+        notification_disabled?: boolean
+      },
+      params?: { accountId?: string },
+    ) => {
       const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
-      return fetchApi<ApiResponse<unknown>>(`/api/chats/${id}/send${query}`, {
+      return fetchApi<ApiResponse<{
+        sent: boolean
+        scheduled: boolean
+        messageId?: string
+        scheduledMessageId?: string
+        scheduledAt?: string
+        notificationDisabled: boolean
+      }>>(`/api/chats/${id}/send${query}`, {
         method: 'POST',
         body: JSON.stringify(data),
       })
@@ -1759,10 +1775,17 @@ export const eventsApi = {
     action: 'confirm' | 'reject',
     reason?: string,
     comment?: string,
+    notification?: {
+      notify_at?: string;
+      notification_disabled?: boolean;
+    },
   ) =>
     fetchApi<EventBookingItem>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}/decide`, accountId),
-      { method: 'POST', body: JSON.stringify({ action, reason, comment }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({ action, reason, comment, ...notification }),
+      },
     ),
   bulkDecideBookings: (
     accountId: string,
@@ -1771,12 +1794,27 @@ export const eventsApi = {
     action: 'confirm' | 'reject',
     reason?: string,
     comment?: string,
+    notification?: {
+      notify_at?: string;
+      notification_disabled?: boolean;
+    },
   ) =>
-    fetchApi<{ ok: true; updated: number; skipped: number }>(
+    fetchApi<{
+      ok: true;
+      updated: number;
+      skipped: number;
+      notification: { mode: 'immediate' | 'scheduled'; notify_at?: string };
+    }>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/bulk-decide`, accountId),
       {
         method: 'POST',
-        body: JSON.stringify({ booking_ids: bookingIds, action, reason, comment }),
+        body: JSON.stringify({
+          booking_ids: bookingIds,
+          action,
+          reason,
+          comment,
+          ...notification,
+        }),
       },
     ),
   adminCancelBooking: (accountId: string, eventId: string, bookingId: string) =>

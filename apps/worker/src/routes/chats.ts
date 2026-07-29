@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Message } from '@line-crm/line-sdk';
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
 import {
   getOperators,
@@ -22,6 +23,10 @@ import {
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
 import { resolveMessageSource } from '../utils/message-source.js';
+import {
+  enqueueScheduledChatMessage,
+  type ScheduledChatMessageType,
+} from '../services/scheduled-chat-messages.js';
 
 const chats = new Hono<Env>();
 
@@ -139,6 +144,50 @@ async function resolveOrCreateChat(db: D1Database, id: string, lineAccountId?: s
     .prepare(`SELECT * FROM chats WHERE friend_id = ? ${chatAccountSql} ORDER BY created_at ASC LIMIT 1`)
     .bind(...byFriendBindings)
     .first<ChatLike>())!;
+}
+
+function normalizeScheduledSendAt(value: unknown, now: Date): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error('scheduled_at must be an ISO date string');
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error('scheduled_at is invalid');
+  }
+  if (parsed.getTime() <= now.getTime()) {
+    throw new Error('scheduled_at must be in the future');
+  }
+  return parsed.toISOString();
+}
+
+function buildOutgoingLineMessage(
+  messageType: ScheduledChatMessageType,
+  content: string,
+): Message {
+  if (messageType === 'text') {
+    return { type: 'text', text: content };
+  }
+  if (messageType === 'image') {
+    const parsed = JSON.parse(content) as {
+      originalContentUrl: string;
+      previewImageUrl: string;
+    };
+    if (!parsed.originalContentUrl || !parsed.previewImageUrl) {
+      throw new Error('image content is invalid');
+    }
+    return {
+      type: 'image',
+      originalContentUrl: parsed.originalContentUrl,
+      previewImageUrl: parsed.previewImageUrl,
+    };
+  }
+  const contents = JSON.parse(content);
+  return {
+    type: 'flex',
+    altText: extractFlexAltText(contents),
+    contents,
+  };
 }
 
 async function resolveFriendAndAccessToken(
@@ -621,8 +670,35 @@ chats.post('/api/chats/:id/send', async (c) => {
     const denied = await denyIfCannotAccessFriend(c, chat.friend_id, lineAccountId);
     if (denied) return denied;
 
-    const body = await c.req.json<{ messageType?: string; content: string }>();
+    const body = await c.req.json<{
+      messageType?: string;
+      content: string;
+      scheduled_at?: string | null;
+      notification_disabled?: boolean;
+    }>();
     if (!body.content) return c.json({ success: false, error: 'content is required' }, 400);
+    if (
+      body.notification_disabled !== undefined
+      && typeof body.notification_disabled !== 'boolean'
+    ) {
+      return c.json(
+        { success: false, error: 'notification_disabled must be boolean' },
+        422,
+      );
+    }
+
+    let scheduledAt: string | null;
+    try {
+      scheduledAt = normalizeScheduledSendAt(body.scheduled_at, new Date());
+    } catch (error) {
+      return c.json(
+        {
+          success: false,
+          error: error instanceof Error ? error.message : 'scheduled_at is invalid',
+        },
+        422,
+      );
+    }
 
     const { friend, accessToken } = await resolveFriendAndAccessToken(
       c.env.DB,
@@ -636,35 +712,68 @@ chats.post('/api/chats/:id/send', async (c) => {
     const { LineClient } = await import('@line-crm/line-sdk');
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
-
-    if (messageType === 'text') {
-      await lineClient.pushTextMessage(friend.line_user_id, body.content);
-    } else if (messageType === 'flex') {
-      const contents = JSON.parse(body.content);
-      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents);
-    } else if (messageType === 'image') {
-      const parsed = JSON.parse(body.content) as {
-        originalContentUrl: string;
-        previewImageUrl: string;
-      };
-      await lineClient.pushImageMessage(
-        friend.line_user_id,
-        parsed.originalContentUrl,
-        parsed.previewImageUrl,
-      );
+    if (!['text', 'image', 'flex'].includes(messageType)) {
+      return c.json({ success: false, error: 'Unsupported message type' }, 400);
     }
+
+    const typedMessageType = messageType as ScheduledChatMessageType;
+    let lineMessage: Message;
+    try {
+      lineMessage = buildOutgoingLineMessage(typedMessageType, body.content);
+    } catch {
+      return c.json({ success: false, error: 'Message content is invalid' }, 400);
+    }
+
+    const effectiveLineAccountId = lineAccountId ?? friend.line_account_id ?? null;
+    if (scheduledAt) {
+      const scheduledMessageId = await enqueueScheduledChatMessage(c.env.DB, {
+        chatId: chat.id,
+        friendId: friend.id,
+        lineAccountId: effectiveLineAccountId,
+        messageType: typedMessageType,
+        content: body.content,
+        scheduledAt,
+        notificationDisabled: body.notification_disabled === true,
+      });
+      return c.json({
+        success: true,
+        data: {
+          sent: false,
+          scheduled: true,
+          scheduledMessageId,
+          scheduledAt,
+          notificationDisabled: body.notification_disabled === true,
+        },
+      });
+    }
+
+    await lineClient.pushMessage(
+      friend.line_user_id,
+      [lineMessage],
+      body.notification_disabled === true
+        ? { notificationDisabled: true }
+        : undefined,
+    );
 
     // メッセージログに記録
     const logId = crypto.randomUUID();
     await c.env.DB
       .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, line_account_id, created_at) VALUES (?, ?, 'outgoing', ?, ?, 'manual', ?, ?)`)
-      .bind(logId, friend.id, messageType, body.content, lineAccountId ?? friend.line_account_id ?? null, jstNow())
+      .bind(logId, friend.id, typedMessageType, body.content, effectiveLineAccountId, jstNow())
       .run();
 
     // チャットの最終メッセージ日時を更新（chat.id を直接使う — friend_id で呼ばれても resolveOrCreateChat 済み）
     await updateChat(c.env.DB, chat.id, { status: 'in_progress', lastMessageAt: jstNow() });
 
-    return c.json({ success: true, data: { sent: true, messageId: logId } });
+    return c.json({
+      success: true,
+      data: {
+        sent: true,
+        scheduled: false,
+        messageId: logId,
+        notificationDisabled: body.notification_disabled === true,
+      },
+    });
   } catch (err) {
     console.error('POST /api/chats/:id/send error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

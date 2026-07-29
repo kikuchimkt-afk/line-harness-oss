@@ -63,6 +63,7 @@ export interface SendEventNotificationParams {
   toLineUserId: string;
   kind: EventNotificationKind;
   ctx: EventNotificationContext;
+  notificationDisabled?: boolean;
   db?: D1Database;
   friendId?: string;
   lineAccountId?: string | null;
@@ -73,7 +74,13 @@ export async function sendEventBookingNotification(
 ): Promise<void> {
   const text = renderEventNotificationText(params.kind, params.ctx);
   const client = new LineClient(params.channelAccessToken);
-  await client.pushMessage(params.toLineUserId, [{ type: 'text', text }]);
+  await client.pushMessage(
+    params.toLineUserId,
+    [{ type: 'text', text }],
+    params.notificationDisabled
+      ? { notificationDisabled: true }
+      : undefined,
+  );
   if (params.db && params.friendId) {
     try {
       await params.db

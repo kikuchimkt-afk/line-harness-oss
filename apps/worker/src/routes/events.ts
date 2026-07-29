@@ -43,6 +43,9 @@ import {
   type EventNotificationKind,
 } from '../services/event-booking-notifier.js';
 import {
+  enqueueEventBookingDecisionNotification,
+} from '../services/event-booking-decision-notifications.js';
+import {
   buildEventAdminBookingUrl,
   notifyEventBookingAdminRecipients,
 } from '../services/event-booking-admin-notifier.js';
@@ -1183,6 +1186,11 @@ function buildEventBookingHistoryUrl(liffId?: string | null): string | null {
 const EVENT_BOOKING_BULK_LIMIT = 50;
 const EVENT_APPROVAL_COMMENT_MAX_LENGTH = 2000;
 
+interface DecisionNotificationOptions {
+  notifyAt?: string;
+  notificationDisabled: boolean;
+}
+
 function normalizeBookingIdList(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > EVENT_BOOKING_BULK_LIMIT) {
     return null;
@@ -1203,6 +1211,40 @@ function normalizeApprovalComment(value: unknown): {
     return { valid: false };
   }
   return normalized ? { valid: true, value: normalized } : { valid: true };
+}
+
+function normalizeDecisionNotificationOptions(
+  notifyAt: unknown,
+  notificationDisabled: unknown,
+  now = new Date(),
+): { valid: true; value: DecisionNotificationOptions } | { valid: false; code: string } {
+  if (
+    notificationDisabled !== undefined &&
+    typeof notificationDisabled !== 'boolean'
+  ) {
+    return { valid: false, code: 'invalid_notification_disabled' };
+  }
+
+  if (notifyAt == null || notifyAt === '') {
+    return {
+      valid: true,
+      value: { notificationDisabled: notificationDisabled === true },
+    };
+  }
+  if (typeof notifyAt !== 'string') {
+    return { valid: false, code: 'invalid_notify_at' };
+  }
+  const parsed = new Date(notifyAt);
+  if (!Number.isFinite(parsed.getTime()) || parsed.getTime() <= now.getTime()) {
+    return { valid: false, code: 'invalid_notify_at' };
+  }
+  return {
+    valid: true,
+    value: {
+      notifyAt: parsed.toISOString(),
+      notificationDisabled: notificationDisabled === true,
+    },
+  };
 }
 
 async function appendBookingInternalNote(
@@ -1248,6 +1290,7 @@ async function sendGroupedBookingNotifications(
   rows: EventBookingNotificationRow[],
   kind: EventNotificationKind,
   approvalComment?: string,
+  options: DecisionNotificationOptions = { notificationDisabled: false },
 ): Promise<void> {
   const groups = new Map<string, EventBookingNotificationRow[]>();
   for (const row of rows) {
@@ -1268,23 +1311,40 @@ async function sendGroupedBookingNotifications(
       .slice()
       .sort((a, b) => a.slot_starts_at.localeCompare(b.slot_starts_at));
     const first = sorted[0];
-    await sendEventBookingNotification({
-      channelAccessToken: first.channel_access_token as string,
-      toLineUserId: first.line_user_id,
-      kind,
-      db,
-      friendId: first.friend_id,
-      lineAccountId: first.line_account_id,
-      ctx: {
-        eventName: first.event_name,
-        startsAtJst: startsAtJst(first.slot_starts_at),
-        startsAtJstList: sorted.map((row) => startsAtJst(row.slot_starts_at)),
-        venueName: first.venue_name,
-        venueUrl: first.venue_url,
-        bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
-        approvalComment,
-      },
-    });
+    const ctx = {
+      eventName: first.event_name,
+      startsAtJst: startsAtJst(first.slot_starts_at),
+      startsAtJstList: sorted.map((row) => startsAtJst(row.slot_starts_at)),
+      venueName: first.venue_name,
+      venueUrl: first.venue_url,
+      bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
+      approvalComment,
+    };
+    if (
+      options.notifyAt &&
+      (kind === 'confirmed' || kind === 'rejected')
+    ) {
+      await enqueueEventBookingDecisionNotification(db, {
+        lineAccountId: first.line_account_id,
+        eventId: first.event_id,
+        friendId: first.friend_id,
+        kind,
+        ctx,
+        scheduledAt: options.notifyAt,
+        notificationDisabled: options.notificationDisabled,
+      });
+    } else {
+      await sendEventBookingNotification({
+        channelAccessToken: first.channel_access_token as string,
+        toLineUserId: first.line_user_id,
+        kind,
+        ctx,
+        notificationDisabled: options.notificationDisabled,
+        db,
+        friendId: first.friend_id,
+        lineAccountId: first.line_account_id,
+      });
+    }
   }
 }
 
@@ -1842,12 +1902,14 @@ async function notifyBookingFriend(
   booking_id: string,
   kind: EventNotificationKind,
   approvalComment?: string,
+  options: DecisionNotificationOptions = { notificationDisabled: false },
 ): Promise<void> {
   try {
     const row = await db
       .prepare(
         `SELECT e.name AS event_name, e.venue_name, e.venue_url,
                 s.starts_at AS slot_starts_at,
+                b.event_id,
                 b.friend_id,
                 b.line_account_id,
                 la.channel_access_token,
@@ -1866,6 +1928,7 @@ async function notifyBookingFriend(
         venue_name: string | null;
         venue_url: string | null;
         slot_starts_at: string;
+        event_id: string;
         friend_id: string;
         line_account_id: string;
         channel_access_token: string;
@@ -1873,22 +1936,39 @@ async function notifyBookingFriend(
         line_user_id: string;
       }>();
     if (!row || !row.channel_access_token) return;
-    await sendEventBookingNotification({
-      channelAccessToken: row.channel_access_token,
-      toLineUserId: row.line_user_id,
-      kind,
-      db,
-      friendId: row.friend_id,
-      lineAccountId: row.line_account_id,
-      ctx: {
-        eventName: row.event_name,
-        startsAtJst: startsAtJst(row.slot_starts_at),
-        venueName: row.venue_name,
-        venueUrl: row.venue_url,
-        bookingHistoryUrl: buildEventBookingHistoryUrl(row.liff_id),
-        approvalComment,
-      },
-    });
+    const ctx = {
+      eventName: row.event_name,
+      startsAtJst: startsAtJst(row.slot_starts_at),
+      venueName: row.venue_name,
+      venueUrl: row.venue_url,
+      bookingHistoryUrl: buildEventBookingHistoryUrl(row.liff_id),
+      approvalComment,
+    };
+    if (
+      options.notifyAt &&
+      (kind === 'confirmed' || kind === 'rejected')
+    ) {
+      await enqueueEventBookingDecisionNotification(db, {
+        lineAccountId: row.line_account_id,
+        eventId: row.event_id,
+        friendId: row.friend_id,
+        kind,
+        ctx,
+        scheduledAt: options.notifyAt,
+        notificationDisabled: options.notificationDisabled,
+      });
+    } else {
+      await sendEventBookingNotification({
+        channelAccessToken: row.channel_access_token,
+        toLineUserId: row.line_user_id,
+        kind,
+        ctx,
+        notificationDisabled: options.notificationDisabled,
+        db,
+        friendId: row.friend_id,
+        lineAccountId: row.line_account_id,
+      });
+    }
   } catch (e) {
     console.error('[event-booking] notify failed', e);
   }
@@ -1905,6 +1985,8 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     action?: string;
     reason?: string;
     comment?: unknown;
+    notify_at?: unknown;
+    notification_disabled?: unknown;
   };
   const bookingIds = normalizeBookingIdList(body.booking_ids);
   if (!bookingIds) return bad(c, 'invalid_booking_ids', 422);
@@ -1917,6 +1999,13 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
   if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
   if (action !== 'confirm' && normalizedComment.value) {
     return bad(c, 'approval_comment_requires_confirm', 422);
+  }
+  const normalizedNotification = normalizeDecisionNotificationOptions(
+    body.notify_at,
+    body.notification_disabled,
+  );
+  if (!normalizedNotification.valid) {
+    return bad(c, normalizedNotification.code, 422);
   }
   const next = nextStatus('requested' as never, action);
   const placeholders = bookingIds.map(() => '?').join(',');
@@ -2004,9 +2093,17 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       updatedRows,
       action === 'confirm' ? 'confirmed' : 'rejected',
       approvalComment,
+      normalizedNotification.value,
     );
   }
-  return c.json({ ok: true, updated: updatedRows.length, skipped });
+  return c.json({
+    ok: true,
+    updated: updatedRows.length,
+    skipped,
+    notification: normalizedNotification.value.notifyAt
+      ? { mode: 'scheduled', notify_at: normalizedNotification.value.notifyAt }
+      : { mode: 'immediate' },
+  });
 });
 
 events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c) => {
@@ -2022,6 +2119,8 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     action?: string;
     reason?: string;
     comment?: unknown;
+    notify_at?: unknown;
+    notification_disabled?: unknown;
   };
   if (body.action !== 'confirm' && body.action !== 'reject') {
     return bad(c, 'invalid_action', 422);
@@ -2032,6 +2131,13 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
   if (!normalizedComment.valid) return bad(c, 'invalid_approval_comment', 422);
   if (action !== 'confirm' && normalizedComment.value) {
     return bad(c, 'approval_comment_requires_confirm', 422);
+  }
+  const normalizedNotification = normalizeDecisionNotificationOptions(
+    body.notify_at,
+    body.notification_disabled,
+  );
+  if (!normalizedNotification.valid) {
+    return bad(c, normalizedNotification.code, 422);
   }
   const defaultComment = normalizeApprovalComment(booking.confirmation_message_extra).value;
   const approvalComment = action === 'confirm'
@@ -2098,6 +2204,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     booking.id,
     action === 'confirm' ? 'confirmed' : 'rejected',
     approvalComment,
+    normalizedNotification.value,
   );
   const updated = await c.env.DB
     .prepare(`SELECT * FROM event_bookings WHERE id = ?`)
