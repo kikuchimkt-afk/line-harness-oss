@@ -9,6 +9,12 @@ import CcPromptButton from '@/components/cc-prompt-button'
 import FlexPreviewComponent from '@/components/flex-preview'
 import FriendInfoSidebar from '@/components/chats/friend-info-sidebar'
 import ChatImageMessage from '@/components/chats/chat-image-message'
+import {
+  getOutgoingMessageStatuses,
+  outgoingMessageStatusDescription,
+  outgoingMessageStatusText,
+  type OutgoingMessageStatus,
+} from '@/components/chats/outgoing-message-status'
 import ImageUploader, { type ImageUploaderValue } from '@/components/shared/image-uploader'
 
 interface Chat {
@@ -153,6 +159,28 @@ function messageBubbleClass(message: Pick<ChatMessage, 'direction' | 'source'>):
   return 'bg-pink-100 text-pink-950 border border-pink-200'
 }
 
+function OutgoingMessageStatusLabel({
+  status,
+  onChatBackground = false,
+}: {
+  status: OutgoingMessageStatus
+  onChatBackground?: boolean
+}) {
+  return (
+    <span
+      className={`font-medium ${
+        onChatBackground
+          ? status === 'replied' ? 'text-white/90' : 'text-white/65'
+          : status === 'replied' ? 'text-emerald-700' : 'text-gray-500'
+      }`}
+      title={outgoingMessageStatusDescription(status)}
+      aria-label={outgoingMessageStatusDescription(status)}
+    >
+      {outgoingMessageStatusText(status)}
+    </span>
+  )
+}
+
 const ccPrompts = [
   {
     title: 'チャット対応テンプレート',
@@ -274,6 +302,8 @@ function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
     return `[${msg.messageType}]`
   }
 
+  const outgoingMessageStatuses = getOutgoingMessageStatuses(messages)
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-4 border-b border-gray-200 flex items-center gap-3">
@@ -300,18 +330,24 @@ function DirectMessagePanel({ friendId, friend, accountId, onBack, onSent }: {
         ) : messages.length === 0 ? (
           <p className="text-center text-gray-400 text-sm">メッセージ履歴がありません</p>
         ) : (
-          messages.map((msg) => (
-            <div key={msg.id} className={`flex ${msg.direction === 'outgoing' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[75%] rounded-2xl px-4 py-2 ${
-                messageBubbleClass(msg)
-              }`}>
-                <div className="text-sm whitespace-pre-wrap break-words">{renderContent(msg)}</div>
-                <p className="text-xs mt-1 text-gray-500">
-                  {new Date(msg.createdAt).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
-                </p>
+          messages.map((msg, index) => {
+            const outgoingStatus = outgoingMessageStatuses[index]
+            return (
+              <div key={msg.id} className={`flex ${msg.direction === 'outgoing' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[75%] rounded-2xl px-4 py-2 ${
+                  messageBubbleClass(msg)
+                }`}>
+                  <div className="text-sm whitespace-pre-wrap break-words">{renderContent(msg)}</div>
+                  <p className="flex items-center justify-end gap-1.5 text-xs mt-1 text-gray-500">
+                    {outgoingStatus && <OutgoingMessageStatusLabel status={outgoingStatus} />}
+                    <span>
+                      {new Date(msg.createdAt).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </p>
+                </div>
               </div>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
       <div className="px-4 py-3 border-t border-gray-200">
@@ -768,6 +804,8 @@ export default function ChatsPage() {
     }
   }
 
+  const outgoingMessageStatuses = getOutgoingMessageStatuses(chatDetail?.messages ?? [])
+
   return (
     <div>
       <Header title="オペレーターチャット" />
@@ -1001,6 +1039,7 @@ export default function ChatsPage() {
                     const prevMsg = idx > 0 ? (chatDetail.messages ?? [])[idx - 1] : null
                     const showDateSep = !prevMsg || !sameYmd(prevMsg.createdAt, msg.createdAt)
                     const isOutgoing = msg.direction === 'outgoing'
+                    const outgoingStatus = outgoingMessageStatuses[idx]
 
                     // メッセージ表示の分岐
                     let bubbleContent: React.ReactNode
@@ -1062,8 +1101,13 @@ export default function ChatsPage() {
                               {bubbleContent}
                             </div>
                             {/* 時刻 */}
-                            <span className="text-xs text-white/50 mt-0.5 px-1">
-                              {new Date(msg.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+                            <span className="flex items-center gap-1.5 text-xs text-white/50 mt-0.5 px-1">
+                              {outgoingStatus && (
+                                <OutgoingMessageStatusLabel status={outgoingStatus} onChatBackground />
+                              )}
+                              <span>
+                                {new Date(msg.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+                              </span>
                             </span>
                           </div>
                         </div>
