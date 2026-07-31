@@ -2255,8 +2255,13 @@ events.put('/api/events/admin/events/:id/bookings/:bookingId', async (c) => {
     setClauses.push('internal_note = ?');
     setValues.push(body.internal_note ?? null);
   }
-  if (body.status === 'no_show' || body.status === 'attended') {
-    const action: EventBookingAction = body.status === 'attended' ? 'mark_attended' : 'mark_no_show';
+  if (body.status === 'no_show' || body.status === 'attended' || body.status === 'confirmed') {
+    const action: EventBookingAction =
+      body.status === 'attended'
+        ? 'mark_attended'
+        : body.status === 'no_show'
+          ? 'mark_no_show'
+          : 'restore_confirmed';
     if (!canTransition(booking.status as never, action)) return bad(c, 'invalid_state', 409);
     setClauses.push('status = ?');
     setValues.push(body.status);

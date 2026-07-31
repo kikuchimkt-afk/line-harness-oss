@@ -1826,7 +1826,7 @@ export const eventsApi = {
     accountId: string,
     eventId: string,
     bookingId: string,
-    body: { internal_note?: string | null; status?: 'attended' | 'no_show' },
+    body: { internal_note?: string | null; status?: 'confirmed' | 'attended' | 'no_show' },
   ) =>
     fetchApi<EventBookingItem>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}`, accountId),

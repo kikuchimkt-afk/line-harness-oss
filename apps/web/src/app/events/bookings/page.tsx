@@ -7,6 +7,11 @@ import Link from 'next/link'
 import Header from '@/components/layout/header'
 import { useAccount } from '@/contexts/account-context'
 import { eventsApi, type EventBookingFormField, type EventBookingItem, type EventDetail } from '@/lib/api'
+import {
+  buildEventBookingCalendarIndex,
+  countEventBookingStatuses,
+  eventBookingDateKey,
+} from '@/lib/event-booking-calendar'
 
 const STATUS_TABS: Array<{ key: string; label: string }> = [
   { key: 'requested', label: '承認待ち' },
@@ -29,7 +34,7 @@ const statusBadge: Record<string, string> = {
   no_show: 'bg-red-100 text-red-800',
 }
 
-const ACTIVE_CALENDAR_STATUSES = new Set(['requested', 'confirmed'])
+const PRIMARY_CALENDAR_STATUSES = new Set(['requested', 'confirmed'])
 
 function formatJp(iso: string): string {
   return new Date(iso).toLocaleString('ja-JP', {
@@ -54,10 +59,6 @@ function formatJpTime(iso: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
-}
-
-function dateKey(iso: string): string {
-  return formatJpDate(iso).replaceAll('/', '-')
 }
 
 function monthKeyFromDate(date: Date): string {
@@ -245,25 +246,14 @@ function BookingsInner() {
     }
     return map
   }, [accounts])
-  const activeCalendarItems = useMemo(
-    () =>
-      allItems
-        .filter((booking) => ACTIVE_CALENDAR_STATUSES.has(booking.status))
-        .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime()),
-    [allItems],
-  )
-  const bookingsByDate = useMemo(() => {
-    const map = new Map<string, EventBookingItem[]>()
-    for (const booking of activeCalendarItems) {
-      const key = dateKey(booking.slot_starts_at)
-      const list = map.get(key) ?? []
-      list.push(booking)
-      map.set(key, list)
-    }
-    return map
-  }, [activeCalendarItems])
+  const calendarIndex = useMemo(() => buildEventBookingCalendarIndex(allItems), [allItems])
+  const calendarItems = calendarIndex.items
+  const bookingsByDate = calendarIndex.byDate
   const calendarCells = useMemo(() => buildCalendarCells(calendarMonth), [calendarMonth])
-  const firstActiveSlotStart = activeCalendarItems[0]?.slot_starts_at ?? null
+  const firstPrimarySlotStart =
+    calendarItems.find((booking) => PRIMARY_CALENDAR_STATUSES.has(booking.status))?.slot_starts_at ??
+    calendarItems[0]?.slot_starts_at ??
+    null
   const selectedDateItems = selectedDateKey ? bookingsByDate.get(selectedDateKey) ?? [] : []
   const requestedVisibleItems = useMemo(
     () => items.filter((booking) => booking.status === 'requested'),
@@ -272,13 +262,13 @@ function BookingsInner() {
   const selectedDateRequestedItems = selectedDateItems.filter((booking) => booking.status === 'requested')
 
   useEffect(() => {
-    if (!firstActiveSlotStart) {
+    if (!firstPrimarySlotStart) {
       setSelectedDateKey(null)
       return
     }
-    setCalendarMonth(monthKeyFromIso(firstActiveSlotStart))
-    setSelectedDateKey((prev) => prev ?? dateKey(firstActiveSlotStart))
-  }, [eventId, firstActiveSlotStart])
+    setCalendarMonth(monthKeyFromIso(firstPrimarySlotStart))
+    setSelectedDateKey((prev) => prev ?? eventBookingDateKey(firstPrimarySlotStart))
+  }, [eventId, firstPrimarySlotStart])
 
   function accountLabel(lineAccountId: string | null | undefined): string {
     if (!lineAccountId) return ''
@@ -437,8 +427,12 @@ function BookingsInner() {
     }
   }
 
-  async function markStatus(id: string, status: 'attended' | 'no_show') {
+  async function markStatus(id: string, status: 'confirmed' | 'attended' | 'no_show') {
     if (!selectedAccountId || !eventId) return
+    if (
+      status === 'confirmed' &&
+      !confirm('この予約を「確定」に戻しますか？友だちへのLINE通知は送信されません。')
+    ) return
     setBusy(true)
     try {
       await eventsApi.updateBooking(selectedAccountId, eventId, id, { status })
@@ -648,6 +642,16 @@ function BookingsInner() {
                             </button>
                           </div>
                         )}
+                        {(b.status === 'attended' || b.status === 'no_show') && (
+                          <button
+                            type="button"
+                            onClick={() => markStatus(b.id, 'confirmed')}
+                            disabled={busy}
+                            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                          >
+                            確定に戻す
+                          </button>
+                        )}
                       </td>
                     </tr>
                     )
@@ -664,7 +668,9 @@ function BookingsInner() {
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-pink-100 px-4 py-3">
               <div>
                 <h2 className="text-base font-bold text-gray-900">日別カレンダー</h2>
-                <p className="mt-0.5 text-xs text-gray-500">承認待ち・確定の予約だけを日ごとに表示します。</p>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  承認待ち・確定・キャンセルなど、すべての予約履歴を日ごとに表示します。
+                </p>
               </div>
               <div className="inline-flex items-center gap-2">
                 <button
@@ -702,22 +708,20 @@ function BookingsInner() {
                   <div className="grid grid-cols-7">
                     {calendarCells.map((cell, index) => {
                       const dayBookings = cell ? bookingsByDate.get(cell) ?? [] : []
-                      const requestedCount = dayBookings.filter((booking) => booking.status === 'requested').length
-                      const confirmedCount = dayBookings.filter((booking) => booking.status === 'confirmed').length
-                      const totalCount = requestedCount + confirmedCount
+                      const counts = countEventBookingStatuses(dayBookings)
                       const selected = cell != null && cell === selectedDateKey
                       return (
                         <button
                           key={cell ?? `blank-${index}`}
                           type="button"
-                          disabled={!cell || totalCount === 0}
+                          disabled={!cell || counts.total === 0}
                           onClick={() => cell && setSelectedDateKey(cell)}
                           className={`min-h-[104px] border-b border-r border-pink-100 p-2 text-left transition last:border-r-0 disabled:cursor-default ${
                             !cell
                               ? 'bg-gray-50/60'
                               : selected
                                 ? 'bg-pink-100/80 ring-2 ring-inset ring-pink-300'
-                                : totalCount > 0
+                                : counts.total > 0
                                   ? 'bg-white hover:bg-pink-50'
                                   : 'bg-white/70 text-gray-400'
                           }`}
@@ -725,16 +729,24 @@ function BookingsInner() {
                           {cell && (
                             <>
                               <div className="text-sm font-bold text-gray-800">{Number(cell.slice(-2))}</div>
-                              {totalCount > 0 ? (
+                              {counts.total > 0 ? (
                                 <div className="mt-2 space-y-1">
-                                  <div className="inline-flex w-full items-center justify-between rounded-lg bg-yellow-50 px-2 py-1 text-[11px] font-medium text-yellow-800">
-                                    <span>承認待ち</span>
-                                    <span>{requestedCount}人</span>
+                                  <div className="inline-flex w-full items-center justify-between rounded-lg bg-pink-50 px-2 py-1 text-[11px] font-medium text-pink-800">
+                                    <span>予約者</span>
+                                    <span>{counts.total}人</span>
                                   </div>
-                                  <div className="inline-flex w-full items-center justify-between rounded-lg bg-green-50 px-2 py-1 text-[11px] font-medium text-green-800">
-                                    <span>確定</span>
-                                    <span>{confirmedCount}人</span>
-                                  </div>
+                                  {counts.requested > 0 && (
+                                    <div className="inline-flex w-full items-center justify-between rounded-lg bg-yellow-50 px-2 py-1 text-[11px] font-medium text-yellow-800">
+                                      <span>承認待ち</span>
+                                      <span>{counts.requested}人</span>
+                                    </div>
+                                  )}
+                                  {counts.confirmed > 0 && (
+                                    <div className="inline-flex w-full items-center justify-between rounded-lg bg-green-50 px-2 py-1 text-[11px] font-medium text-green-800">
+                                      <span>確定</span>
+                                      <span>{counts.confirmed}人</span>
+                                    </div>
+                                  )}
                                 </div>
                               ) : (
                                 <div className="mt-7 text-center text-[11px] text-gray-400">予約なし</div>
@@ -750,7 +762,9 @@ function BookingsInner() {
                 <div className="rounded-xl border border-pink-100 bg-white/75 p-4">
                   <div className="mb-3">
                     <h3 className="text-base font-bold text-gray-900">
-                      {selectedDateKey ? `${dateLabelFromKey(selectedDateKey)} の参加者` : '日付を選択'}
+                      {selectedDateKey
+                        ? `${dateLabelFromKey(selectedDateKey)} の予約者（${selectedDateItems.length}人）`
+                        : '日付を選択'}
                     </h3>
                     <p className="mt-0.5 text-xs text-gray-500">
                       カレンダーの日付を押すと、その日の予約詳細を確認できます。
@@ -787,7 +801,7 @@ function BookingsInner() {
                     </div>
                   ) : selectedDateItems.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-pink-200 p-6 text-center text-sm text-gray-500">
-                      この日の承認待ち・確定予約はありません
+                      この日の予約はありません
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -871,6 +885,16 @@ function BookingsInner() {
                                     キャンセル
                                   </button>
                                 </>
+                              )}
+                              {(booking.status === 'attended' || booking.status === 'no_show') && (
+                                <button
+                                  type="button"
+                                  onClick={() => markStatus(booking.id, 'confirmed')}
+                                  disabled={busy}
+                                  className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                                >
+                                  確定に戻す
+                                </button>
                               )}
                             </div>
                           </div>

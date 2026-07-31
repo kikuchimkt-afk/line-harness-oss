@@ -34,11 +34,13 @@ describe('canTransition', () => {
     expect(canTransition('cancelled', 'confirm')).toBe(false);
     expect(canTransition('cancelled', 'cancel')).toBe(false);
   });
-  test('attended is terminal', () => {
+  test('attended can be restored to confirmed after an operator mistake', () => {
     expect(canTransition('attended', 'cancel')).toBe(false);
+    expect(canTransition('attended', 'restore_confirmed')).toBe(true);
   });
-  test('no_show is terminal', () => {
+  test('no_show can be restored to confirmed after an operator mistake', () => {
     expect(canTransition('no_show', 'cancel')).toBe(false);
+    expect(canTransition('no_show', 'restore_confirmed')).toBe(true);
   });
 });
 
@@ -49,6 +51,8 @@ describe('nextStatus', () => {
     expect(nextStatus('confirmed', 'cancel')).toBe('cancelled');
     expect(nextStatus('confirmed', 'mark_attended')).toBe('attended');
     expect(nextStatus('confirmed', 'mark_no_show')).toBe('no_show');
+    expect(nextStatus('attended', 'restore_confirmed')).toBe('confirmed');
+    expect(nextStatus('no_show', 'restore_confirmed')).toBe('confirmed');
   });
   test('throws for invalid transition', () => {
     expect(() => nextStatus('rejected', 'confirm')).toThrow(/Invalid transition/);
@@ -65,11 +69,13 @@ describe('transitionsFrom', () => {
     const actions = transitionsFrom('confirmed');
     expect(actions.sort()).toEqual(['cancel', 'mark_attended', 'mark_no_show']);
   });
-  test('terminal states return empty array', () => {
+  test('non-correctable terminal states return empty array', () => {
     expect(transitionsFrom('rejected')).toEqual([]);
     expect(transitionsFrom('expired')).toEqual([]);
     expect(transitionsFrom('cancelled')).toEqual([]);
-    expect(transitionsFrom('attended')).toEqual([]);
-    expect(transitionsFrom('no_show')).toEqual([]);
+  });
+  test('attendance states allow restoring confirmed', () => {
+    expect(transitionsFrom('attended')).toEqual(['restore_confirmed']);
+    expect(transitionsFrom('no_show')).toEqual(['restore_confirmed']);
   });
 });
