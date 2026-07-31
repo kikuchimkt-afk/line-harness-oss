@@ -1,4 +1,5 @@
 import { createTrackedLink } from '@line-crm/db';
+import { isZoomUrl } from '@line-crm/line-sdk';
 
 // Domains where Universal Links / App Links should be used
 const APP_LINK_DOMAINS = new Set([
@@ -13,6 +14,7 @@ const APP_LINK_DOMAINS = new Set([
 ]);
 
 function isAppLinkDomain(url: string): boolean {
+  if (isZoomUrl(url)) return true;
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '');
     if (APP_LINK_DOMAINS.has(hostname)) return true;
