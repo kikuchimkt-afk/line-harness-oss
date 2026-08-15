@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import { processDueReminders } from './booking-reminders.js';
+import { createIndividualNotificationBudget } from './individual-notification-budget.js';
 
 interface DueRow {
   id: string;
@@ -13,7 +14,7 @@ interface DueRow {
   line_user_id: string;
 }
 
-function stubDB(due: DueRow[]) {
+function stubDB(due: DueRow[], claimableIds?: Set<string>) {
   const updates: Array<{ sql: string; bound: unknown[] }> = [];
   const db = {
     prepare(sql: string) {
@@ -31,6 +32,13 @@ function stubDB(due: DueRow[]) {
         },
         async run() {
           updates.push({ sql, bound });
+          if (
+            sql.includes('retry_count = retry_count + 1') &&
+            claimableIds &&
+            !claimableIds.has(String(bound[0]))
+          ) {
+            return { success: true, meta: { changes: 0 } };
+          }
           return { success: true, meta: { changes: 1 } };
         },
         async first() {
@@ -144,5 +152,67 @@ describe('processDueReminders', () => {
     const u = updates.find((x) => x.sql.includes('UPDATE booking_reminders SET status'));
     expect(u!.bound[0]).toBe('failed_permanent');
     expect(u!.bound[1]).toBe(3);
+  });
+
+  test('shared budget leaves excess due reminders pending and unclaimed', async () => {
+    const base: Omit<DueRow, 'id' | 'booking_id'> = {
+      kind: 'day_before',
+      retry_count: 0,
+      starts_at: '2099-05-10T05:00:00Z',
+      menu_name: '面談',
+      staff_name: '担当者',
+      channel_access_token: 'tok',
+      line_user_id: 'U',
+    };
+    const { db, updates } = stubDB([
+      { ...base, id: 'R1', booking_id: 'B1' },
+      { ...base, id: 'R2', booking_id: 'B2' },
+    ]);
+    const sender = vi.fn().mockResolvedValue(undefined);
+
+    const result = await processDueReminders(db, {
+      now: NOW,
+      sender,
+      reminderHoursBefore: REMINDER_HOURS_BEFORE,
+      budget: createIndividualNotificationBudget(1),
+    });
+
+    expect(result).toEqual({ sent: 1, failed: 0 });
+    expect(sender).toHaveBeenCalledTimes(1);
+    const claims = updates.filter((update) =>
+      update.sql.includes('retry_count = retry_count + 1'),
+    );
+    expect(claims.map((claim) => claim.bound[0])).toEqual(['R1']);
+    expect(updates.some((update) => update.bound.includes('R2'))).toBe(false);
+  });
+
+  test('a lost DB claim releases its reservation for the next due reminder', async () => {
+    const base: Omit<DueRow, 'id' | 'booking_id'> = {
+      kind: 'day_before',
+      retry_count: 0,
+      starts_at: '2099-05-10T05:00:00Z',
+      menu_name: '面談',
+      staff_name: '担当者',
+      channel_access_token: 'tok',
+      line_user_id: 'U',
+    };
+    const { db } = stubDB(
+      [
+        { ...base, id: 'R1', booking_id: 'B1' },
+        { ...base, id: 'R2', booking_id: 'B2' },
+      ],
+      new Set(['R2']),
+    );
+    const sender = vi.fn().mockResolvedValue(undefined);
+
+    const result = await processDueReminders(db, {
+      now: NOW,
+      sender,
+      reminderHoursBefore: REMINDER_HOURS_BEFORE,
+      budget: createIndividualNotificationBudget(1),
+    });
+
+    expect(result).toEqual({ sent: 1, failed: 0 });
+    expect(sender).toHaveBeenCalledTimes(1);
   });
 });

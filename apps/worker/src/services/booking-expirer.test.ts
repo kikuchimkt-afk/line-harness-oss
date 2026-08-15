@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import { runExpirer } from './booking-expirer.js';
+import { createIndividualNotificationBudget } from './individual-notification-budget.js';
 
 interface StaleRow {
   id: string;
@@ -93,5 +94,42 @@ describe('runExpirer', () => {
     const result = await runExpirer(db, { now: NOW, sender });
     expect(result.expired).toBe(1);
     expect(updates.some((u) => u.sql.includes("status='expired'"))).toBe(true);
+  });
+
+  test('shared budget leaves excess stale bookings requested for the next run', async () => {
+    const stale: StaleRow[] = [
+      {
+        id: 'B1',
+        starts_at: '2026-05-12T05:00:00Z',
+        menu_name: '面談',
+        staff_name: '担当者',
+        channel_access_token: 'tok',
+        line_user_id: 'U1',
+      },
+      {
+        id: 'B2',
+        starts_at: '2026-05-13T05:00:00Z',
+        menu_name: '面談',
+        staff_name: '担当者',
+        channel_access_token: 'tok',
+        line_user_id: 'U2',
+      },
+    ];
+    const { db, updates } = stubDB(stale);
+    const sender = vi.fn().mockResolvedValue(undefined);
+
+    const result = await runExpirer(db, {
+      now: NOW,
+      sender,
+      budget: createIndividualNotificationBudget(1),
+    });
+
+    expect(result.expired).toBe(1);
+    expect(sender).toHaveBeenCalledTimes(1);
+    const expiryUpdates = updates.filter((update) =>
+      update.sql.includes("status='expired'"),
+    );
+    expect(expiryUpdates.map((update) => update.bound[1])).toEqual(['B1']);
+    expect(updates.some((update) => update.bound.includes('B2'))).toBe(false);
   });
 });

@@ -15,6 +15,11 @@ import {
 import type { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { jitterDeliveryTime, addJitter, sleep } from './stealth.js';
+import {
+  createIndividualNotificationBudget,
+  type IndividualNotificationBudget,
+  type IndividualNotificationReservation,
+} from './individual-notification-budget.js';
 
 /**
  * Replace template variables in message content.
@@ -92,30 +97,31 @@ export async function resolveMetadata(
   return {};
 }
 
-const MAX_SENDS_PER_CRON = 40; // CF Free plan: 50 subrequests limit (margin for other jobs)
-
 export async function processStepDeliveries(
   db: D1Database,
   lineClient: LineClient,
   workerUrl?: string,
+  budget: IndividualNotificationBudget = createIndividualNotificationBudget(),
 ): Promise<void> {
   const now = jstNow();
   const dueFriendScenarios = await getFriendScenariosDueForDelivery(db, now);
 
-  let sendCount = 0;
   for (let i = 0; i < dueFriendScenarios.length; i++) {
-    if (sendCount >= MAX_SENDS_PER_CRON) break;
+    const reservation = budget.reserve();
+    if (!reservation) break;
     const fs = dueFriendScenarios[i];
     try {
       // Stealth: add small random delay between deliveries to avoid burst patterns
       if (i > 0) {
         await sleep(addJitter(50, 200));
       }
-      const sent = await processSingleDelivery(db, lineClient, fs, workerUrl);
-      if (sent) sendCount++;
+      await processSingleDelivery(db, lineClient, fs, workerUrl, reservation);
     } catch (err) {
       console.error(`Error processing friend_scenario ${fs.id}:`, err);
       // Continue with next one
+    } finally {
+      // No-op after commit; otherwise returns unused capacity for skipped rows.
+      reservation.release();
     }
   }
 }
@@ -133,6 +139,7 @@ async function processSingleDelivery(
     started_at: string;
   },
   workerUrl?: string,
+  reservation?: IndividualNotificationReservation,
 ): Promise<boolean> {
   // Optimistic lock: claim this delivery (prevents duplicate sends from parallel workers)
   const claimed = await claimFriendScenarioForDelivery(db, fs.id, fs.current_step_order);
@@ -235,6 +242,9 @@ async function processSingleDelivery(
       deliveryClient = new LC(account.channel_access_token);
     }
   }
+  // The scenario is already claimed in D1. Commit the shared Cron slot only
+  // when an outbound LINE request is actually about to be attempted.
+  reservation?.commit();
   await deliveryClient.pushMessage(friend.line_user_id, [message]);
 
   // Log what we actually pushed: variables expanded, URLs auto-tracked, AND

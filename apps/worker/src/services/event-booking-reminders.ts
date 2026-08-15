@@ -9,6 +9,7 @@ import type {
   EventBookingNotificationSender,
   EventNotificationKind,
 } from './event-booking-notifier.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 export interface ComputedReminder {
   kind: EventReminderKind;
@@ -122,6 +123,7 @@ function notificationKindFor(reminderKind: EventReminderKind): EventNotification
 export interface ProcessDueEventRemindersParams {
   now: Date;
   sender: EventBookingNotificationSender;
+  budget?: IndividualNotificationBudget;
 }
 
 export async function processDueEventReminders(
@@ -149,6 +151,7 @@ export async function processDueEventReminders(
           AND r.scheduled_at <= ?
           AND b.status = 'confirmed'
           AND s.starts_at > ?
+        ORDER BY r.scheduled_at ASC, r.id ASC
         LIMIT 100`,
     )
     .bind(params.now.toISOString(), params.now.toISOString())
@@ -157,23 +160,27 @@ export async function processDueEventReminders(
   let sent = 0;
   let failed = 0;
   for (const row of due.results ?? []) {
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
+    let claimedRetry: number | null = null;
     // Optimistic claim: bump retry_count CAS-style on (id, retry_count).
     // If two cron invocations fetched the same row, only one of them wins
     // this UPDATE; the other gets changes=0 and skips. retry_count thus
     // doubles as a claim epoch, sufficient on D1 without a dedicated lock
     // column or a new migration.
-    const claim = await db
-      .prepare(
-        `UPDATE event_booking_reminders
-            SET retry_count = retry_count + 1
-          WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
-      )
-      .bind(row.id, row.retry_count)
-      .run();
-    if ((claim.meta?.changes ?? 0) === 0) continue;
-    const claimedRetry = row.retry_count + 1;
-
     try {
+      const claim = await db
+        .prepare(
+          `UPDATE event_booking_reminders
+              SET retry_count = retry_count + 1
+            WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
+        )
+        .bind(row.id, row.retry_count)
+        .run();
+      if ((claim.meta?.changes ?? 0) === 0) continue;
+      claimedRetry = row.retry_count + 1;
+      reservation?.commit();
+
       await params.sender({
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
@@ -197,6 +204,7 @@ export async function processDueEventReminders(
         .run();
       sent++;
     } catch (e) {
+      if (claimedRetry === null) throw e;
       const newStatus = claimedRetry >= REMINDER_MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
         .prepare(
@@ -205,6 +213,8 @@ export async function processDueEventReminders(
         .bind(newStatus, e instanceof Error ? e.message : String(e), row.id)
         .run();
       failed++;
+    } finally {
+      reservation?.release();
     }
   }
   return { sent, failed };

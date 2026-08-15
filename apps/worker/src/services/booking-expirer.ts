@@ -3,6 +3,7 @@
 import type { BookingNotificationSender } from './booking-notifier.js';
 import { purgeExpiredIdempotency } from './booking-idempotency.js';
 import { REQUEST_TTL_HOURS } from './booking-types.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 interface StaleRow {
   id: string;
@@ -25,6 +26,7 @@ function startsAtJst(utcIso: string): string {
 export interface RunExpirerParams {
   now: Date;
   sender: BookingNotificationSender;
+  budget?: IndividualNotificationBudget;
 }
 
 export async function runExpirer(
@@ -46,6 +48,7 @@ export async function runExpirer(
          INNER JOIN friends f ON f.id = b.friend_id
         WHERE b.status = 'requested'
           AND b.requested_at < ?
+        ORDER BY b.requested_at ASC, b.id ASC
         LIMIT 200`,
     )
     .bind(cutoff)
@@ -53,39 +56,46 @@ export async function runExpirer(
 
   let expired = 0;
   for (const row of stale.results) {
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
     // 条件付き UPDATE: cron 走行中に admin が同じ予約を承認/拒否した場合、
     // requested 行に対してのみ expired 化する。changes=0 なら後続処理（通知/reminders cancel）
     // をスキップして、誤通知を防ぐ。
-    const upd = await db
-      .prepare(`UPDATE bookings SET status='expired', decided_at = ? WHERE id = ? AND status = 'requested'`)
-      .bind(params.now.toISOString(), row.id)
-      .run();
-    if ((upd.meta?.changes ?? 0) === 0) continue;
-    await db
-      .prepare(
-        `UPDATE booking_reminders SET status='cancelled' WHERE booking_id = ? AND status IN ('pending','failed')`,
-      )
-      .bind(row.id)
-      .run();
     try {
-      await params.sender({
-        channelAccessToken: row.channel_access_token,
-        toLineUserId: row.line_user_id,
-        kind: 'expired',
-        db,
-        friendId: row.friend_id,
-        lineAccountId: row.line_account_id,
-        ctx: {
-          menuName: row.menu_name,
-          staffName: row.staff_name,
-          startsAtJst: startsAtJst(row.starts_at),
-          hoursBefore: 0,
-        },
-      });
-    } catch {
-      // 通知失敗は許容、expirer 自体は完了
+      const upd = await db
+        .prepare(`UPDATE bookings SET status='expired', decided_at = ? WHERE id = ? AND status = 'requested'`)
+        .bind(params.now.toISOString(), row.id)
+        .run();
+      if ((upd.meta?.changes ?? 0) === 0) continue;
+      await db
+        .prepare(
+          `UPDATE booking_reminders SET status='cancelled' WHERE booking_id = ? AND status IN ('pending','failed')`,
+        )
+        .bind(row.id)
+        .run();
+      reservation?.commit();
+      try {
+        await params.sender({
+          channelAccessToken: row.channel_access_token,
+          toLineUserId: row.line_user_id,
+          kind: 'expired',
+          db,
+          friendId: row.friend_id,
+          lineAccountId: row.line_account_id,
+          ctx: {
+            menuName: row.menu_name,
+            staffName: row.staff_name,
+            startsAtJst: startsAtJst(row.starts_at),
+            hoursBefore: 0,
+          },
+        });
+      } catch {
+        // 通知失敗は許容、expirer 自体は完了
+      }
+      expired++;
+    } finally {
+      reservation?.release();
     }
-    expired++;
   }
 
   const idempotencyPurged = await purgeExpiredIdempotency(db, params.now);

@@ -4,6 +4,7 @@
 
 import type { BookingNotificationSender, NotificationKind } from './booking-notifier.js';
 import { REMINDER_MAX_RETRY } from './booking-types.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 interface DueRow {
   id: string;
@@ -23,6 +24,7 @@ export interface ProcessRemindersParams {
   now: Date;
   sender: BookingNotificationSender;
   reminderHoursBefore: number;
+  budget?: IndividualNotificationBudget;
 }
 
 const JST_OFFSET_MS = 9 * 3600_000;
@@ -57,6 +59,7 @@ export async function processDueReminders(
           AND r.scheduled_at <= ?
           AND b.status = 'confirmed'
           AND b.starts_at > ?       -- 開始時刻を過ぎた予約のリマインダは送らない
+        ORDER BY r.scheduled_at ASC, r.id ASC
         LIMIT 100`,
     )
     .bind(params.now.toISOString(), params.now.toISOString())
@@ -65,8 +68,23 @@ export async function processDueReminders(
   let sent = 0;
   let failed = 0;
   for (const row of due.results) {
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
     const kind: NotificationKind = row.kind;
+    let claimedRetry: number | null = null;
     try {
+      const claim = await db
+        .prepare(
+          `UPDATE booking_reminders
+              SET retry_count = retry_count + 1
+            WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
+        )
+        .bind(row.id, row.retry_count)
+        .run();
+      if ((claim.meta?.changes ?? 0) === 0) continue;
+      claimedRetry = row.retry_count + 1;
+      reservation?.commit();
+
       await params.sender({
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
@@ -89,15 +107,17 @@ export async function processDueReminders(
         .run();
       sent++;
     } catch (e) {
-      const newRetry = row.retry_count + 1;
-      const newStatus = newRetry >= REMINDER_MAX_RETRY ? 'failed_permanent' : 'failed';
+      if (claimedRetry === null) throw e;
+      const newStatus = claimedRetry >= REMINDER_MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
         .prepare(
           `UPDATE booking_reminders SET status = ?, retry_count = ?, last_error = ? WHERE id = ?`,
         )
-        .bind(newStatus, newRetry, e instanceof Error ? e.message : String(e), row.id)
+        .bind(newStatus, claimedRetry, e instanceof Error ? e.message : String(e), row.id)
         .run();
       failed++;
+    } finally {
+      reservation?.release();
     }
   }
   return { sent, failed };

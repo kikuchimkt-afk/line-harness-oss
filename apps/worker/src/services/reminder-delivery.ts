@@ -15,15 +15,20 @@ import {
 } from '@line-crm/db';
 import type { LineClient, Message } from '@line-crm/line-sdk';
 import { addJitter, sleep } from './stealth.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 export async function processReminderDeliveries(
   db: D1Database,
   lineClient: LineClient,
+  budget?: IndividualNotificationBudget,
 ): Promise<void> {
   const now = jstNow();
   const dueReminders = await getDueReminderDeliveries(db, now);
+  dueReminders.sort((a, b) =>
+    a.target_date.localeCompare(b.target_date) || a.id.localeCompare(b.id),
+  );
 
-  for (let i = 0; i < dueReminders.length; i++) {
+  deliveryLoop: for (let i = 0; i < dueReminders.length; i++) {
     const fr = dueReminders[i];
     try {
       // ステルス: バースト回避のためランダム遅延
@@ -50,7 +55,16 @@ export async function processReminderDeliveries(
 
       for (const step of fr.steps) {
         const message = buildMessage(step.message_type, step.message_content);
-        await deliveryClient.pushMessage(friend.line_user_id, [message]);
+        const reservation = budget?.reserve();
+        if (budget && !reservation) break deliveryLoop;
+        try {
+          // All eligibility checks are complete; this step is now claimed by
+          // this invocation for an immediate outbound attempt.
+          reservation?.commit();
+          await deliveryClient.pushMessage(friend.line_user_id, [message]);
+        } finally {
+          reservation?.release();
+        }
 
         // Mark as delivered AFTER successful send.
         // INSERT OR IGNORE prevents duplicate records if parallel workers both sent.

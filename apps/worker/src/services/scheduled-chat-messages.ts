@@ -2,6 +2,7 @@ import { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { jstNow } from '@line-crm/db';
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 export type ScheduledChatMessageType = 'text' | 'image' | 'flex';
 
@@ -84,7 +85,11 @@ function buildLineMessage(
 
 export async function processDueScheduledChatMessages(
   db: D1Database,
-  params: { now: Date; defaultChannelAccessToken: string },
+  params: {
+    now: Date;
+    defaultChannelAccessToken: string;
+    budget?: IndividualNotificationBudget;
+  },
 ): Promise<{ sent: number; failed: number }> {
   const due = await db
     .prepare(
@@ -106,24 +111,29 @@ export async function processDueScheduledChatMessages(
   let failed = 0;
 
   for (const row of due.results ?? []) {
-    const claim = await db
-      .prepare(
-        `UPDATE scheduled_chat_messages
-            SET retry_count = retry_count + 1
-          WHERE id = ? AND retry_count = ? AND status IN ('pending', 'failed')`,
-      )
-      .bind(row.id, row.retry_count)
-      .run();
-    if ((claim.meta?.changes ?? 0) === 0) continue;
-
-    const claimedRetry = row.retry_count + 1;
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
+    let claimedRetry: number | null = null;
     try {
+      const claim = await db
+        .prepare(
+          `UPDATE scheduled_chat_messages
+              SET retry_count = retry_count + 1
+            WHERE id = ? AND retry_count = ? AND status IN ('pending', 'failed')`,
+        )
+        .bind(row.id, row.retry_count)
+        .run();
+      if ((claim.meta?.changes ?? 0) === 0) continue;
+
+      claimedRetry = row.retry_count + 1;
       const client = new LineClient(
         row.channel_access_token || params.defaultChannelAccessToken,
       );
+      const message = buildLineMessage(row.message_type, row.content);
+      reservation?.commit();
       await client.pushMessage(
         row.line_user_id,
-        [buildLineMessage(row.message_type, row.content)],
+        [message],
         row.notification_disabled === 1
           ? { notificationDisabled: true }
           : undefined,
@@ -164,6 +174,7 @@ export async function processDueScheduledChatMessages(
       ]);
       sent += 1;
     } catch (error) {
+      if (claimedRetry === null) throw error;
       const nextStatus = claimedRetry >= MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
         .prepare(
@@ -178,6 +189,8 @@ export async function processDueScheduledChatMessages(
         )
         .run();
       failed += 1;
+    } finally {
+      reservation?.release();
     }
   }
 

@@ -2,6 +2,7 @@ import type {
   EventBookingNotificationSender,
   EventNotificationContext,
 } from './event-booking-notifier.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 export type EventBookingDecisionNotificationKind = 'confirmed' | 'rejected';
 
@@ -56,6 +57,7 @@ const MAX_RETRY = 3;
 export interface ProcessDueDecisionNotificationsParams {
   now: Date;
   sender: EventBookingNotificationSender;
+  budget?: IndividualNotificationBudget;
 }
 
 export async function processDueEventBookingDecisionNotifications(
@@ -82,19 +84,23 @@ export async function processDueEventBookingDecisionNotifications(
   let failed = 0;
 
   for (const row of due.results ?? []) {
-    const claim = await db
-      .prepare(
-        `UPDATE event_booking_decision_notifications
-            SET retry_count = retry_count + 1
-          WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
-      )
-      .bind(row.id, row.retry_count)
-      .run();
-    if ((claim.meta?.changes ?? 0) === 0) continue;
-
-    const claimedRetry = row.retry_count + 1;
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
+    let claimedRetry: number | null = null;
     try {
+      const claim = await db
+        .prepare(
+          `UPDATE event_booking_decision_notifications
+              SET retry_count = retry_count + 1
+            WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
+        )
+        .bind(row.id, row.retry_count)
+        .run();
+      if ((claim.meta?.changes ?? 0) === 0) continue;
+
+      claimedRetry = row.retry_count + 1;
       const ctx = JSON.parse(row.context_json) as EventNotificationContext;
+      reservation?.commit();
       await params.sender({
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
@@ -115,6 +121,7 @@ export async function processDueEventBookingDecisionNotifications(
         .run();
       sent += 1;
     } catch (error) {
+      if (claimedRetry === null) throw error;
       const nextStatus = claimedRetry >= MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
         .prepare(
@@ -129,6 +136,8 @@ export async function processDueEventBookingDecisionNotifications(
         )
         .run();
       failed += 1;
+    } finally {
+      reservation?.release();
     }
   }
 
