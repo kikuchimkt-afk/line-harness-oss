@@ -20,6 +20,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import { buildIntroMessage } from '../services/intro-message.js';
+import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
 
@@ -1161,13 +1162,17 @@ liffRoutes.post('/api/liff/link', async (c) => {
     }
 
     let verifyRes: Response | null = null;
+    let verifiedLoginChannelId: string | null = null;
     for (const channelId of loginChannelIds) {
       verifyRes = await fetch('https://api.line.me/oauth2/v2.1/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ id_token: body.idToken, client_id: channelId }),
       });
-      if (verifyRes.ok) break;
+      if (verifyRes.ok) {
+        verifiedLoginChannelId = channelId;
+        break;
+      }
     }
 
     if (!verifyRes?.ok) {
@@ -1179,7 +1184,11 @@ liffRoutes.post('/api/liff/link', async (c) => {
     const email = verified.email || null;
 
     const db = c.env.DB;
-    const friend = await getFriendByLineUserId(db, lineUserId);
+    const verifiedLineAccountId = resolveLineAccountIdForLoginChannel(
+      dbAccounts,
+      verifiedLoginChannelId,
+    );
+    const friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
@@ -1729,9 +1738,10 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
     }
 
     // Verify idToken — ensures caller is the actual user
+    const dbAccounts = await getLineAccounts(c.env.DB);
+    let verifiedLoginChannelId: string | null = null;
     {
       const loginChannelIds = [c.env.LINE_LOGIN_CHANNEL_ID];
-      const dbAccounts = await getLineAccounts(c.env.DB);
       for (const acct of dbAccounts) {
         if (acct.login_channel_id) loginChannelIds.push(acct.login_channel_id);
       }
@@ -1748,6 +1758,7 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
             return c.json({ success: false, error: 'Token mismatch' }, 403);
           }
           verified = true;
+          verifiedLoginChannelId = channelId;
           break;
         }
       }
@@ -1757,7 +1768,11 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
     }
 
     const db = c.env.DB;
-    const friend = await getFriendByLineUserId(db, lineUserId);
+    const verifiedLineAccountId = resolveLineAccountIdForLoginChannel(
+      dbAccounts,
+      verifiedLoginChannelId,
+    );
+    const friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
