@@ -17,6 +17,7 @@
 
 import { initBooking } from './booking.js';
 import { initForm } from './form.js';
+import { buildDirectFormUrl } from '../lib/direct-form-url.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 
 declare const liff: {
@@ -122,35 +123,22 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
 
   // 友だち追加後に戻ってきたら自動で再チェック
   // 一度発火したら listener を外して、ユーザーが LIFF をフォアグラウンド復帰するたびに
-  // 重複 push が走らないようにする（送信後にアプリ切り替えで再発火する事故を防ぐ）
-  let formLinkSent = false;
+  // フォーム遷移が重複しないようにする。
+  let formNavigationStarted = false;
   const onVisibilityChange = async () => {
     if (document.visibilityState !== 'visible') return;
     try {
       const { friendFlag } = await liff.getFriendship();
       if (!friendFlag) return;
 
-      // Send form link if form param exists (was lost during friend-add flow)
+      // Open the form directly after friend-add instead of sending a generic
+      // reward-style message back into the chat.
       const formParam = new URLSearchParams(window.location.search).get('form');
-      if (formParam && !formLinkSent) {
-        formLinkSent = true;
-        try {
-          const fp = await liff.getProfile();
-          const idToken = liff.getIDToken();
-          const params = new URLSearchParams(window.location.search);
-          await apiCall('/api/liff/send-form-link', {
-            method: 'POST',
-            body: JSON.stringify({
-              lineUserId: fp.userId,
-              formId: formParam,
-              idToken: idToken || '',
-              ref: params.get('ref') || '',
-              gate: params.get('gate') || '',
-              xh: params.get('xh') || '',
-              ig: params.get('ig') || '',
-            }),
-          });
-        } catch { /* best-effort */ }
+      if (formParam && !formNavigationStarted) {
+        formNavigationStarted = true;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        window.location.replace(buildDirectFormUrl(window.location.href, formParam));
+        return;
       }
       document.removeEventListener('visibilitychange', onVisibilityChange);
       showCompletion(profile, false);
@@ -275,24 +263,10 @@ async function linkAndAddFlow() {
       // Already a friend — check for form param
       const formParam = new URLSearchParams(window.location.search).get('form');
       if (formParam) {
-        // Send form link via push message, then show completion
-        try {
-          const idToken = liff.getIDToken();
-          const params = new URLSearchParams(window.location.search);
-          await apiCall('/api/liff/send-form-link', {
-            method: 'POST',
-            body: JSON.stringify({
-              lineUserId: profile.userId,
-              formId: formParam,
-              idToken: idToken || '',
-              ref: ref || '',
-              gate: params.get('gate') || '',
-              xh: params.get('xh') || '',
-              ig: params.get('ig') || '',
-            }),
-          });
-        } catch { /* best-effort */ }
-        showCompletion(profile, !!existingUuid);
+        // The rich-menu application button should land on the form itself.
+        // Replacing the current URL also makes refreshes stay on the form page.
+        window.location.replace(buildDirectFormUrl(window.location.href, formParam));
+        return;
       } else {
         showCompletion(profile, !!existingUuid);
       }
