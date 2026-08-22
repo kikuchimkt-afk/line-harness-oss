@@ -1285,6 +1285,25 @@ export const api = {
         createdAt: string
         updatedAt: string
       }>>>('/api/forms'),
+    get: (id: string) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        onSubmitWebhookUrl: string | null
+        onSubmitWebhookHeaders: string | null
+        onSubmitWebhookFailMessage: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+      }>>(`/api/forms/${encodeURIComponent(id)}`),
     create: (data: {
       name: string
       description?: string | null
@@ -1311,6 +1330,32 @@ export const api = {
         updatedAt: string
       }>>('/api/forms', {
         method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: {
+      name?: string
+      description?: string | null
+      fields?: unknown[]
+      onSubmitTagId?: string | null
+      onSubmitScenarioId?: string | null
+      onSubmitMessageType?: 'text' | 'flex' | null
+      onSubmitMessageContent?: string | null
+      saveToMetadata?: boolean
+      isActive?: boolean
+    }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        updatedAt: string
+      }>>(`/api/forms/${encodeURIComponent(id)}`, {
+        method: 'PUT',
         body: JSON.stringify(data),
       }),
   },

@@ -227,16 +227,24 @@ export default function FormSubmissionsPage() {
                 {subLoading ? '読み込み中...' : `${submissions.length}件`}
               </span>
             </div>
-            <button
-              onClick={() => {
-                setSelectedFormId(null)
-                setSubmissions([])
-                setDetailSubmission(null)
-              }}
-              className="text-xs text-gray-400 hover:text-gray-600"
-            >
-              閉じる ✕
-            </button>
+            <div className="flex items-center gap-3">
+              <Link
+                href={`/forms/edit?formId=${encodeURIComponent(selectedForm.id)}`}
+                className="inline-flex items-center rounded-lg bg-[#06C755] px-3 py-2 text-xs font-semibold text-white hover:bg-[#05b64d]"
+              >
+                フォームを編集
+              </Link>
+              <button
+                onClick={() => {
+                  setSelectedFormId(null)
+                  setSubmissions([])
+                  setDetailSubmission(null)
+                }}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                閉じる ✕
+              </button>
+            </div>
           </div>
 
           {subLoading ? (
