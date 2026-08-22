@@ -7,7 +7,7 @@ SET bounds_x = 25,
     bounds_width = 1200,
     bounds_height = 670,
     action_type = 'uri',
-    action_data = '{"uri":"https://ecc-tokushima-harness.kikuchi-mkt.workers.dev/r/eiken-intensive-application?form=0e47b534-da27-430b-9024-be0c88f38785"}'
+    action_data = '{"uri":"https://liff.line.me/2011208604-KwiGeUqO/?page=form&id=0e47b534-da27-430b-9024-be0c88f38785"}'
 WHERE id = '1e61690c-93a1-4eb0-a4af-a3e8a36b867c'
   AND page_id = '0dec2d47-504b-4215-8ca7-073201a535b1';
 
