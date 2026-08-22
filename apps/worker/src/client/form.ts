@@ -55,6 +55,7 @@ interface FormState {
   formDef: FormDef | null;
   xHarnessBaseUrl: string | null;
   profile: { userId: string; displayName: string; pictureUrl?: string } | null;
+  userId: string | null;
   friendId: string | null;
   submitting: boolean;
   verifiedXUsername: string;
@@ -71,6 +72,7 @@ const state: FormState = {
   formDef: null,
   xHarnessBaseUrl: null,
   profile: null,
+  userId: null,
   friendId: null,
   submitting: false,
   verifiedXUsername: '',
@@ -777,6 +779,7 @@ async function submitForm(): Promise<void> {
       // Fall through to submit below, then show webhook success
       const webhookBody: Record<string, unknown> = { data: { ...data }, _skipWebhook: true };
       if (state.profile?.userId) webhookBody.lineUserId = state.profile.userId;
+      if (state.friendId) webhookBody.friendId = state.friendId;
       if (state.refTrackedLinkId) webhookBody.trackedLinkId = state.refTrackedLinkId;
 
       const webhookSubmitRes = await apiCall(`/api/forms/${state.formDef.id}/submit`, {
@@ -800,8 +803,8 @@ async function submitForm(): Promise<void> {
 
     const body: Record<string, unknown> = { data };
     if (state.profile?.userId) body.lineUserId = state.profile.userId;
+    if (state.friendId) body.friendId = state.friendId;
     if (state.refTrackedLinkId) body.trackedLinkId = state.refTrackedLinkId;
-    // Note: state.friendId is users.id (UUID), not friends.id — don't send as friendId
     console.log('Submitting to:', `/api/forms/${state.formDef.id}/submit`);
 
     const res = await apiCall(`/api/forms/${state.formDef.id}/submit`, {
@@ -1175,34 +1178,43 @@ export async function initForm(formId: string | null): Promise<void> {
 
     state.profile = profile;
 
-    // Try to get friendId from local storage (set by main UUID linking flow)
+    // Try to get the cross-account user UUID from local storage.
     try {
-      state.friendId = localStorage.getItem(UUID_STORAGE_KEY);
+      state.userId = localStorage.getItem(UUID_STORAGE_KEY);
     } catch {
       // silent
     }
 
-    // Silent UUID linking (best-effort, so friend metadata saves correctly)
+    // Resolve the account-scoped friends row before rendering. The same LINE
+    // user can follow multiple Official Accounts, so form writes must carry
+    // the exact friends.id returned by the verified LIFF Login Channel.
     const rawIdToken = liff.getIDToken();
     if (rawIdToken) {
-      apiCall('/api/liff/link', {
-        method: 'POST',
-        body: JSON.stringify({
-          idToken: rawIdToken,
-          displayName: profile.displayName,
-          existingUuid: state.friendId,
-        }),
-      }).then(async (linkRes) => {
+      try {
+        const linkRes = await apiCall('/api/liff/link', {
+          method: 'POST',
+          body: JSON.stringify({
+            idToken: rawIdToken,
+            displayName: profile.displayName,
+            existingUuid: state.userId,
+          }),
+        });
         if (linkRes.ok) {
-          const data = await linkRes.json() as { success: boolean; data?: { userId?: string } };
+          const data = await linkRes.json() as {
+            success: boolean;
+            data?: { userId?: string; friendId?: string };
+          };
           if (data?.data?.userId) {
             try {
               localStorage.setItem(UUID_STORAGE_KEY, data.data.userId);
-              state.friendId = data.data.userId;
+              state.userId = data.data.userId;
             } catch { /* silent */ }
           }
+          if (data?.data?.friendId) {
+            state.friendId = data.data.friendId;
+          }
         }
-      }).catch(() => { /* silent */ });
+      } catch { /* silent */ }
     }
 
     if (!res.ok) {

@@ -1250,7 +1250,11 @@ liffRoutes.post('/api/liff/link', async (c) => {
       }
       return c.json({
         success: true,
-        data: { userId: (friend as unknown as Record<string, unknown>).user_id, alreadyLinked: true },
+        data: {
+          userId: (friend as unknown as Record<string, unknown>).user_id,
+          friendId: friend.id,
+          alreadyLinked: true,
+        },
       });
     }
 
@@ -1319,7 +1323,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
 
     return c.json({
       success: true,
-      data: { userId, alreadyLinked: false },
+      data: { userId, friendId: friend.id, alreadyLinked: false },
     });
   } catch (err) {
     console.error('POST /api/liff/link error:', err);
