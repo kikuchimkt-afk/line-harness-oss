@@ -27,6 +27,8 @@ interface FormDetail extends Form {
   fields: Array<{ name: string; label: string; type?: string }>
 }
 
+type FormField = FormDetail['fields'][number]
+
 interface Submission {
   id: string
   formId: string
@@ -72,11 +74,14 @@ export default function FormSubmissionsPage() {
   const [forms, setForms] = useState<Form[]>([])
   const [selectedFormId, setSelectedFormId] = useState<string | null>(null)
   const [submissions, setSubmissions] = useState<Submission[]>([])
+  const [formFields, setFormFields] = useState<FormField[]>([])
   const [fieldLabels, setFieldLabels] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [subLoading, setSubLoading] = useState(false)
   const [page, setPage] = useState(1)
   const [detailSubmission, setDetailSubmission] = useState<Submission | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   const loadForms = useCallback(async () => {
     setLoading(true)
@@ -103,10 +108,11 @@ export default function FormSubmissionsPage() {
         if (formRes.success) {
           const rawFields = (formRes.data as { fields: unknown }).fields
           const fields = typeof rawFields === 'string'
-            ? (JSON.parse(rawFields) as Array<{ name: string; label: string }>)
-            : (rawFields as Array<{ name: string; label: string }>)
+            ? (JSON.parse(rawFields) as FormField[])
+            : (rawFields as FormField[])
           const labels: Record<string, string> = {}
           for (const f of fields ?? []) labels[f.name] = f.label
+          setFormFields(fields ?? [])
           setFieldLabels(labels)
         }
         if (subRes.success) {
@@ -128,6 +134,7 @@ export default function FormSubmissionsPage() {
   }, [])
 
   const handleSelectForm = (formId: string) => {
+    setExportError('')
     setSelectedFormId(formId)
     loadSubmissions(formId)
   }
@@ -147,6 +154,34 @@ export default function FormSubmissionsPage() {
         : [],
     [submissions],
   )
+
+  const downloadExcel = async () => {
+    if (!selectedForm || submissions.length === 0 || exporting) return
+    setExporting(true)
+    setExportError('')
+    try {
+      const { buildFormSubmissionsXlsx, safeXlsxFileName } = await import(
+        '@/components/forms/submission-xlsx-export'
+      )
+      const workbook = buildFormSubmissionsXlsx(formFields, submissions)
+      const blob = new Blob([workbook], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      const today = new Date().toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo' }).replaceAll('/', '')
+      link.href = url
+      link.download = `${today}_${safeXlsxFileName(selectedForm.name)}_申込データ_${submissions.length}件.xlsx`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch {
+      setExportError('Excelファイルを作成できませんでした。もう一度お試しください。')
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
     <div>
@@ -228,6 +263,14 @@ export default function FormSubmissionsPage() {
               </span>
             </div>
             <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={downloadExcel}
+                disabled={subLoading || submissions.length === 0 || exporting}
+                className="inline-flex items-center rounded-lg border border-[#06C755] bg-white px-3 py-2 text-xs font-semibold text-[#06C755] hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {exporting ? 'Excel作成中...' : 'ExcelでDL'}
+              </button>
               <Link
                 href={`/forms/edit?formId=${encodeURIComponent(selectedForm.id)}`}
                 className="inline-flex items-center rounded-lg bg-[#06C755] px-3 py-2 text-xs font-semibold text-white hover:bg-[#05b64d]"
@@ -238,6 +281,8 @@ export default function FormSubmissionsPage() {
                 onClick={() => {
                   setSelectedFormId(null)
                   setSubmissions([])
+                  setFormFields([])
+                  setExportError('')
                   setDetailSubmission(null)
                 }}
                 className="text-xs text-gray-400 hover:text-gray-600"
@@ -246,6 +291,12 @@ export default function FormSubmissionsPage() {
               </button>
             </div>
           </div>
+
+          {exportError && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {exportError}
+            </div>
+          )}
 
           {subLoading ? (
             <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400 text-sm">読み込み中...</div>
