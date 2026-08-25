@@ -22,8 +22,8 @@ INSERT INTO events (
   'eiken-intensive-2026-autumn',
   'e1f32fe7-1787-4f3d-a8bc-9a528a1d842e',
   '英検集中講座｜開講日程予約',
-  'ベストワン藍住校・北島中央校',
-  '2026年9月1日から10月2日までの英検集中講座です。\n期間中は受講回数の上限なく、参加したい日時を複数選択できます。\n\n火曜日・金曜日　16:00〜18:00\n土曜日　14:30〜16:30',
+  'ECCベストワン藍住校',
+  '2026年9月1日から10月2日までの英検集中講座です。\n期間中は受講回数の上限なく、参加したい日時を複数選択できます。\n実施会場はECCベストワン藍住校です。北島中央校の登録生も藍住校で受講できます。\n\n火曜日・金曜日　16:00〜18:00\n土曜日　14:30〜16:30',
   0,
   NULL,
   1,
@@ -33,7 +33,7 @@ INSERT INTO events (
   1,
   0,
   'single',
-  '[{"id":"student_name","label":"受講者氏名","type":"text","required":true,"placeholder":"例：山田 太郎"},{"id":"grade","label":"学年","type":"select","required":true,"options":["中1","中2","中3","高1","高2","高3","その他"]},{"id":"campus","label":"受講校舎","type":"select","required":true,"options":["藍住校","北島中央校"]},{"id":"note","label":"教室へ伝えておきたいこと","type":"textarea","required":false,"placeholder":"必要があればご記入ください"}]',
+  '[{"id":"student_name","label":"受講者氏名","type":"text","required":true,"placeholder":"例：山田 太郎"},{"id":"grade","label":"学年","type":"select","required":true,"options":["小学4年生","小学5年生","小学6年生","中学1年生","中学2年生","中学3年生","高校1年生","高校2年生","高校3年生","その他"]},{"id":"campus","label":"受講会場","type":"select","required":true,"options":["ECCベストワン藍住校"]},{"id":"note","label":"教室へ伝えておきたいこと","type":"textarea","required":false,"placeholder":"必要があればご記入ください"}]',
   'ご予約ありがとうございます。期間中は受講回数の上限なく、同じ予約画面から日程を追加できます。変更がある場合は、予約履歴からキャンセル後、あらためてご予約ください。'
 )
 ON CONFLICT(id) DO UPDATE SET
