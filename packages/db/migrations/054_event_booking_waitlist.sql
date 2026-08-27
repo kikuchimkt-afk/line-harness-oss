@@ -6,7 +6,9 @@ ALTER TABLE events ADD COLUMN waitlist_enabled INTEGER NOT NULL DEFAULT 0
 
 -- SQLite cannot extend an existing CHECK constraint in place, so rebuild the
 -- booking table while preserving every column added by later migrations.
-PRAGMA foreign_keys = OFF;
+-- event_booking_reminders is rebuilt in the same transaction because it has a
+-- foreign key to event_bookings. Dropping the child first keeps D1's mandatory
+-- foreign-key enforcement valid throughout the imported transaction.
 
 CREATE TABLE event_bookings_new (
   id                    TEXT PRIMARY KEY,
@@ -46,8 +48,29 @@ SELECT
   identity_key, form_answers
 FROM event_bookings;
 
+CREATE TABLE event_booking_reminders_new (
+  id            TEXT PRIMARY KEY,
+  booking_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL CHECK (kind IN ('day_before','hours_before')),
+  scheduled_at  TEXT NOT NULL,
+  sent_at       TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','failed_permanent','cancelled')),
+  retry_count   INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  FOREIGN KEY (booking_id) REFERENCES event_bookings_new(id)
+);
+
+INSERT INTO event_booking_reminders_new (
+  id, booking_id, kind, scheduled_at, sent_at, status, retry_count, last_error
+)
+SELECT
+  id, booking_id, kind, scheduled_at, sent_at, status, retry_count, last_error
+FROM event_booking_reminders;
+
+DROP TABLE event_booking_reminders;
 DROP TABLE event_bookings;
 ALTER TABLE event_bookings_new RENAME TO event_bookings;
+ALTER TABLE event_booking_reminders_new RENAME TO event_booking_reminders;
 
 CREATE INDEX IF NOT EXISTS idx_event_bookings_account_status_event
   ON event_bookings (line_account_id, status, event_id);
@@ -59,5 +82,5 @@ CREATE INDEX IF NOT EXISTS idx_event_bookings_identity_status
   ON event_bookings (event_id, identity_key, status);
 CREATE INDEX IF NOT EXISTS idx_event_bookings_waitlist_fifo
   ON event_bookings (slot_id, status, requested_at, id);
-
-PRAGMA foreign_keys = ON;
+CREATE INDEX IF NOT EXISTS idx_event_booking_reminders_status_scheduled
+  ON event_booking_reminders (status, scheduled_at);
