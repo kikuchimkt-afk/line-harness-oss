@@ -33,6 +33,7 @@ describe('event booking calendar data', () => {
     const items = [
       booking('cancelled', 'cancelled', '2026-08-21T09:40:00.000Z'),
       booking('requested', 'requested', '2026-08-21T09:40:00.000Z'),
+      booking('waitlisted', 'waitlisted', '2026-08-21T09:40:00.000Z'),
       booking('rejected', 'rejected', '2026-08-21T09:40:00.000Z'),
       booking('confirmed', 'confirmed', '2026-08-21T09:40:00.000Z'),
       booking('attended', 'attended', '2026-08-21T09:40:00.000Z'),
@@ -43,10 +44,11 @@ describe('event booking calendar data', () => {
     const result = buildEventBookingCalendarIndex(items)
     const dayItems = result.byDate.get('2026-08-21') ?? []
 
-    expect(dayItems).toHaveLength(7)
+    expect(dayItems).toHaveLength(8)
     expect(dayItems.map((item) => item.status)).toEqual([
       'cancelled',
       'requested',
+      'waitlisted',
       'rejected',
       'confirmed',
       'attended',
@@ -54,8 +56,9 @@ describe('event booking calendar data', () => {
       'expired',
     ])
     expect(countEventBookingStatuses(dayItems)).toEqual({
-      total: 7,
+      total: 8,
       requested: 1,
+      waitlisted: 1,
       confirmed: 1,
       other: 5,
     })

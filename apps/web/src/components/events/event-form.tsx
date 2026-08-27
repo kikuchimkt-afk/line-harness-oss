@@ -27,6 +27,7 @@ const DEFAULT_DRAFT: EventDetail = {
   description_centered: 0,
   max_bookings_per_friend: null,
   requires_approval: 0,
+  waitlist_enabled: 0,
   cancel_deadline_hours_before: null,
   reminder_day_before_enabled: 1,
   reminder_hours_before: null,
@@ -223,6 +224,12 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
       if (draft.description && draft.description.length > 20000) {
         throw new Error('詳細は20000字以内で入力してください')
       }
+      if (
+        draft.waitlist_enabled === 1 &&
+        (draft.cancel_deadline_hours_before == null || draft.cancel_deadline_hours_before <= 0)
+      ) {
+        throw new Error('キャンセル待ちを使う場合は、キャンセル期限を1時間以上に設定してください')
+      }
       const targetType = draft.target_type ?? 'single'
       let accountIdsArr: string[] = Array.isArray(draft.account_ids)
         ? draft.account_ids
@@ -247,6 +254,7 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
         description_centered: draft.description_centered,
         max_bookings_per_friend: draft.max_bookings_per_friend,
         requires_approval: draft.requires_approval,
+        waitlist_enabled: draft.waitlist_enabled,
         cancel_deadline_hours_before: draft.cancel_deadline_hours_before,
         reminder_day_before_enabled: draft.reminder_day_before_enabled,
         reminder_hours_before: draft.reminder_hours_before,
@@ -2144,6 +2152,31 @@ function PublishTab({
         </div>
       )}
 
+      <label className="flex items-start gap-3 p-3 border border-pink-200 rounded-lg cursor-pointer bg-pink-50/40 hover:bg-pink-50">
+        <input
+          type="checkbox"
+          checked={draft.waitlist_enabled === 1}
+          onChange={(e) => {
+            const enabled = e.target.checked
+            update('waitlist_enabled', enabled ? 1 : 0)
+            if (
+              enabled &&
+              (draft.cancel_deadline_hours_before == null || draft.cancel_deadline_hours_before <= 0)
+            ) {
+              update('cancel_deadline_hours_before', 48)
+            }
+          }}
+          className="mt-0.5 rounded border-gray-300"
+        />
+        <div>
+          <div className="text-sm font-medium text-gray-900">キャンセル待ちを受け付ける</div>
+          <div className="text-xs leading-relaxed text-gray-600 mt-0.5">
+            満員後は受付順に並び、空席が出ると先頭の方を本予約へ自動で繰り上げ、LINEで通知します。
+            繰り上げと友だち側のキャンセルには、下の同じ期限を使います。
+          </div>
+        </div>
+      </label>
+
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1.5">
           キャンセル期限（友だち側）
@@ -2165,6 +2198,11 @@ function PublishTab({
           <option value="24">24 時間前まで</option>
           <option value="48">48 時間前まで</option>
         </select>
+        {draft.waitlist_enabled === 1 && (
+          <p className="mt-2 text-xs leading-relaxed text-pink-700">
+            推奨設定は「48時間前まで」です。期限を過ぎると自動繰り上げもキャンセルも行いません。
+          </p>
+        )}
       </div>
 
       <label className="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">

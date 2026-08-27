@@ -50,7 +50,7 @@ export default function Event() {
           const all = [...upcoming.items, ...past.items];
           setMyActive(
             all.filter(
-              (b) => b.event_id === e.id && (b.status === 'requested' || b.status === 'confirmed'),
+              (b) => b.event_id === e.id && (b.status === 'requested' || b.status === 'waitlisted' || b.status === 'confirmed'),
             ),
           );
         } catch (authErr) {
@@ -120,7 +120,11 @@ export default function Event() {
           <ul className="space-y-2">
             {slots.map((s) => {
               const full = s.remaining != null && s.remaining <= 0;
-              const disabled = full || overLimit;
+              const cutoff = event.cancel_deadline_hours_before == null
+                ? Number.NEGATIVE_INFINITY
+                : new Date(s.starts_at).getTime() - event.cancel_deadline_hours_before * 3600_000;
+              const waitlistAvailable = full && event.waitlist_enabled === 1 && cutoff > Date.now();
+              const disabled = (full && !waitlistAvailable) || overLimit;
               return (
                 <li key={s.id}>
                   <button
@@ -132,8 +136,10 @@ export default function Event() {
                   >
                     <span className="text-sm">{formatJp(s.starts_at)}</span>
                     <span className="text-xs">
-                      {full
-                        ? '満員'
+                      {waitlistAvailable
+                        ? 'キャンセル待ち'
+                        : full
+                        ? '満員・受付終了'
                         : s.capacity == null
                         ? '定員なし'
                         : `残 ${s.remaining}`}

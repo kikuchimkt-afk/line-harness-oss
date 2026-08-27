@@ -24,6 +24,7 @@ interface EventDetail {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   booking_form_fields?: EventBookingFormField[] | string | null;
   // 既予約検出 (multi-account 含む): 同一人物が別アカで既に予約済の場合に
@@ -81,6 +82,7 @@ interface MyBooking {
   venue_name: string | null;
   venue_url: string | null;
   cancel_deadline_hours_before: number | null;
+  waitlist_position?: number | null;
   slot_starts_at: string;
   slot_ends_at: string;
 }
@@ -146,6 +148,13 @@ function formatJpDateOnly(iso: string): string {
 
 function formatJpTimeOnly(iso: string): string {
   return new Date(iso).toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+}
+
+function canJoinWaitlist(event: EventDetail, slot: EventSlot): boolean {
+  if (event.waitlist_enabled !== 1 || slot.capacity == null || (slot.remaining ?? 1) > 0) return false;
+  if (event.cancel_deadline_hours_before == null || event.cancel_deadline_hours_before <= 0) return false;
+  const cutoff = new Date(slot.starts_at).getTime() - event.cancel_deadline_hours_before * 3600_000;
+  return cutoff > Date.now();
 }
 
 type FormAnswers = Record<string, string | string[]>;
@@ -322,7 +331,7 @@ function EventDetailScreen({
           if (cancelled) return;
           const all = [...up.items, ...past.items];
           setMyActive(
-            all.filter((b) => b.event_id === e.id && (b.status === 'requested' || b.status === 'confirmed')),
+            all.filter((b) => b.event_id === e.id && (b.status === 'requested' || b.status === 'waitlisted' || b.status === 'confirmed')),
           );
         } catch {
           /* best-effort */
@@ -394,6 +403,7 @@ function EventDetailScreen({
   const max = event.max_bookings_per_friend;
   const existingBooking = event.my_existing_booking;
   if (existingBooking && max === 1) {
+    const existingIsWaitlisted = existingBooking.status === 'waitlisted';
     return (
       <div className="pb-24 eb-fade-in">
         {event.image_url ? (
@@ -403,8 +413,10 @@ function EventDetailScreen({
         )}
         <div className="px-4 -mt-6">
           <div className="eb-card eb-card-success">
-            <div className="text-2xl mb-2">✅</div>
-            <div className="text-base font-bold text-gray-900 mb-1">予約済みです</div>
+            <div className="text-2xl mb-2">{existingIsWaitlisted ? '⏳' : '✅'}</div>
+            <div className="text-base font-bold text-gray-900 mb-1">
+              {existingIsWaitlisted ? 'キャンセル待ち受付済みです' : '予約済みです'}
+            </div>
             <div className="text-sm text-gray-700">{formatJp(existingBooking.slot_starts_at)}</div>
             <button onClick={onGoHistory} className="eb-primary-btn mt-4">
               予約履歴を見る
@@ -422,7 +434,7 @@ function EventDetailScreen({
 
   function toggleSlot(slot: EventSlot) {
     const full = slot.remaining != null && slot.remaining <= 0;
-    if (full) return;
+    if (full && !canJoinWaitlist(event, slot)) return;
     setSelectedSlotIds((prev) => {
       if (prev.includes(slot.id)) return prev.filter((slotId) => slotId !== slot.id);
       if (prev.length >= remainingSelectable) return prev;
@@ -463,7 +475,8 @@ function EventDetailScreen({
           )}
           {existingBooking && (
             <div className="mt-3 text-xs eb-line-green-text">
-              ✓ {formatJp(existingBooking.slot_starts_at)} の予約済みです
+              {existingBooking.status === 'waitlisted' ? '⏳' : '✓'} {formatJp(existingBooking.slot_starts_at)} の
+              {existingBooking.status === 'waitlisted' ? 'キャンセル待ち受付済みです' : '予約済みです'}
             </div>
           )}
           <button onClick={onGoHistory} className="eb-history-top-btn mt-4">
@@ -580,9 +593,10 @@ function EventDetailScreen({
             <ul className="space-y-2">
               {visibleSlots.map((s) => {
                 const full = s.remaining != null && s.remaining <= 0;
+                const waitlistAvailable = full && canJoinWaitlist(event, s);
                 const selected = selectedSlotIds.includes(s.id);
                 const selectionLimitReached = selectedSlotIds.length >= remainingSelectable;
-                const disabled = !selected && (full || overLimit || selectionLimitReached);
+                const disabled = !selected && ((full && !waitlistAvailable) || overLimit || selectionLimitReached);
                 return (
                   <li key={s.id}>
                     <button
@@ -600,7 +614,7 @@ function EventDetailScreen({
                         </span>
                       </span>
                       <span className="text-xs font-medium">
-                        {full ? '満員' : s.capacity == null ? '定員なし' : `残 ${s.remaining}`}
+                        {waitlistAvailable ? 'キャンセル待ち' : full ? '満員・受付終了' : s.capacity == null ? '定員なし' : `残 ${s.remaining}`}
                       </span>
                     </button>
                   </li>
@@ -655,6 +669,7 @@ function ConfirmScreen({
   const [error, setError] = useState<string | null>(null);
   const [idemKey] = useState(uid);
   const formFields = parseFormFields(event.booking_form_fields);
+  const hasWaitlistedSelection = slots.some((slot) => (slot.remaining ?? 1) <= 0);
 
   function validateAnswers(): string | null {
     for (const field of formFields) {
@@ -676,6 +691,7 @@ function ConfirmScreen({
     const code = e.body?.error;
     switch (code) {
       case 'slot_full': return 'すでに満員になりました。別の日時をお選びください。';
+      case 'waitlist_closed': return 'キャンセル待ちの受付期限を過ぎています。別の日時をお選びください。';
       case 'over_friend_limit': return 'このイベントへの予約上限に達しています。';
       case 'slot_started': return 'この枠は既に開始されています。';
       case 'slot_inactive': return 'この枠は受付を締め切りました。';
@@ -710,12 +726,12 @@ function ConfirmScreen({
     setSubmitting(true);
     setError(null);
     try {
-      const successes: Array<{ id: string; status: string }> = [];
+      const successes: Array<{ id: string; status: string; waitlist_position?: number | null }> = [];
       const failures: string[] = [];
       const shouldSummarizeNotification = slots.length > 1;
       for (const selectedSlot of slots) {
         try {
-          const res = await apiPost<{ id: string; status: string }>(
+          const res = await apiPost<{ id: string; status: string; waitlist_position?: number | null }>(
             `/api/liff/events/${event.id}/bookings`,
             {
               slot_id: selectedSlot.id,
@@ -744,7 +760,8 @@ function ConfirmScreen({
             console.warn('[event-booking] summary notification failed', err);
           }
         }
-        const status = successes.some((res) => res.status === 'requested') ? 'requested' : 'confirmed';
+        const uniqueStatuses = new Set(successes.map((res) => res.status));
+        const status = uniqueStatuses.size === 1 ? successes[0].status : 'mixed';
         onDone(status, successes.length, failures.length);
         return;
       }
@@ -784,6 +801,15 @@ function ConfirmScreen({
           </ul>
         )}
       </div>
+
+      {hasWaitlistedSelection && (
+        <div className="bg-pink-50 border border-pink-200 text-pink-900 text-xs rounded-xl p-3 leading-relaxed">
+          満員の日時はキャンセル待ちとして受け付けます。空席が出ると受付順に本予約へ自動で繰り上がり、LINEでお知らせします。
+          {event.cancel_deadline_hours_before != null && (
+            <> 繰り上げとキャンセルの期限は開始{event.cancel_deadline_hours_before}時間前です。</>
+          )}
+        </div>
+      )}
 
       {event.requires_approval === 1 && (
         <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded-xl p-3">
@@ -859,22 +885,32 @@ function DoneScreen({
   onGoHistory: () => void;
 }) {
   const isPending = status === 'requested';
+  const isWaitlisted = status === 'waitlisted';
+  const isMixed = status === 'mixed';
   const hasPartialFailure = failedCount > 0;
   const countText = count > 1 ? `${count}件の申込み` : '申込み';
   const title = hasPartialFailure
     ? '一部を受付しました'
+    : isMixed
+      ? '申込みを受け付けました'
+      : isWaitlisted
+        ? 'キャンセル待ちを受け付けました'
     : isPending
       ? '受付しました'
       : '予約が確定しました';
   const desc = hasPartialFailure
     ? `${count}件は受付できました。${failedCount}件は受付できませんでした。予約履歴で受付済みの日程をご確認ください。`
+    : isMixed
+      ? `${countText}を受け付けました。確定・承認待ち・キャンセル待ちの内訳は予約履歴でご確認ください。`
+      : isWaitlisted
+        ? `${countText}をキャンセル待ちとして受け付けました。空席が出て本予約へ繰り上がると、LINEでお知らせします。`
     : isPending
       ? `${countText}を受け付けました。運営の承認をお待ちください。承認されると LINE でお知らせします。`
       : `${countText}が確定しました。LINE で詳細をお送りしました。`;
   return (
     <div className="px-4 py-10 text-center eb-slide-up">
       <div className="eb-card">
-        <div className="text-5xl mb-3">{hasPartialFailure ? '⚠️' : isPending ? '⏳' : '✅'}</div>
+        <div className="text-5xl mb-3">{hasPartialFailure ? '⚠️' : isPending || isWaitlisted || isMixed ? '⏳' : '✅'}</div>
         <h1 className="text-lg font-bold mb-2 text-gray-900">
           {title}
         </h1>
@@ -891,6 +927,7 @@ function DoneScreen({
 
 const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   requested: { text: '承認待ち', cls: 'bg-amber-100 text-amber-800' },
+  waitlisted: { text: 'キャンセル待ち', cls: 'bg-pink-100 text-pink-800' },
   confirmed: { text: '確定', cls: 'bg-green-100 text-green-800' },
   rejected: { text: '見送り', cls: 'bg-gray-200 text-gray-700' },
   cancelled: { text: 'キャンセル', cls: 'bg-gray-100 text-gray-600' },
@@ -900,7 +937,7 @@ const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
 };
 
 function canCancel(b: MyBooking): boolean {
-  if (b.status !== 'requested' && b.status !== 'confirmed') return false;
+  if (b.status !== 'requested' && b.status !== 'waitlisted' && b.status !== 'confirmed') return false;
   if (b.cancel_deadline_hours_before == null) return false;
   const deadlineMs = new Date(b.slot_starts_at).getTime() - b.cancel_deadline_hours_before * 3600_000;
   return deadlineMs > Date.now();
@@ -932,7 +969,8 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
   }, [tab]);
 
   async function cancel(b: MyBooking) {
-    if (!confirm(`「${b.event_name}」の予約をキャンセルしますか？`)) return;
+    const target = b.status === 'waitlisted' ? 'キャンセル待ち' : '予約';
+    if (!confirm(`「${b.event_name}」の${target}を取り消しますか？`)) return;
     setBusy(true);
     setError(null);
     try {
@@ -997,6 +1035,12 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
                     </div>
                     <div className="text-xs text-gray-600 mt-1">{formatJp(b.slot_starts_at)}</div>
                     {b.venue_name && <div className="text-xs text-gray-500 truncate">📍 {b.venue_name}</div>}
+                    {b.status === 'waitlisted' && b.waitlist_position != null && (
+                      <div className="text-xs font-semibold text-pink-700 mt-1">現在 {b.waitlist_position}番目</div>
+                    )}
+                    {b.status === 'waitlisted' && !canCancel(b) && (
+                      <div className="text-xs text-gray-500 mt-1">繰り上げ受付は終了しました</div>
+                    )}
                   </div>
                 </div>
                 {canCancel(b) && (
@@ -1006,7 +1050,7 @@ function HistoryScreen({ ctx }: { ctx: EventBookingContext }) {
                       disabled={busy}
                       className="text-sm text-red-600 disabled:opacity-50"
                     >
-                      キャンセルする
+                      {b.status === 'waitlisted' ? 'キャンセル待ちを取り消す' : 'キャンセルする'}
                     </button>
                   </div>
                 )}

@@ -1638,6 +1638,7 @@ export interface EventListItem {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -1650,6 +1651,7 @@ export interface EventListItem {
   total_capacity: number | null;
   total_active: number;
   pending_count: number;
+  waitlist_count: number;
   // Multi-account fields (migration 040)
   target_type?: 'single' | 'multi-account-dedup';
   account_ids?: string | string[] | null;
@@ -1666,6 +1668,7 @@ export interface EventDetail {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -1730,6 +1733,8 @@ export interface EventBookingItem {
   form_answers: string | Record<string, string | string[]> | null;
   internal_note: string | null;
   requested_at: string;
+  promoted_at?: string | null;
+  waitlist_position?: number | null;
   decided_at: string | null;
   cancelled_at: string | null;
   cancelled_by: string | null;

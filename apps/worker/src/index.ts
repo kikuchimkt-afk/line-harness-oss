@@ -578,8 +578,8 @@ async function runSixHourMaintenance(env: Env['Bindings']): Promise<void> {
     console.error('booking-expirer error:', e);
   }
 
-  // Approval requests stay pending until an operator decides; only expired
-  // duplicate-submit keys are purged on this tick.
+  // Approval requests stay pending until an operator decides. Waitlist rows
+  // whose promotion cutoff passed are closed, and duplicate-submit keys purge.
   try {
     const result = await runEventBookingExpirer(env.DB, { now });
     console.log(

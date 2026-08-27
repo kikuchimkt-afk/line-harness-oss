@@ -21,6 +21,7 @@ import {
 
 const STATUS_TABS: Array<{ key: string; label: string }> = [
   { key: 'requested', label: '承認待ち' },
+  { key: 'waitlisted', label: 'キャンセル待ち' },
   { key: 'confirmed', label: '確定' },
   { key: 'rejected', label: '拒否' },
   { key: 'cancelled', label: 'キャンセル' },
@@ -32,6 +33,7 @@ const STATUS_TABS: Array<{ key: string; label: string }> = [
 
 const statusBadge: Record<string, string> = {
   requested: 'bg-yellow-100 text-yellow-800',
+  waitlisted: 'bg-pink-100 text-pink-800',
   confirmed: 'bg-green-100 text-green-800',
   rejected: 'bg-gray-100 text-gray-700',
   cancelled: 'bg-gray-100 text-gray-600',
@@ -40,7 +42,7 @@ const statusBadge: Record<string, string> = {
   no_show: 'bg-red-100 text-red-800',
 }
 
-const PRIMARY_CALENDAR_STATUSES = new Set(['requested', 'confirmed'])
+const PRIMARY_CALENDAR_STATUSES = new Set(['requested', 'waitlisted', 'confirmed'])
 
 function formatJp(iso: string): string {
   return new Date(iso).toLocaleString('ja-JP', {
@@ -662,9 +664,14 @@ function BookingsInner() {
                       </td>
                       <td className="px-4 py-3 text-gray-700">{formatJp(b.slot_starts_at)}</td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadge[b.status] ?? 'bg-gray-100'}`}>
-                          {STATUS_TABS.find((t) => t.key === b.status)?.label ?? b.status}
-                        </span>
+                        <div className="flex flex-col items-start gap-1">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadge[b.status] ?? 'bg-gray-100'}`}>
+                            {STATUS_TABS.find((t) => t.key === b.status)?.label ?? b.status}
+                          </span>
+                          {b.status === 'waitlisted' && b.waitlist_position != null && (
+                            <span className="text-xs font-medium text-pink-700">{b.waitlist_position}番目</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-gray-500 text-xs">{formatJp(b.requested_at)}</td>
                       <td className="px-4 py-3 text-right">
@@ -710,6 +717,15 @@ function BookingsInner() {
                               キャンセル
                             </button>
                           </div>
+                        )}
+                        {b.status === 'waitlisted' && (
+                          <button
+                            onClick={() => adminCancel(b.id)}
+                            disabled={busy}
+                            className="px-3 py-1 border border-pink-200 text-pink-700 rounded-lg text-xs font-medium hover:bg-pink-50 disabled:opacity-50"
+                          >
+                            待ちを取り消す
+                          </button>
                         )}
                         {(b.status === 'attended' || b.status === 'no_show') && (
                           <button
@@ -810,6 +826,12 @@ function BookingsInner() {
                                       <span>{counts.requested}人</span>
                                     </div>
                                   )}
+                                  {counts.waitlisted > 0 && (
+                                    <div className="inline-flex w-full items-center justify-between rounded-lg bg-pink-100 px-2 py-1 text-[11px] font-medium text-pink-800">
+                                      <span>キャンセル待ち</span>
+                                      <span>{counts.waitlisted}人</span>
+                                    </div>
+                                  )}
                                   {counts.confirmed > 0 && (
                                     <div className="inline-flex w-full items-center justify-between rounded-lg bg-green-50 px-2 py-1 text-[11px] font-medium text-green-800">
                                       <span>確定</span>
@@ -892,6 +914,9 @@ function BookingsInner() {
                               </div>
                               <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${statusBadge[booking.status] ?? 'bg-gray-100'}`}>
                                 {statusLabel(booking.status)}
+                                {booking.status === 'waitlisted' && booking.waitlist_position != null
+                                  ? ` ${booking.waitlist_position}番目`
+                                  : ''}
                               </span>
                             </div>
 
@@ -954,6 +979,16 @@ function BookingsInner() {
                                     キャンセル
                                   </button>
                                 </>
+                              )}
+                              {booking.status === 'waitlisted' && (
+                                <button
+                                  type="button"
+                                  onClick={() => adminCancel(booking.id)}
+                                  disabled={busy}
+                                  className="rounded-lg border border-pink-200 bg-pink-50 px-3 py-1 text-xs font-medium text-pink-700 hover:bg-pink-100 disabled:opacity-50"
+                                >
+                                  待ちを取り消す
+                                </button>
                               )}
                               {(booking.status === 'attended' || booking.status === 'no_show') && (
                                 <button

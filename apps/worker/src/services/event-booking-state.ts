@@ -11,6 +11,7 @@ export type EventBookingAction =
 
 const TRANSITIONS: Record<EventBookingStatus, Partial<Record<EventBookingAction, EventBookingStatus>>> = {
   requested: { confirm: 'confirmed', reject: 'rejected', expire: 'expired', cancel: 'cancelled' },
+  waitlisted: { expire: 'expired', cancel: 'cancelled' },
   confirmed: { cancel: 'cancelled', mark_attended: 'attended', mark_no_show: 'no_show' },
   rejected: {},
   expired: {},

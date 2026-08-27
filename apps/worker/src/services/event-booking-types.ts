@@ -4,6 +4,7 @@
 
 export type EventBookingStatus =
   | 'requested'
+  | 'waitlisted'
   | 'confirmed'
   | 'rejected'
   | 'cancelled'
@@ -48,6 +49,7 @@ export interface EventRow {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -92,6 +94,7 @@ export interface EventBookingRow {
   form_answers: string;
   internal_note: string | null;
   requested_at: string;
+  promoted_at: string | null;
   decided_at: string | null;
   decided_by_staff_id: string | null;
   cancelled_at: string | null;
@@ -126,5 +129,13 @@ export const EVENT_IDEMPOTENCY_TTL_MINUTES = 60 * 24;
 
 export const ACTIVE_BOOKING_STATUSES: ReadonlyArray<EventBookingStatus> = [
   'requested',
+  'confirmed',
+];
+
+// These statuses still belong to the friend and count toward the event's
+// per-person booking limit. `waitlisted` intentionally does not consume a seat.
+export const OPEN_BOOKING_STATUSES: ReadonlyArray<EventBookingStatus> = [
+  'requested',
+  'waitlisted',
   'confirmed',
 ];

@@ -3,6 +3,8 @@ import { LineClient } from '@line-crm/line-sdk';
 
 export type EventNotificationKind =
   | 'received_pending'      // 受付（承認制ON、未承認段階）
+  | 'waitlisted'            // キャンセル待ち受付
+  | 'waitlist_promoted'     // キャンセル待ちから本予約へ自動繰り上げ
   | 'received_confirmed'    // 受付＝即時確定
   | 'confirmed'             // 後追い承認で確定
   | 'rejected'              // 拒否
@@ -19,6 +21,8 @@ export interface EventNotificationContext {
   bookingHistoryUrl?: string | null;
   approvalComment?: string | null;
   hoursBefore?: number;
+  waitlistPosition?: number | null;
+  cancelDeadlineHoursBefore?: number | null;
 }
 
 export function renderEventNotificationText(
@@ -43,6 +47,21 @@ export function renderEventNotificationText(
       return `イベント申込みを受け付けました。${detail}\n\n運営の承認をお待ちください。${historyLine}`;
     case 'received_confirmed':
       return `イベント予約が確定しました。${detail}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
+    case 'waitlisted': {
+      const positionLine = ctx.waitlistPosition != null
+        ? `\n現在の順番: ${ctx.waitlistPosition}番目`
+        : '';
+      const cutoffLine = ctx.cancelDeadlineHoursBefore != null
+        ? `\n本予約への繰り上げは、開始${ctx.cancelDeadlineHoursBefore}時間前までです。`
+        : '';
+      return `キャンセル待ちを受け付けました。${detail}${positionLine}${cutoffLine}\n\n空席が出た場合は、受付順に本予約へ自動で繰り上がります。${historyLine}`;
+    }
+    case 'waitlist_promoted': {
+      const cutoffLine = ctx.cancelDeadlineHoursBefore != null
+        ? `\nキャンセルは開始${ctx.cancelDeadlineHoursBefore}時間前までです。期限後はキャンセルできません。`
+        : '';
+      return `キャンセル待ちから本予約へ繰り上がりました。${detail}\n\nこの予約は確定しています。${cutoffLine}${historyLine}`;
+    }
     case 'confirmed':
       return `イベント予約が確定しました。${detail}${approvalCommentLine}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
     case 'rejected':

@@ -10,6 +10,7 @@ const JST_DATE_FORMATTER = new Intl.DateTimeFormat('ja-JP', {
 export interface EventBookingStatusCounts {
   total: number
   requested: number
+  waitlisted: number
   confirmed: number
   other: number
 }
@@ -43,11 +44,13 @@ export function buildEventBookingCalendarIndex(items: EventBookingItem[]): {
 
 export function countEventBookingStatuses(items: EventBookingItem[]): EventBookingStatusCounts {
   const requested = items.filter((booking) => booking.status === 'requested').length
+  const waitlisted = items.filter((booking) => booking.status === 'waitlisted').length
   const confirmed = items.filter((booking) => booking.status === 'confirmed').length
   return {
     total: items.length,
     requested,
+    waitlisted,
     confirmed,
-    other: items.length - requested - confirmed,
+    other: items.length - requested - waitlisted - confirmed,
   }
 }

@@ -24,6 +24,28 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('変更・キャンセルは予約履歴画面');
   });
 
+  test('キャンセル待ち受付は順位と48時間期限を案内する', () => {
+    const text = renderEventNotificationText('waitlisted', {
+      ...baseCtx,
+      waitlistPosition: 2,
+      cancelDeadlineHoursBefore: 48,
+    });
+    expect(text).toContain('キャンセル待ちを受け付けました');
+    expect(text).toContain('現在の順番: 2番目');
+    expect(text).toContain('開始48時間前まで');
+    expect(text).toContain('受付順に本予約へ自動で繰り上がります');
+  });
+
+  test('自動繰り上げは本予約確定とキャンセル期限を案内する', () => {
+    const text = renderEventNotificationText('waitlist_promoted', {
+      ...baseCtx,
+      cancelDeadlineHoursBefore: 48,
+    });
+    expect(text).toContain('本予約へ繰り上がりました');
+    expect(text).toContain('この予約は確定しています');
+    expect(text).toContain('キャンセルは開始48時間前まで');
+  });
+
   test('受付メッセージに予約履歴URLを含められる', () => {
     const text = renderEventNotificationText('received_confirmed', {
       ...baseCtx,

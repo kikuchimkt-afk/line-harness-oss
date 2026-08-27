@@ -13,6 +13,7 @@ export interface EventBookingExportSource {
 
 const STATUS_LABELS: Record<string, string> = {
   requested: '承認待ち',
+  waitlisted: 'キャンセル待ち',
   confirmed: '確定',
   rejected: '拒否',
   cancelled: 'キャンセル',

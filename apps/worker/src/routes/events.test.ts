@@ -52,6 +52,12 @@ const adminNotifierMocks = {
 };
 vi.mock('../services/event-booking-admin-notifier.js', () => adminNotifierMocks);
 
+const waitlistMocks = {
+  isBeforeEventWaitlistCutoff: vi.fn(() => true),
+  promoteEventWaitlist: vi.fn(async () => ({ promotedBookingIds: [], reason: 'no_waitlist' })),
+};
+vi.mock('../services/event-booking-waitlist.js', () => waitlistMocks);
+
 const { default: events } = await import('./events.js');
 
 type TestEnv = {
@@ -70,6 +76,7 @@ interface EventRow {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -288,7 +295,7 @@ function makeEventDb(state: {
                 (x) =>
                   x.event_id === event_id &&
                   (x as Record<string, unknown>).identity_key === idKey &&
-                  (x.status === 'requested' || x.status === 'confirmed'),
+                  (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
               );
             if (matches.length === 0) return null as T | null;
             const b = matches[0];
@@ -307,7 +314,7 @@ function makeEventDb(state: {
               (x) =>
                 x.event_id === event_id &&
                 (x as Record<string, unknown>).identity_key === idKey &&
-                (x.status === 'requested' || x.status === 'confirmed'),
+                (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
             ).length;
             return { c } as T;
           }
@@ -321,7 +328,7 @@ function makeEventDb(state: {
               (x) =>
                 x.event_id === event_id &&
                 (x as Record<string, unknown>).identity_key === idKey &&
-                (x.status === 'requested' || x.status === 'confirmed'),
+                (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
             );
             if (!b) return null as T | null;
             const s = (state.slots ?? []).find((x) => x.id === (b as Record<string, unknown>).slot_id);
@@ -344,6 +351,7 @@ function makeEventDb(state: {
             return {
               id: b.id,
               status: b.status,
+              slot_id: (b as Record<string, unknown>).slot_id,
               cancel_deadline_hours_before: e.cancel_deadline_hours_before,
               slot_starts_at: s.starts_at,
             } as T;
@@ -390,8 +398,9 @@ function makeEventDb(state: {
             }
             return e.line_account_id === account;
           };
+          const selectsEventId = sql.includes('SELECT id FROM events') || sql.includes('SELECT id, waitlist_enabled');
           // LIFF SELECT id FROM events ... AND is_published = 1
-          if (sql.includes('SELECT id FROM events') && sql.includes('is_published')) {
+          if (selectsEventId && sql.includes('is_published')) {
             const [id, account, account2] = bound as [string, string, string?];
             const acct = account2 ?? account;
             const e = state.events.find(
@@ -400,13 +409,13 @@ function makeEventDb(state: {
             return (e ? { id: e.id } : null) as T | null;
           }
           // admin SELECT id FROM events
-          if (sql.includes('SELECT id FROM events')) {
+          if (selectsEventId) {
             const [id, account, account2] = bound as [string, string, string?];
             const acct = account2 ?? account;
             const e = state.events.find(
               (x) => x.id === id && x.deleted_at == null && eventMatchesAccount(x, acct),
             );
-            return (e ? { id: e.id } : null) as T | null;
+            return (e ?? null) as T | null;
           }
           // LIFF SELECT * FROM events ... AND is_published = 1
           if (sql.includes('SELECT * FROM events') && sql.includes('is_published')) {
@@ -519,6 +528,7 @@ function makeEventDb(state: {
                   venue_url: e.venue_url,
                   reminder_day_before_enabled: e.reminder_day_before_enabled,
                   reminder_hours_before: e.reminder_hours_before,
+                  cancel_deadline_hours_before: e.cancel_deadline_hours_before,
                   confirmation_message_extra: e.confirmation_message_extra ?? null,
                   slot_starts_at: s.starts_at,
                   channel_access_token: la.channel_access_token ?? '',
@@ -558,7 +568,7 @@ function makeEventDb(state: {
           // LIFF history JOIN: FROM event_bookings b JOIN events e JOIN event_slots s
           if (sql.includes('FROM event_bookings b') && sql.includes('event_name')) {
             const [friend_id, account_id, nowIso] = bound as [string, string, string];
-            const isUpcoming = sql.includes("status IN ('requested','confirmed')\n            AND s.starts_at >=");
+            const isUpcoming = sql.includes("status IN ('requested','waitlisted','confirmed')\n            AND s.starts_at >=");
             const items = (state.bookings ?? [])
               .filter((b) => {
                 const r = b as Record<string, unknown>;
@@ -586,7 +596,7 @@ function makeEventDb(state: {
               })
               .filter((r): r is NonNullable<typeof r> => r !== null)
               .filter((r) => {
-                const isActive = r.status === 'requested' || r.status === 'confirmed';
+                const isActive = r.status === 'requested' || r.status === 'waitlisted' || r.status === 'confirmed';
                 if (isUpcoming) return isActive && r.slot_starts_at >= nowIso;
                 return !isActive || r.slot_starts_at < nowIso;
               })
@@ -736,7 +746,7 @@ function makeEventDb(state: {
             const [
               id, line_account_id, name, venue_name, venue_url, image_url,
               description, description_centered,
-              max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
+              max_bookings_per_friend, requires_approval, waitlist_enabled, cancel_deadline_hours_before,
               reminder_day_before_enabled, reminder_hours_before,
               is_published, sort_order,
               target_type, account_ids, dedup_priority, booking_form_fields,
@@ -744,7 +754,7 @@ function makeEventDb(state: {
             ] = bound as [
               string, string, string, string | null, string | null, string | null,
               string | null, number,
-              number | null, number, number | null,
+              number | null, number, number, number | null,
               number, number | null,
               number, number,
               string, string | null, string | null, string, string | null,
@@ -761,6 +771,7 @@ function makeEventDb(state: {
               description_centered,
               max_bookings_per_friend,
               requires_approval,
+              waitlist_enabled,
               cancel_deadline_hours_before,
               reminder_day_before_enabled,
               reminder_hours_before,
@@ -844,6 +855,9 @@ beforeEach(() => {
   for (const fn of Object.values(notifierMocks)) fn.mockReset();
   for (const fn of Object.values(decisionNotificationMocks)) fn.mockReset();
   for (const fn of Object.values(adminNotifierMocks)) fn.mockReset();
+  for (const fn of Object.values(waitlistMocks)) fn.mockReset();
+  waitlistMocks.isBeforeEventWaitlistCutoff.mockReturnValue(true);
+  waitlistMocks.promoteEventWaitlist.mockResolvedValue({ promotedBookingIds: [], reason: 'no_waitlist' });
   adminNotifierMocks.buildEventAdminBookingUrl.mockImplementation(
     (base: string | undefined, eventId: string) =>
       base ? `${base}/events/bookings?id=${eventId}` : null,
@@ -970,6 +984,17 @@ describe('POST /api/events/admin/events', () => {
       body: JSON.stringify({ name: 'X', cancel_deadline_hours_before: -1 }),
     });
     expect(res.status).toBe(422);
+  });
+
+  test('422 when waitlist is enabled without a positive shared cutoff', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'X', waitlist_enabled: 1, cancel_deadline_hours_before: null }),
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()) as { error: string }).toEqual({ error: 'waitlist_requires_cancel_deadline' });
   });
 
   test('multi-account-dedup creates event with account_ids JSON', async () => {
@@ -1190,6 +1215,45 @@ describe('PUT /api/events/admin/events/:id', () => {
     expect(res.status).toBe(200);
     expect(state.events[0].name).toBe('new');
     expect(state.events[0].requires_approval).toBe(1);
+  });
+
+  test('enables waitlisting with an existing positive cancellation deadline', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        waitlist_enabled: 0,
+        cancel_deadline_hours_before: 48,
+      })],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ waitlist_enabled: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(state.events[0].waitlist_enabled).toBe(1);
+    expect(state.events[0].cancel_deadline_hours_before).toBe(48);
+  });
+
+  test('does not enable waitlisting when the existing cancellation deadline is empty', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        waitlist_enabled: 0,
+        cancel_deadline_hours_before: null,
+      })],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ waitlist_enabled: 1 }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'waitlist_requires_cancel_deadline' });
   });
 
   test('404 for cross-account update', async () => {
@@ -1912,6 +1976,58 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(body.error).toBe('slot_full');
   });
 
+  test('creates a FIFO waitlist booking instead of rejecting a full slot', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        waitlist_enabled: 1,
+        cancel_deadline_hours_before: 48,
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'fx', status: 'confirmed' } as BookingRow],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'wait-1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { status: string; waitlist_position: number };
+    expect(body.status).toBe('waitlisted');
+    expect(body.waitlist_position).toBe(1);
+    expect(state.bookings.at(-1)?.status).toBe('waitlisted');
+  });
+
+  test('does not accept a waitlist registration at or after the cutoff', async () => {
+    waitlistMocks.isBeforeEventWaitlistCutoff.mockReturnValue(false);
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, waitlist_enabled: 1, cancel_deadline_hours_before: 48 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'fx', status: 'confirmed' } as BookingRow],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'wait-closed', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toEqual({ error: 'waitlist_closed' });
+  });
+
   test('OR slot visibility accepts a booking when any condition matches', async () => {
     const state = {
       events: [
@@ -2229,6 +2345,30 @@ describe('LIFF POST /api/liff/events/me/:bookingId/cancel', () => {
     expect(res.status).toBe(200);
     expect(state.bookings[0].status).toBe('cancelled');
     expect(reminderMocks.cancelPendingRemindersFor).toHaveBeenCalledWith(expect.anything(), 'b1');
+    expect(waitlistMocks.promoteEventWaitlist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ slotId: 's1' }),
+    );
+  });
+
+  test('waitlisted booking can be cancelled before the same deadline', async () => {
+    const futureMs = Date.now() + 7 * 24 * 3600_000;
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, waitlist_enabled: 1, cancel_deadline_hours_before: 48 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: new Date(futureMs).toISOString(), ends_at: new Date(futureMs + 7200_000).toISOString(), capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'waitlisted' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/me/b1/cancel?liffId=L1', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer t' },
+    });
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('cancelled');
+    expect(waitlistMocks.promoteEventWaitlist).not.toHaveBeenCalled();
   });
 
   test('403 cancel_not_allowed when cancel_deadline_hours_before is null', async () => {
@@ -2740,6 +2880,7 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     description_centered: 0,
     max_bookings_per_friend: null,
     requires_approval: 0,
+    waitlist_enabled: 0,
     cancel_deadline_hours_before: null,
     reminder_day_before_enabled: 1,
     reminder_hours_before: null,

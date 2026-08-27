@@ -38,6 +38,11 @@ describe('canTransition', () => {
     expect(canTransition('attended', 'cancel')).toBe(false);
     expect(canTransition('attended', 'restore_confirmed')).toBe(true);
   });
+  test('waitlisted → cancelled / expired', () => {
+    expect(canTransition('waitlisted', 'cancel')).toBe(true);
+    expect(canTransition('waitlisted', 'expire')).toBe(true);
+    expect(canTransition('waitlisted', 'confirm')).toBe(false);
+  });
   test('no_show can be restored to confirmed after an operator mistake', () => {
     expect(canTransition('no_show', 'cancel')).toBe(false);
     expect(canTransition('no_show', 'restore_confirmed')).toBe(true);
@@ -48,6 +53,8 @@ describe('nextStatus', () => {
   test('returns correct next state for valid transition', () => {
     expect(nextStatus('requested', 'confirm')).toBe('confirmed');
     expect(nextStatus('requested', 'reject')).toBe('rejected');
+    expect(nextStatus('waitlisted', 'cancel')).toBe('cancelled');
+    expect(nextStatus('waitlisted', 'expire')).toBe('expired');
     expect(nextStatus('confirmed', 'cancel')).toBe('cancelled');
     expect(nextStatus('confirmed', 'mark_attended')).toBe('attended');
     expect(nextStatus('confirmed', 'mark_no_show')).toBe('no_show');
@@ -73,6 +80,9 @@ describe('transitionsFrom', () => {
     expect(transitionsFrom('rejected')).toEqual([]);
     expect(transitionsFrom('expired')).toEqual([]);
     expect(transitionsFrom('cancelled')).toEqual([]);
+  });
+  test('waitlisted allows cancel / expire', () => {
+    expect(transitionsFrom('waitlisted').sort()).toEqual(['cancel', 'expire']);
   });
   test('attendance states allow restoring confirmed', () => {
     expect(transitionsFrom('attended')).toEqual(['restore_confirmed']);

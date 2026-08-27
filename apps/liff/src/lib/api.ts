@@ -88,6 +88,7 @@ export interface EventDetail {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   booking_form_fields?: EventBookingFormField[] | string | null;
 }
@@ -125,6 +126,7 @@ export interface EventBookingMine {
   venue_name: string | null;
   venue_url: string | null;
   cancel_deadline_hours_before: number | null;
+  waitlist_position?: number | null;
   slot_starts_at: string;
   slot_ends_at: string;
 }

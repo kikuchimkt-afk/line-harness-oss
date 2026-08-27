@@ -7,6 +7,7 @@ interface BookingRow {
   requested_at: string;
   decided_at: string | null;
   updated_at: string | null;
+  waitlist_cutoff_at?: string;
 }
 interface ReminderRow {
   id: string;
@@ -36,6 +37,23 @@ function memDB(state: { bookings: BookingRow[]; reminders: ReminderRow[]; idem: 
           return { results: [] };
         },
         async run() {
+          if (sql.includes("WHERE status = 'waitlisted'")) {
+            const [decided_at, updated_at, nowIso] = bound as [string, string, string];
+            let changes = 0;
+            for (const booking of state.bookings) {
+              if (
+                booking.status === 'waitlisted' &&
+                booking.waitlist_cutoff_at != null &&
+                booking.waitlist_cutoff_at <= nowIso
+              ) {
+                booking.status = 'expired';
+                booking.decided_at = decided_at;
+                booking.updated_at = updated_at;
+                changes += 1;
+              }
+            }
+            return { success: true, meta: { changes } };
+          }
           if (sql.includes('UPDATE event_bookings\n            SET status = \'expired\'')) {
             const [decided_at, _updated_at, id] = bound as [string, string, string];
             const b = state.bookings.find((x) => x.id === id && x.status === 'requested');
@@ -123,6 +141,23 @@ describe('runEventBookingExpirer', () => {
     const result = await runEventBookingExpirer(memDB(state), { now });
     expect(result.idempotencyPurged).toBe(1);
     expect(state.idem.map((x) => x.key)).toEqual(['new']);
+  });
+
+  test('expires only waitlist rows whose shared cutoff has arrived', async () => {
+    const now = new Date('2026-09-08T10:00:00Z');
+    const state = {
+      bookings: [
+        { id: 'wait-closed', status: 'waitlisted', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-08T10:00:00.000Z' },
+        { id: 'wait-open', status: 'waitlisted', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-09T10:00:00.000Z' },
+        { id: 'confirmed', status: 'confirmed', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-01T10:00:00.000Z' },
+      ],
+      reminders: [],
+      idem: [],
+    };
+
+    const result = await runEventBookingExpirer(memDB(state), { now });
+    expect(result.expired).toBe(1);
+    expect(state.bookings.map((booking) => booking.status)).toEqual(['expired', 'waitlisted', 'confirmed']);
   });
 
   test('does nothing when no stale bookings', async () => {

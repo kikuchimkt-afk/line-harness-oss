@@ -150,8 +150,8 @@ export default function EventsListPage() {
 
   async function deleteEvent(event: EventListItem) {
     if (!selectedAccountId || deletingId) return
-    if (event.total_active > 0 || event.pending_count > 0) {
-      setError('予約済み・承認待ちの予約があるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。')
+    if (event.total_active > 0 || event.pending_count > 0 || event.waitlist_count > 0) {
+      setError('予約済み・承認待ち・キャンセル待ちがあるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。')
       return
     }
     if (!confirm(`「${event.name}」を削除します。\n一覧と予約ページから非表示になります。予約履歴は保持されます。\nよろしいですか？`)) return
@@ -164,7 +164,7 @@ export default function EventsListPage() {
       const message = e instanceof Error ? e.message : String(e)
       setError(
         message === 'event_has_active_bookings'
-          ? '予約済み・承認待ちの予約があるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。'
+          ? '予約済み・承認待ち・キャンセル待ちがあるイベントは削除できません。予約管理でキャンセルまたは処理してから削除してください。'
           : message,
       )
     } finally {
@@ -317,6 +317,11 @@ export default function EventsListPage() {
                         {e.pending_count > 0 && (
                           <span className="bg-yellow-100 text-yellow-800 text-xs font-bold px-2 py-0.5 rounded-full">
                             承認待ち {e.pending_count}
+                          </span>
+                        )}
+                        {e.waitlist_count > 0 && (
+                          <span className="bg-pink-100 text-pink-800 text-xs font-bold px-2 py-0.5 rounded-full">
+                            キャンセル待ち {e.waitlist_count}
                           </span>
                         )}
                       </div>

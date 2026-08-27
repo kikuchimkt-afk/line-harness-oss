@@ -114,6 +114,7 @@ export default function EventConfirm() {
       const msg = (() => {
         switch (code) {
           case 'slot_full': return 'すでに満員になりました。別の日時をお選びください。';
+          case 'waitlist_closed': return 'キャンセル待ちの受付期限を過ぎています。別の日時をお選びください。';
           case 'over_friend_limit': return 'このイベントへの予約上限に達しています。';
           case 'slot_started': return 'この枠は既に開始されています。';
           case 'slot_inactive': return 'この枠は受付を締め切りました。';
@@ -148,6 +149,7 @@ export default function EventConfirm() {
     return <div className="p-8 text-center text-gray-500">読み込み中...</div>;
   }
   const formFields = parseFormFields(event.booking_form_fields);
+  const isWaitlist = slot.remaining != null && slot.remaining <= 0;
 
   function setAnswer(id: string, value: string | string[]) {
     setAnswers((prev) => ({ ...prev, [id]: value }));
@@ -161,6 +163,15 @@ export default function EventConfirm() {
         <div className="text-sm text-gray-700">📅 {formatJp(slot.starts_at)}</div>
         {event.venue_name && <div className="text-sm text-gray-700">📍 {event.venue_name}</div>}
       </div>
+
+      {isWaitlist && (
+        <div className="bg-pink-50 border border-pink-200 text-pink-900 text-xs rounded p-2 mb-3 leading-relaxed">
+          この日時はキャンセル待ちとして受け付けます。空席が出ると受付順に本予約へ自動で繰り上がり、LINEでお知らせします。
+          {event.cancel_deadline_hours_before != null && (
+            <> 繰り上げとキャンセルの期限は開始{event.cancel_deadline_hours_before}時間前です。</>
+          )}
+        </div>
+      )}
 
       {event.requires_approval === 1 && (
         <div className="bg-yellow-50 border border-yellow-200 text-yellow-900 text-xs rounded p-2 mb-3">
@@ -254,7 +265,7 @@ export default function EventConfirm() {
         disabled={submitting}
         className="mt-5 w-full py-3 bg-blue-600 text-white rounded font-medium disabled:opacity-50"
       >
-        {submitting ? '送信中...' : '予約をリクエスト'}
+        {submitting ? '送信中...' : isWaitlist ? 'キャンセル待ちを申し込む' : '予約をリクエスト'}
       </button>
       <button
         onClick={() => navigate(-1)}

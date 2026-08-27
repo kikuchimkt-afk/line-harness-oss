@@ -54,6 +54,10 @@ import {
   nextStatus,
   type EventBookingAction,
 } from '../services/event-booking-state.js';
+import {
+  isBeforeEventWaitlistCutoff,
+  promoteEventWaitlist,
+} from '../services/event-booking-waitlist.js';
 
 const events = new Hono<Env>();
 
@@ -87,6 +91,7 @@ interface EventInput {
   description_centered?: number;
   max_bookings_per_friend?: number | null;
   requires_approval?: number;
+  waitlist_enabled?: number;
   cancel_deadline_hours_before?: number | null;
   reminder_day_before_enabled?: number;
   reminder_hours_before?: number | null;
@@ -329,7 +334,7 @@ function validateEventInput(
       }
     }
   }
-  for (const key of ['description_centered', 'requires_approval', 'reminder_day_before_enabled', 'is_published'] as const) {
+  for (const key of ['description_centered', 'requires_approval', 'waitlist_enabled', 'reminder_day_before_enabled', 'is_published'] as const) {
     if (has(key) && body[key] != null) {
       const v = body[key];
       if (v !== 0 && v !== 1) return { ok: false, code: `invalid_${key}` };
@@ -337,6 +342,15 @@ function validateEventInput(
   }
   if (has('sort_order') && body.sort_order != null) {
     if (!Number.isInteger(body.sort_order)) return { ok: false, code: 'invalid_sort_order' };
+  }
+  if (
+    body.waitlist_enabled === 1 &&
+    (isCreate || has('cancel_deadline_hours_before'))
+  ) {
+    const cutoff = body.cancel_deadline_hours_before;
+    if (!Number.isInteger(cutoff) || (cutoff as number) <= 0) {
+      return { ok: false, code: 'waitlist_requires_cancel_deadline' };
+    }
   }
   if (has('confirmation_message_extra') && body.confirmation_message_extra != null) {
     const message = body.confirmation_message_extra;
@@ -397,12 +411,12 @@ events.post('/api/events/admin/events', async (c) => {
       `INSERT INTO events (
          id, line_account_id, name, venue_name, venue_url, image_url,
          description, description_centered,
-         max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
+         max_bookings_per_friend, requires_approval, waitlist_enabled, cancel_deadline_hours_before,
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
          target_type, account_ids, dedup_priority, booking_form_fields,
          confirmation_message_extra
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -415,6 +429,7 @@ events.post('/api/events/admin/events', async (c) => {
       (body.description_centered as number | undefined) ?? 0,
       (body.max_bookings_per_friend as number | null | undefined) ?? null,
       (body.requires_approval as number | undefined) ?? 0,
+      (body.waitlist_enabled as number | undefined) ?? 0,
       (body.cancel_deadline_hours_before as number | null | undefined) ?? null,
       (body.reminder_day_before_enabled as number | undefined) ?? 1,
       (body.reminder_hours_before as number | null | undefined) ?? null,
@@ -459,7 +474,11 @@ events.get('/api/events/admin/events', async (c) => {
          (SELECT COUNT(*)
             FROM event_bookings b
            WHERE b.event_id = e.id AND b.status = 'requested'
-         ) AS pending_count
+         ) AS pending_count,
+         (SELECT COUNT(*)
+            FROM event_bookings b
+           WHERE b.event_id = e.id AND b.status = 'waitlisted'
+         ) AS waitlist_count
        FROM events e
        WHERE e.deleted_at IS NULL AND (
          (e.target_type = 'single' AND e.line_account_id = ?)
@@ -534,13 +553,13 @@ events.post('/api/events/admin/events/:id/duplicate', async (c) => {
       `INSERT INTO events (
          id, line_account_id, name, venue_name, venue_url, image_url,
          description, description_centered,
-         max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
+         max_bookings_per_friend, requires_approval, waitlist_enabled, cancel_deadline_hours_before,
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
          target_type, account_ids, dedup_priority, booking_form_fields,
          confirmation_message_extra, reminder_message_extra,
          og_title, og_description, og_image_url
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       newId,
@@ -553,6 +572,7 @@ events.post('/api/events/admin/events/:id/duplicate', async (c) => {
       source.description_centered ?? 0,
       source.max_bookings_per_friend ?? null,
       source.requires_approval ?? 0,
+      source.waitlist_enabled ?? 0,
       source.cancel_deadline_hours_before ?? null,
       source.reminder_day_before_enabled ?? 1,
       source.reminder_hours_before ?? null,
@@ -610,9 +630,9 @@ events.put('/api/events/admin/events/:id', async (c) => {
   const account_id = getAccountId(c);
   if (!account_id) return bad(c, 'account_id_required', 400);
   const id = c.req.param('id');
-  const exists = await c.env.DB
+  const existing = await c.env.DB
     .prepare(
-      `SELECT id FROM events
+      `SELECT id, waitlist_enabled, cancel_deadline_hours_before FROM events
         WHERE id = ? AND deleted_at IS NULL AND (
           (target_type = 'single' AND line_account_id = ?)
           OR (target_type = 'multi-account-dedup'
@@ -620,11 +640,27 @@ events.put('/api/events/admin/events/:id', async (c) => {
         )`,
     )
     .bind(id, account_id, account_id)
-    .first();
-  if (!exists) return bad(c, 'not_found', 404);
+    .first<{
+      id: string;
+      waitlist_enabled: number;
+      cancel_deadline_hours_before: number | null;
+    }>();
+  if (!existing) return bad(c, 'not_found', 404);
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const v = validateEventInput(body, false);
   if (!v.ok) return bad(c, v.code, 422);
+  const effectiveWaitlistEnabled = Object.prototype.hasOwnProperty.call(body, 'waitlist_enabled')
+    ? body.waitlist_enabled
+    : existing.waitlist_enabled;
+  const effectiveCancelDeadline = Object.prototype.hasOwnProperty.call(body, 'cancel_deadline_hours_before')
+    ? body.cancel_deadline_hours_before
+    : existing.cancel_deadline_hours_before;
+  if (
+    effectiveWaitlistEnabled === 1 &&
+    (!Number.isInteger(effectiveCancelDeadline) || (effectiveCancelDeadline as number) <= 0)
+  ) {
+    return bad(c, 'waitlist_requires_cancel_deadline', 422);
+  }
 
   const updatable = [
     'name',
@@ -635,6 +671,7 @@ events.put('/api/events/admin/events/:id', async (c) => {
     'description_centered',
     'max_bookings_per_friend',
     'requires_approval',
+    'waitlist_enabled',
     'cancel_deadline_hours_before',
     'reminder_day_before_enabled',
     'reminder_hours_before',
@@ -778,7 +815,7 @@ events.delete('/api/events/admin/events/:id', async (c) => {
   const active = await c.env.DB
     .prepare(
       `SELECT COUNT(*) AS c FROM event_bookings
-        WHERE event_id = ? AND status IN ('requested','confirmed')`,
+        WHERE event_id = ? AND status IN ('requested','waitlisted','confirmed')`,
     )
     .bind(id)
     .first<{ c: number }>();
@@ -966,6 +1003,7 @@ events.put('/api/events/admin/events/:id/slots/:slotId', async (c) => {
   if (Object.prototype.hasOwnProperty.call(body, 'starts_at')) {
     await rebuildRemindersForSlot(c.env.DB, slot_id);
   }
+  await fillEventSlotFromWaitlist(c.env.DB, slot_id);
   const row = await c.env.DB.prepare(`SELECT * FROM event_slots WHERE id = ?`).bind(slot_id).first();
   return c.json(row);
 });
@@ -991,6 +1029,11 @@ events.get('/api/liff/events/me', async (c) => {
   const sql =
     tab === 'upcoming'
       ? `SELECT b.id, b.event_id, b.status, b.customer_note, b.form_answers, b.requested_at, b.decided_at, b.cancelled_at,
+                 CASE WHEN b.status = 'waitlisted' THEN (
+                   SELECT COUNT(*) FROM event_bookings q
+                    WHERE q.slot_id = b.slot_id AND q.status = 'waitlisted'
+                      AND (q.requested_at < b.requested_at OR (q.requested_at = b.requested_at AND q.id <= b.id))
+                 ) ELSE NULL END AS waitlist_position,
                  e.name AS event_name, e.image_url AS event_image_url,
                  e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
                  s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
@@ -999,10 +1042,11 @@ events.get('/api/liff/events/me', async (c) => {
            JOIN event_slots s ON s.id = b.slot_id
           WHERE b.friend_id = ?
             AND b.line_account_id = ?
-            AND b.status IN ('requested','confirmed')
+            AND b.status IN ('requested','waitlisted','confirmed')
             AND s.starts_at >= ?
           ORDER BY s.starts_at ASC`
       : `SELECT b.id, b.event_id, b.status, b.customer_note, b.form_answers, b.requested_at, b.decided_at, b.cancelled_at,
+                 NULL AS waitlist_position,
                  e.name AS event_name, e.image_url AS event_image_url,
                  e.venue_name, e.venue_url, e.cancel_deadline_hours_before,
                  s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at
@@ -1011,7 +1055,7 @@ events.get('/api/liff/events/me', async (c) => {
            JOIN event_slots s ON s.id = b.slot_id
           WHERE b.friend_id = ?
             AND b.line_account_id = ?
-            AND (b.status NOT IN ('requested','confirmed') OR s.starts_at < ?)
+            AND (b.status NOT IN ('requested','waitlisted','confirmed') OR s.starts_at < ?)
           ORDER BY s.starts_at DESC`;
   const { results } = await c.env.DB
     .prepare(sql)
@@ -1033,31 +1077,37 @@ events.post('/api/liff/events/me/:bookingId/cancel', async (c) => {
 
   const row = await c.env.DB
     .prepare(
-      `SELECT b.id, b.status, e.cancel_deadline_hours_before, s.starts_at AS slot_starts_at
+      `SELECT b.id, b.status, b.slot_id, e.cancel_deadline_hours_before, s.starts_at AS slot_starts_at
          FROM event_bookings b
          JOIN events e ON e.id = b.event_id
          JOIN event_slots s ON s.id = b.slot_id
         WHERE b.id = ? AND b.friend_id = ? AND b.line_account_id = ?`,
     )
     .bind(c.req.param('bookingId'), friend.id, account_id)
-    .first<{ id: string; status: string; cancel_deadline_hours_before: number | null; slot_starts_at: string }>();
+    .first<{ id: string; status: string; slot_id: string; cancel_deadline_hours_before: number | null; slot_starts_at: string }>();
   if (!row) return bad(c, 'not_found', 404);
-  if (row.status !== 'requested' && row.status !== 'confirmed') return bad(c, 'invalid_state', 409);
+  if (row.status !== 'requested' && row.status !== 'waitlisted' && row.status !== 'confirmed') {
+    return bad(c, 'invalid_state', 409);
+  }
   if (row.cancel_deadline_hours_before == null) return bad(c, 'cancel_not_allowed', 403);
   const deadlineMs =
     new Date(row.slot_starts_at).getTime() - row.cancel_deadline_hours_before * 3600_000;
   if (deadlineMs <= Date.now()) return bad(c, 'cancel_deadline_passed', 409);
 
   const nowIso = new Date().toISOString();
-  await c.env.DB
+  const update = await c.env.DB
     .prepare(
       `UPDATE event_bookings
           SET status = 'cancelled', cancelled_at = ?, cancelled_by = 'friend', updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ? AND status = ?`,
     )
-    .bind(nowIso, nowIso, row.id)
+    .bind(nowIso, nowIso, row.id, row.status)
     .run();
+  if ((update.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, row.id);
+  if (row.status === 'requested' || row.status === 'confirmed') {
+    await fillEventSlotFromWaitlist(c.env.DB, row.slot_id, nowIso);
+  }
   return c.json({ ok: true });
 });
 
@@ -1110,7 +1160,7 @@ events.get('/api/liff/events/:id', async (c) => {
              JOIN event_slots s ON s.id = b.slot_id
             WHERE b.event_id = ?
               AND b.identity_key = ?
-              AND b.status IN ('requested','confirmed')
+              AND b.status IN ('requested','waitlisted','confirmed')
             LIMIT 1`,
         )
         .bind(c.req.param('id'), idKey)
@@ -1154,6 +1204,8 @@ interface EventDbRow {
   venue_name: string | null;
   venue_url: string | null;
   requires_approval: number;
+  waitlist_enabled: number;
+  cancel_deadline_hours_before: number | null;
   max_bookings_per_friend: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -1282,6 +1334,7 @@ interface EventBookingNotificationRow {
   friend_display_name: string | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  cancel_deadline_hours_before: number | null;
   confirmation_message_extra: string | null;
 }
 
@@ -1319,6 +1372,7 @@ async function sendGroupedBookingNotifications(
       venueUrl: first.venue_url,
       bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
       approvalComment,
+      cancelDeadlineHoursBefore: first.cancel_deadline_hours_before,
     };
     if (
       options.notifyAt &&
@@ -1389,6 +1443,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
+              e.cancel_deadline_hours_before,
               s.starts_at AS slot_starts_at,
               la.channel_access_token, la.liff_id,
               f.line_user_id, f.display_name AS friend_display_name
@@ -1401,7 +1456,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
           AND b.line_account_id = ?
           AND f.line_user_id = ?
           AND b.id IN (${placeholders})
-          AND b.status IN ('requested','confirmed')
+          AND b.status IN ('requested','waitlisted','confirmed')
         ORDER BY s.starts_at ASC`,
     )
     .bind(c.req.param('id'), account_id, callerLineUserId, ...bookingIds)
@@ -1429,23 +1484,34 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
       }
     }
 
-    const kind: EventNotificationKind = rows.some((row) => row.status === 'requested')
-      ? 'received_pending'
-      : 'received_confirmed';
-    try {
-      await sendGroupedBookingNotifications(c.env.DB, rows, kind);
-    } catch (err) {
-      console.error('[event-booking] grouped friend notice failed', err);
-    }
-    try {
-      await sendGroupedBookingAdminNotifications(
-        c.env.DB,
-        rows,
-        kind === 'received_pending' ? 'requested' : 'confirmed',
-        c.env.ADMIN_PUBLIC_URL,
-      );
-    } catch (err) {
-      console.error('[event-booking] grouped admin notice failed', err);
+    const notificationGroups: Array<{
+      rows: EventBookingNotificationRow[];
+      kind: EventNotificationKind;
+      adminStatus?: 'requested' | 'confirmed';
+    }> = [
+      { rows: rows.filter((row) => row.status === 'requested'), kind: 'received_pending', adminStatus: 'requested' },
+      { rows: rows.filter((row) => row.status === 'waitlisted'), kind: 'waitlisted' },
+      { rows: rows.filter((row) => row.status === 'confirmed'), kind: 'received_confirmed', adminStatus: 'confirmed' },
+    ];
+    for (const group of notificationGroups) {
+      if (group.rows.length === 0) continue;
+      try {
+        await sendGroupedBookingNotifications(c.env.DB, group.rows, group.kind);
+      } catch (err) {
+        console.error('[event-booking] grouped friend notice failed', err);
+      }
+      if (group.adminStatus) {
+        try {
+          await sendGroupedBookingAdminNotifications(
+            c.env.DB,
+            group.rows,
+            group.adminStatus,
+            c.env.ADMIN_PUBLIC_URL,
+          );
+        } catch (err) {
+          console.error('[event-booking] grouped admin notice failed', err);
+        }
+      }
     }
     if (summaryIdempotencyKey) {
       await finalizeEventIdempotencyResponse(c.env.DB, {
@@ -1531,7 +1597,8 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
 
   const event = await c.env.DB
     .prepare(
-      `SELECT id, name, venue_name, venue_url, requires_approval, max_bookings_per_friend,
+      `SELECT id, name, venue_name, venue_url, requires_approval, waitlist_enabled,
+              cancel_deadline_hours_before, max_bookings_per_friend,
               reminder_day_before_enabled, reminder_hours_before, booking_form_fields
          FROM events
         WHERE id = ? AND deleted_at IS NULL AND is_published = 1 AND (
@@ -1577,14 +1644,21 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     return finalize(409, { error: 'slot_condition_mismatch' });
   }
 
+  // Repair any earlier vacancy before admitting a new request so an existing
+  // FIFO waitlist member can never be skipped by a later visitor.
+  await fillEventSlotFromWaitlist(c.env.DB, slot.id);
+
   // Pre-flight friend-limit check は identity_key ベースに統合済 (後段の
   // sameIdentityActive ブロック参照)。friend_id ベースの単一アカウント
   // 内カウントは cross-account 同一人物を捉えられないので使わない。
-  // Pre-flight capacity check (also a cheap rejection).
+  // Pre-flight capacity check. A full finite slot becomes a FIFO waitlist
+  // registration when the event has waitlisting enabled and the shared
+  // cancellation/promotion cutoff has not passed.
   const slotRow = await c.env.DB
     .prepare(`SELECT capacity FROM event_slots WHERE id = ?`)
     .bind(slot.id)
     .first<{ capacity: number | null }>();
+  let slotIsFull = false;
   if (slotRow?.capacity != null) {
     const cnt = await c.env.DB
       .prepare(
@@ -1593,7 +1667,21 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
       )
       .bind(slot.id)
       .first<{ c: number }>();
-    if ((cnt?.c ?? 0) >= slotRow.capacity) return finalize(409, { error: 'slot_full' });
+    slotIsFull = (cnt?.c ?? 0) >= slotRow.capacity;
+    if (
+      slotIsFull &&
+      !(
+        event.waitlist_enabled === 1 &&
+        isBeforeEventWaitlistCutoff(
+          slot.starts_at,
+          event.cancel_deadline_hours_before,
+        )
+      )
+    ) {
+      return finalize(409, {
+        error: event.waitlist_enabled === 1 ? 'waitlist_closed' : 'slot_full',
+      });
+    }
   }
 
   // identity_key 算出: broadcasts dedup と同じ式 (url_token > uid > solo)。
@@ -1615,7 +1703,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
            JOIN event_slots s ON s.id = b.slot_id
           WHERE b.event_id = ?
             AND b.identity_key = ?
-            AND b.status IN ('requested','confirmed')
+            AND b.status IN ('requested','waitlisted','confirmed')
           ORDER BY b.requested_at ASC
           LIMIT 1`,
       )
@@ -1640,7 +1728,11 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   // transactions, so we INSERT first, then re-COUNT. If concurrent inserts
   // pushed us over the limit we DELETE this row and return 409. Determinism
   // is enforced by the INSERT timestamp (newest row loses).
-  const status = event.requires_approval === 1 ? 'requested' : 'confirmed';
+  let status: 'requested' | 'waitlisted' | 'confirmed' = slotIsFull
+    ? 'waitlisted'
+    : event.requires_approval === 1
+      ? 'requested'
+      : 'confirmed';
   const id = crypto.randomUUID();
   const nowIso = new Date().toISOString();
   await c.env.DB
@@ -1686,11 +1778,31 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
         .all<{ id: string }>();
       const winners = new Set((winner.results ?? []).map((r) => r.id));
       if (!winners.has(id)) {
-        await c.env.DB
-          .prepare(`DELETE FROM event_bookings WHERE id = ?`)
-          .bind(id)
-          .run();
-        return finalize(409, { error: 'slot_full' });
+        if (
+          event.waitlist_enabled === 1 &&
+          isBeforeEventWaitlistCutoff(
+            slot.starts_at,
+            event.cancel_deadline_hours_before,
+          )
+        ) {
+          await c.env.DB
+            .prepare(
+              `UPDATE event_bookings
+                  SET status = 'waitlisted', updated_at = ?
+                WHERE id = ? AND status IN ('requested','confirmed')`,
+            )
+            .bind(nowIso, id)
+            .run();
+          status = 'waitlisted';
+        } else {
+          await c.env.DB
+            .prepare(`DELETE FROM event_bookings WHERE id = ?`)
+            .bind(id)
+            .run();
+          return finalize(409, {
+            error: event.waitlist_enabled === 1 ? 'waitlist_closed' : 'slot_full',
+          });
+        }
       }
     }
   }
@@ -1703,7 +1815,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     const cnt2 = await c.env.DB
       .prepare(
         `SELECT COUNT(*) AS c FROM event_bookings
-          WHERE event_id = ? AND identity_key = ? AND status IN ('requested','confirmed')`,
+          WHERE event_id = ? AND identity_key = ? AND status IN ('requested','waitlisted','confirmed')`,
       )
       .bind(event.id, identityKey)
       .first<{ c: number }>();
@@ -1711,7 +1823,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
       const winner = await c.env.DB
         .prepare(
           `SELECT id FROM event_bookings
-            WHERE event_id = ? AND identity_key = ? AND status IN ('requested','confirmed')
+            WHERE event_id = ? AND identity_key = ? AND status IN ('requested','waitlisted','confirmed')
             ORDER BY requested_at ASC, id ASC
             LIMIT ?`,
         )
@@ -1738,6 +1850,21 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     await insertRemindersForBooking(c.env.DB, id, reminders);
   }
 
+  let waitlistPosition: number | null = null;
+  if (status === 'waitlisted') {
+    const position = await c.env.DB
+      .prepare(
+        `SELECT COUNT(*) AS c
+           FROM event_bookings
+          WHERE slot_id = ?
+            AND status = 'waitlisted'
+            AND (requested_at < ? OR (requested_at = ? AND id <= ?))`,
+      )
+      .bind(slot.id, nowIso, nowIso, id)
+      .first<{ c: number }>();
+    waitlistPosition = position?.c ?? 1;
+  }
+
   // Notifications are best effort: a push failure must not roll back the booking.
   const acc = await c.env.DB
     .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
@@ -1745,8 +1872,11 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     .first<{ channel_access_token: string }>();
   if (acc?.channel_access_token && body.suppress_notification !== true) {
     try {
-      const kind: EventNotificationKind =
-        status === 'requested' ? 'received_pending' : 'received_confirmed';
+      const kind: EventNotificationKind = status === 'requested'
+        ? 'received_pending'
+        : status === 'waitlisted'
+          ? 'waitlisted'
+          : 'received_confirmed';
       await sendEventBookingNotification({
         channelAccessToken: acc.channel_access_token,
         toLineUserId: bookingLineUserId,
@@ -1760,29 +1890,33 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
           venueName: event.venue_name,
           venueUrl: event.venue_url,
           bookingHistoryUrl: buildEventBookingHistoryUrl(c.req.query('liffId')),
+          waitlistPosition,
+          cancelDeadlineHoursBefore: event.cancel_deadline_hours_before,
         },
       });
     } catch (e) {
       console.error('[event-booking] friend notice failed', e);
     }
-    try {
-      await notifyEventBookingAdminRecipients({
-        db: c.env.DB,
-        channelAccessToken: acc.channel_access_token,
-        lineAccountId: account_id as string,
-        bookingFriendId: bookingFriend.id,
-        friendName: bookingFriend.display_name,
-        eventName: event.name,
-        startsAtJstList: [startsAtJst(slot.starts_at)],
-        status,
-        adminBookingUrl: buildEventAdminBookingUrl(c.env.ADMIN_PUBLIC_URL, event.id),
-      });
-    } catch (e) {
-      console.error('[event-booking] admin notice failed', e);
+    if (status !== 'waitlisted') {
+      try {
+        await notifyEventBookingAdminRecipients({
+          db: c.env.DB,
+          channelAccessToken: acc.channel_access_token,
+          lineAccountId: account_id as string,
+          bookingFriendId: bookingFriend.id,
+          friendName: bookingFriend.display_name,
+          eventName: event.name,
+          startsAtJstList: [startsAtJst(slot.starts_at)],
+          status,
+          adminBookingUrl: buildEventAdminBookingUrl(c.env.ADMIN_PUBLIC_URL, event.id),
+        });
+      } catch (e) {
+        console.error('[event-booking] admin notice failed', e);
+      }
     }
   }
 
-  return finalize(201, { id, status });
+  return finalize(201, { id, status, waitlist_position: waitlistPosition });
   } // close runBookingFlow
 });
 
@@ -1799,7 +1933,7 @@ events.delete('/api/events/admin/events/:id/slots/:slotId', async (c) => {
     .first<{ id: string }>();
   if (!slot) return bad(c, 'not_found', 404);
   const active = await c.env.DB
-    .prepare(`SELECT COUNT(*) AS c FROM event_bookings WHERE slot_id = ? AND status IN ('requested','confirmed')`)
+    .prepare(`SELECT COUNT(*) AS c FROM event_bookings WHERE slot_id = ? AND status IN ('requested','waitlisted','confirmed')`)
     .bind(slot_id)
     .first<{ c: number }>();
   if ((active?.c ?? 0) > 0) return bad(c, 'slot_has_bookings', 409);
@@ -1849,6 +1983,11 @@ events.get('/api/events/admin/events/:id/bookings', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT b.*,
+              CASE WHEN b.status = 'waitlisted' THEN (
+                SELECT COUNT(*) FROM event_bookings q
+                 WHERE q.slot_id = b.slot_id AND q.status = 'waitlisted'
+                   AND (q.requested_at < b.requested_at OR (q.requested_at = b.requested_at AND q.id <= b.id))
+              ) ELSE NULL END AS waitlist_position,
               s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at,
               f.display_name AS friend_display_name, f.line_user_id AS friend_line_user_id,
               json_extract(f.metadata, '$.q5') AS friend_course_level
@@ -1856,7 +1995,9 @@ events.get('/api/events/admin/events/:id/bookings', async (c) => {
          JOIN event_slots s ON s.id = b.slot_id
          LEFT JOIN friends f ON f.id = b.friend_id
         WHERE ${conditions.join(' AND ')}
-        ORDER BY b.requested_at DESC`,
+        ORDER BY CASE WHEN b.status = 'waitlisted' THEN 0 ELSE 1 END,
+                 CASE WHEN b.status = 'waitlisted' THEN b.requested_at END ASC,
+                 b.requested_at DESC`,
     )
     .bind(...params)
     .all();
@@ -1909,6 +2050,7 @@ async function notifyBookingFriend(
     const row = await db
       .prepare(
         `SELECT e.name AS event_name, e.venue_name, e.venue_url,
+                e.cancel_deadline_hours_before,
                 s.starts_at AS slot_starts_at,
                 b.event_id,
                 b.friend_id,
@@ -1928,6 +2070,7 @@ async function notifyBookingFriend(
         event_name: string;
         venue_name: string | null;
         venue_url: string | null;
+        cancel_deadline_hours_before: number | null;
         slot_starts_at: string;
         event_id: string;
         friend_id: string;
@@ -1944,6 +2087,7 @@ async function notifyBookingFriend(
       venueUrl: row.venue_url,
       bookingHistoryUrl: buildEventBookingHistoryUrl(row.liff_id),
       approvalComment,
+      cancelDeadlineHoursBefore: row.cancel_deadline_hours_before,
     };
     if (
       options.notifyAt &&
@@ -1972,6 +2116,48 @@ async function notifyBookingFriend(
     }
   } catch (e) {
     console.error('[event-booking] notify failed', e);
+  }
+}
+
+async function fillEventSlotFromWaitlist(
+  db: D1Database,
+  slotId: string,
+  nowIso = new Date().toISOString(),
+): Promise<string[]> {
+  try {
+    const result = await promoteEventWaitlist(db, {
+      slotId,
+      now: new Date(nowIso),
+    });
+    for (const bookingId of result.promotedBookingIds) {
+      const policy = await db
+        .prepare(
+          `SELECT s.starts_at, e.reminder_day_before_enabled, e.reminder_hours_before
+             FROM event_bookings b
+             JOIN event_slots s ON s.id = b.slot_id
+             JOIN events e ON e.id = b.event_id
+            WHERE b.id = ?`,
+        )
+        .bind(bookingId)
+        .first<{
+          starts_at: string;
+          reminder_day_before_enabled: number;
+          reminder_hours_before: number | null;
+        }>();
+      if (policy) {
+        const reminders = computeRemindersForBooking({
+          starts_at_utc: policy.starts_at,
+          reminder_day_before_enabled: policy.reminder_day_before_enabled === 1,
+          reminder_hours_before: policy.reminder_hours_before,
+        });
+        await insertRemindersForBooking(db, bookingId, reminders);
+      }
+      await notifyBookingFriend(db, bookingId, 'waitlist_promoted');
+    }
+    return result.promotedBookingIds;
+  } catch (error) {
+    console.error('[event-booking] waitlist promotion failed', error);
+    return [];
   }
 }
 
@@ -2015,6 +2201,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
+              e.cancel_deadline_hours_before,
               e.confirmation_message_extra,
               s.starts_at AS slot_starts_at,
               la.channel_access_token, la.liff_id,
@@ -2096,6 +2283,11 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       approvalComment,
       normalizedNotification.value,
     );
+  }
+  if (action === 'reject') {
+    for (const slotId of new Set(updatedRows.map((row) => row.slot_id))) {
+      await fillEventSlotFromWaitlist(c.env.DB, slotId, nowIso);
+    }
   }
   return c.json({
     ok: true,
@@ -2207,6 +2399,9 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     approvalComment,
     normalizedNotification.value,
   );
+  if (action === 'reject') {
+    await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
+  }
   const updated = await c.env.DB
     .prepare(`SELECT * FROM event_bookings WHERE id = ?`)
     .bind(booking.id)
@@ -2237,6 +2432,9 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/cancel', async (c)
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, booking.id);
   await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
+  if (booking.status === 'requested' || booking.status === 'confirmed') {
+    await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
+  }
   return c.json({ ok: true });
 });
 
