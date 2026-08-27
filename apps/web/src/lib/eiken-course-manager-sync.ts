@@ -96,13 +96,24 @@ export function buildEikenManagerSyncPayload(
   const fieldsToSync = fields.filter((field) =>
     ['受講者氏名', '学年', '教室へ伝えておきたいこと'].includes(field.label),
   )
+  const courseLevelField = fields.find((field) =>
+    ['受講級', '受検予定級', '受検級', '受験級', '英検級'].includes(field.label),
+  )
+  const courseLevelFor = (booking: EventBookingItem) =>
+    (courseLevelField ? answerValue(booking, courseLevelField) : '') || booking.friend_course_level || ''
+  const courseLevelInsertIndex = Math.max(
+    0,
+    fieldsToSync.findIndex((field) => field.label === '学年') + 1,
+  )
+  const syncedHeaders = fieldsToSync.map((field) => field.label)
+  syncedHeaders.splice(courseLevelInsertIndex, 0, '受講級')
   const headers = [
     'イベント名',
     '予約日',
     '開始時刻',
     '終了時刻',
     '状態',
-    ...fieldsToSync.map((field) => field.label),
+    ...syncedHeaders,
     '受講会場',
     '備考',
     '受付日時',
@@ -110,17 +121,21 @@ export function buildEikenManagerSyncPayload(
   const rows = bookings
     .slice()
     .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime())
-    .map((booking) => [
-      event.name,
-      dateFormatter.format(new Date(booking.slot_starts_at)),
-      timeFormatter.format(new Date(booking.slot_starts_at)),
-      timeFormatter.format(new Date(booking.slot_ends_at)),
-      STATUS_LABELS[booking.status] ?? booking.status,
-      ...fieldsToSync.map((field) => answerValue(booking, field)),
-      event.venue_name ?? '',
-      booking.customer_note ?? '',
-      dateTimeFormatter.format(new Date(booking.requested_at)),
-    ])
+    .map((booking) => {
+      const syncedAnswers = fieldsToSync.map((field) => answerValue(booking, field))
+      syncedAnswers.splice(courseLevelInsertIndex, 0, courseLevelFor(booking))
+      return [
+        event.name,
+        dateFormatter.format(new Date(booking.slot_starts_at)),
+        timeFormatter.format(new Date(booking.slot_starts_at)),
+        timeFormatter.format(new Date(booking.slot_ends_at)),
+        STATUS_LABELS[booking.status] ?? booking.status,
+        ...syncedAnswers,
+        event.venue_name ?? '',
+        booking.customer_note ?? '',
+        dateTimeFormatter.format(new Date(booking.requested_at)),
+      ]
+    })
 
   return {
     type: EIKEN_MANAGER_MESSAGE_TYPE,

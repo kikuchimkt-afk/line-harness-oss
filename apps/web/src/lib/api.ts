@@ -1737,6 +1737,8 @@ export interface EventBookingItem {
   slot_ends_at: string;
   friend_display_name: string | null;
   friend_line_user_id: string | null;
+  /** 英検集中講座の申込フォームで回答した受検予定級。 */
+  friend_course_level?: string | null;
 }
 
 export const eventsApi = {

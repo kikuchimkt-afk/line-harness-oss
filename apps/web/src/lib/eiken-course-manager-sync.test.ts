@@ -35,6 +35,7 @@ const booking = {
   slot_ends_at: '2026-09-01T09:00:00.000Z',
   friend_display_name: '保護者',
   friend_line_user_id: 'U1',
+  friend_course_level: '3級',
 } satisfies EventBookingItem
 
 describe('Eiken course manager sync', () => {
@@ -49,6 +50,7 @@ describe('Eiken course manager sync', () => {
 
     expect(payload.type).toBe(EIKEN_MANAGER_MESSAGE_TYPE)
     expect(payload.rows[0]).toContain('受講者氏名')
+    expect(payload.rows[0]).toContain('受講級')
     expect(payload.rows[1]).toEqual(expect.arrayContaining([
       '英検集中講座｜開講日程予約',
       '2026/09/01',
@@ -57,6 +59,7 @@ describe('Eiken course manager sync', () => {
       '確定',
       '受講 太郎',
       '中学3年',
+      '3級',
     ]))
     expect(JSON.stringify(payload)).not.toContain('U1')
     expect(JSON.stringify(payload)).not.toContain('保護者')

@@ -343,6 +343,7 @@ function BookingsInner() {
       '経由アカウント',
       '受付日時',
       ...formFields.map((field) => field.label),
+      '受講級',
       '備考',
       '内部メモ',
     ]
@@ -358,6 +359,7 @@ function BookingsInner() {
         accountLabel(booking.line_account_id),
         formatJp(booking.requested_at),
         ...formFields.map((field) => answerValue(booking, field)),
+        booking.friend_course_level ?? '',
         booking.customer_note ?? '',
         booking.internal_note ?? '',
       ]),
