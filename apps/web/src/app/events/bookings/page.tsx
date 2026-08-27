@@ -8,6 +8,12 @@ import Header from '@/components/layout/header'
 import { useAccount } from '@/contexts/account-context'
 import { eventsApi, type EventBookingFormField, type EventBookingItem, type EventDetail } from '@/lib/api'
 import {
+  buildEikenManagerSyncPayload,
+  EIKEN_MANAGER_PRIMARY_ORIGIN,
+  EIKEN_MANAGER_READY_MESSAGE,
+  resolveEikenManagerOrigin,
+} from '@/lib/eiken-course-manager-sync'
+import {
   buildEventBookingCalendarIndex,
   countEventBookingStatuses,
   eventBookingDateKey,
@@ -211,6 +217,7 @@ function BookingsInner() {
     () => defaultScheduledNotificationTime(),
   )
   const [notificationDisabled, setNotificationDisabled] = useState(false)
+  const [managerSyncNotice, setManagerSyncNotice] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!selectedAccountId || !eventId) return
@@ -238,7 +245,11 @@ function BookingsInner() {
     void refresh()
   }, [refresh])
 
-  const formFields = event ? parseFormFields(event.booking_form_fields) : []
+  const formFields = useMemo(
+    () => event ? parseFormFields(event.booking_form_fields) : [],
+    [event],
+  )
+  const managerSyncTarget = resolveEikenManagerOrigin(params.get('eiken_sync_target'))
   const accountLabelById = useMemo(() => {
     const map = new Map<string, string>()
     for (const account of accounts) {
@@ -273,6 +284,48 @@ function BookingsInner() {
   function accountLabel(lineAccountId: string | null | undefined): string {
     if (!lineAccountId) return ''
     return accountLabelById.get(lineAccountId) ?? lineAccountId.slice(0, 8)
+  }
+
+  const managerSyncPayload = useMemo(
+    () => event
+      ? buildEikenManagerSyncPayload(
+          event,
+          allItems,
+          formFields,
+        )
+      : null,
+    [event, allItems, formFields],
+  )
+
+  useEffect(() => {
+    if (!managerSyncTarget || !managerSyncPayload || loading || !window.opener) return
+    window.opener.postMessage(managerSyncPayload, managerSyncTarget)
+    setManagerSyncNotice('英検集中講座 管理アプリへ予約データを送りました。')
+  }, [loading, managerSyncPayload, managerSyncTarget])
+
+  function sendToEikenManager() {
+    if (!managerSyncPayload) return
+    const managerWindow = window.open(EIKEN_MANAGER_PRIMARY_ORIGIN, 'eiken-course-manager')
+    if (!managerWindow) {
+      setError('管理アプリを開けませんでした。ブラウザのポップアップを許可してください。')
+      return
+    }
+
+    const handleReady = (message: MessageEvent<unknown>) => {
+      if (
+        message.origin !== EIKEN_MANAGER_PRIMARY_ORIGIN ||
+        message.source !== managerWindow ||
+        !message.data ||
+        typeof message.data !== 'object' ||
+        (message.data as { type?: unknown }).type !== EIKEN_MANAGER_READY_MESSAGE
+      ) return
+      managerWindow.postMessage(managerSyncPayload, EIKEN_MANAGER_PRIMARY_ORIGIN)
+      window.removeEventListener('message', handleReady)
+      setManagerSyncNotice('英検集中講座 管理アプリへ予約データを送りました。')
+    }
+
+    window.addEventListener('message', handleReady)
+    window.setTimeout(() => window.removeEventListener('message', handleReady), 15_000)
   }
 
   async function downloadExcel() {
@@ -521,6 +574,14 @@ function BookingsInner() {
             )}
             <button
               type="button"
+              onClick={sendToEikenManager}
+              disabled={!event || allItems.length === 0}
+              className="rounded-xl border border-green-200 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 shadow-sm transition hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              英検管理へ送る
+            </button>
+            <button
+              type="button"
               onClick={downloadExcel}
               disabled={!event || allItems.length === 0}
               className="rounded-xl border border-pink-200 bg-white/85 px-4 py-2 text-sm font-medium text-pink-700 shadow-sm transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -529,6 +590,12 @@ function BookingsInner() {
             </button>
           </div>
         </div>
+
+        {managerSyncNotice && (
+          <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800" role="status">
+            {managerSyncNotice} データはブラウザ間で直接受け渡しされ、外部には保存されません。
+          </div>
+        )}
 
         {viewMode === 'list' && (
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
