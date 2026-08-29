@@ -226,7 +226,7 @@ export default function FormCampaignsPage() {
     setCopiedFrom({ id: form.id, name: form.name })
     setCreated(null)
     setError('')
-    setFormName(`${form.name}（${accountName}用）`)
+    setFormName(`${form.name}（${accountName}）`)
     setDescription(form.description ?? '')
     setRouteName(`${form.name} ${accountName}`)
     setRefCode(buildRefCode())
@@ -277,7 +277,7 @@ export default function FormCampaignsPage() {
     const account = accounts.find((item) => item.id === accountId)
     if (!account) return
     const accountName = account.displayName || account.name
-    setFormName(`${copiedFrom.name}（${accountName}用）`)
+    setFormName(`${copiedFrom.name}（${accountName}）`)
     setRouteName(`${copiedFrom.name} ${accountName}`)
   }
 
