@@ -139,6 +139,14 @@ export default function FormSubmissionsPage() {
     loadSubmissions(formId)
   }
 
+  useEffect(() => {
+    if (loading || selectedFormId || forms.length === 0) return
+    const requestedFormId = new URLSearchParams(window.location.search).get('formId')
+    if (requestedFormId && forms.some((form) => form.id === requestedFormId)) {
+      handleSelectForm(requestedFormId)
+    }
+  }, [forms, loading, selectedFormId])
+
   const selectedForm = useMemo(
     () => forms.find((f) => f.id === selectedFormId) ?? null,
     [forms, selectedFormId],
@@ -263,6 +271,12 @@ export default function FormSubmissionsPage() {
               </span>
             </div>
             <div className="flex items-center gap-3">
+              <Link
+                href={`/form-campaigns?copyFrom=${encodeURIComponent(selectedForm.id)}`}
+                className="inline-flex items-center rounded-lg border border-[#06C755] bg-white px-3 py-2 text-xs font-semibold text-[#06C755] hover:bg-green-50"
+              >
+                別の公式LINEへ複製
+              </Link>
               <button
                 type="button"
                 onClick={downloadExcel}

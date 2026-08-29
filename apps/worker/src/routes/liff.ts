@@ -980,6 +980,7 @@ liffRoutes.get('/auth/callback', async (c) => {
           const account = await getAcctById(db, friend.line_account_id);
           if (account?.channel_access_token) accessToken = account.channel_access_token;
           if (account?.liff_id) {
+            formQuery.set('liffId', account.liff_id);
             formLiffUrl = `https://liff.line.me/${account.liff_id}?${formQuery.toString()}`;
           }
         }
@@ -1805,6 +1806,7 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
       const account = await getLineAccountById(db, (friend as any).line_account_id);
       if (account?.channel_access_token) accessToken = account.channel_access_token;
       if (account?.liff_id) {
+        formQuery.set('liffId', account.liff_id);
         formLiffUrl = `https://liff.line.me/${account.liff_id}?${formQuery.toString()}`;
       }
     }

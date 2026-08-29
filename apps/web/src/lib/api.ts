@@ -1284,6 +1284,14 @@ export const api = {
         submitCount: number
         createdAt: string
         updatedAt: string
+        lastSubmittedAt: string | null
+        usedByAccounts: Array<{
+          id: string
+          name: string
+          country: string | null
+          displayOrder: number
+          count: number
+        }>
       }>>>('/api/forms'),
     get: (id: string) =>
       fetchApi<ApiResponse<{

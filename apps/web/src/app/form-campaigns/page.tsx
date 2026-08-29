@@ -1,15 +1,21 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import Header from '@/components/layout/header'
 import { api } from '@/lib/api'
+import {
+  buildAccountFormLinks,
+  copyFieldsToCampaignDraft,
+  type CampaignSourceField,
+  type CampaignFieldType,
+} from '@/lib/form-campaign-copy'
 import { useAccount } from '@/contexts/account-context'
 import type { Tag } from '@line-crm/shared'
 
 const WORKER_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
 
-type FieldType = 'text' | 'textarea' | 'select' | 'radio' | 'checkbox' | 'email' | 'tel' | 'date'
+type FieldType = CampaignFieldType
 
 type DraftField = {
   id: string
@@ -23,11 +29,32 @@ type DraftField = {
 type CreatedCampaign = {
   formId: string
   formName: string
+  accountName: string
   refCode: string
   campaignUrl: string
   directFormUrl: string
   shareText: string
 }
+
+type ExistingForm = {
+  id: string
+  name: string
+  description: string | null
+  fields: CampaignSourceField[]
+  onSubmitTagId: string | null
+  onSubmitScenarioId: string | null
+  onSubmitMessageType: 'text' | 'flex' | null
+  onSubmitMessageContent: string | null
+  saveToMetadata: boolean
+  isActive: boolean
+  submitCount: number
+  createdAt: string
+  updatedAt: string
+  lastSubmittedAt?: string | null
+  usedByAccounts?: Array<{ id: string; name: string; count: number }>
+}
+
+type MessageMode = 'guided' | 'custom' | 'none'
 
 const fieldTypeLabels: Record<FieldType, string> = {
   text: '短文',
@@ -116,12 +143,18 @@ function buildShareText(campaignUrl: string) {
 }
 
 export default function FormCampaignsPage() {
-  const { selectedAccount } = useAccount()
+  const { accounts, selectedAccount, selectedAccountId } = useAccount()
   const [tags, setTags] = useState<Tag[]>([])
+  const [tagsLoaded, setTagsLoaded] = useState(false)
+  const [existingForms, setExistingForms] = useState<ExistingForm[]>([])
+  const [formsLoading, setFormsLoading] = useState(true)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedCampaign | null>(null)
+  const [copiedFrom, setCopiedFrom] = useState<{ id: string; name: string } | null>(null)
+  const [targetAccountId, setTargetAccountId] = useState('')
+  const appliedCopyId = useRef<string | null>(null)
 
   const [formName, setFormName] = useState('夏期講習クーポン用アンケート')
   const [description, setDescription] = useState('現在の学習状況を確認するための簡単なアンケートです。')
@@ -132,6 +165,10 @@ export default function FormCampaignsPage() {
   const [couponBody, setCouponBody] = useState('面談時またはお申し込み時に、このメッセージをご提示ください。')
   const [couponUrl, setCouponUrl] = useState('')
   const [couponNote, setCouponNote] = useState('有効期限や対象講座がある場合は、教室からの案内をご確認ください。')
+  const [messageMode, setMessageMode] = useState<MessageMode>('guided')
+  const [customMessageType, setCustomMessageType] = useState<'text' | 'flex'>('text')
+  const [customMessageContent, setCustomMessageContent] = useState('')
+  const [saveToMetadata, setSaveToMetadata] = useState(true)
   const [fields, setFields] = useState<DraftField[]>([
     newField({ label: '現在通われている学校名', required: true, placeholder: '例：藍住中学校' }),
     newField({
@@ -151,12 +188,114 @@ export default function FormCampaignsPage() {
       .catch(() => {
         setTags([])
       })
+      .finally(() => setTagsLoaded(true))
   }, [])
 
-  const couponPreview = useMemo(
-    () => buildCouponMessage({ couponTitle, couponBody, couponUrl, couponNote }),
-    [couponTitle, couponBody, couponUrl, couponNote],
-  )
+  useEffect(() => {
+    if (selectedAccountId && !targetAccountId) setTargetAccountId(selectedAccountId)
+  }, [selectedAccountId, targetAccountId])
+
+  const loadExistingForms = async () => {
+    setFormsLoading(true)
+    try {
+      const res = await api.forms.list()
+      if (res.success) {
+        setExistingForms(res.data.map((form) => ({
+          ...form,
+          fields: (form.fields ?? []) as CampaignSourceField[],
+        })))
+      }
+    } catch {
+      setExistingForms([])
+    } finally {
+      setFormsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadExistingForms()
+  }, [])
+
+  const targetAccount = accounts.find((account) => account.id === targetAccountId) ?? selectedAccount
+
+  const applyFormCopy = (form: ExistingForm) => {
+    const copiedFields = copyFieldsToCampaignDraft(form.fields, () => crypto.randomUUID())
+    const copiedTag = tags.find((tag) => tag.id === form.onSubmitTagId)
+    const accountName = targetAccount?.displayName || targetAccount?.name || '別の公式LINE'
+
+    setCopiedFrom({ id: form.id, name: form.name })
+    setCreated(null)
+    setError('')
+    setFormName(`${form.name}（${accountName}用）`)
+    setDescription(form.description ?? '')
+    setRouteName(`${form.name} ${accountName}`)
+    setRefCode(buildRefCode())
+    setTagName(copiedTag?.name ?? '')
+    setFields(copiedFields.length > 0 ? copiedFields : [newField({ label: '' })])
+
+    if (form.onSubmitMessageType && form.onSubmitMessageContent) {
+      setMessageMode('custom')
+      setCustomMessageType(form.onSubmitMessageType)
+      setCustomMessageContent(form.onSubmitMessageContent)
+    } else {
+      setMessageMode('none')
+      setCustomMessageType('text')
+      setCustomMessageContent('')
+    }
+    setSaveToMetadata(form.saveToMetadata)
+
+    window.setTimeout(() => document.getElementById('step-basic')?.scrollIntoView({ behavior: 'smooth' }), 0)
+  }
+
+  const resetDraft = () => {
+    setCopiedFrom(null)
+    setCreated(null)
+    setError('')
+    setFormName('新しいアンケート')
+    setDescription('')
+    setRouteName('アンケート案内')
+    setRefCode(buildRefCode())
+    setTagName('アンケート回答済み')
+    setFields([
+      newField({ label: '現在通われている学校名', required: true, placeholder: '例：藍住中学校' }),
+      newField({
+        label: '学年',
+        type: 'select',
+        required: true,
+        optionsText: ['小学4年生', '小学5年生', '小学6年生', '中学1年生', '中学2年生', '中学3年生'].join('\n'),
+      }),
+    ])
+    setMessageMode('guided')
+    setCustomMessageType('text')
+    setCustomMessageContent('')
+    setSaveToMetadata(true)
+  }
+
+  const changeTargetAccount = (accountId: string) => {
+    setTargetAccountId(accountId)
+    if (!copiedFrom) return
+    const account = accounts.find((item) => item.id === accountId)
+    if (!account) return
+    const accountName = account.displayName || account.name
+    setFormName(`${copiedFrom.name}（${accountName}用）`)
+    setRouteName(`${copiedFrom.name} ${accountName}`)
+  }
+
+  useEffect(() => {
+    if (!tagsLoaded || existingForms.length === 0 || appliedCopyId.current || !targetAccount) return
+    const sourceId = new URLSearchParams(window.location.search).get('copyFrom')
+    if (!sourceId) return
+    const source = existingForms.find((form) => form.id === sourceId)
+    if (!source) return
+    appliedCopyId.current = sourceId
+    applyFormCopy(source)
+  }, [existingForms, tagsLoaded, targetAccount?.id])
+
+  const messageContent = useMemo(() => {
+    if (messageMode === 'none') return ''
+    if (messageMode === 'custom') return customMessageContent
+    return buildCouponMessage({ couponTitle, couponBody, couponUrl, couponNote })
+  }, [messageMode, customMessageContent, couponTitle, couponBody, couponUrl, couponNote])
   const normalizedFields = useMemo(() => normalizeFields(fields), [fields])
   const invalidChoiceField = useMemo(
     () =>
@@ -167,8 +306,9 @@ export default function FormCampaignsPage() {
   )
   const isBasicReady = Boolean(formName.trim() && routeName.trim() && refCode.trim())
   const isQuestionReady = normalizedFields.length > 0 && !invalidChoiceField
-  const isCouponReady = Boolean(couponPreview.trim())
-  const isReadyToCreate = isBasicReady && isQuestionReady && isCouponReady
+  const isMessageReady = messageMode === 'none' || Boolean(messageContent.trim())
+  const isTargetReady = Boolean(targetAccount?.channelId && targetAccount?.liffId)
+  const isReadyToCreate = isBasicReady && isQuestionReady && isMessageReady && isTargetReady
   const guideSteps = [
     {
       number: 1,
@@ -186,10 +326,10 @@ export default function FormCampaignsPage() {
     },
     {
       number: 3,
-      title: '特典を書く',
-      description: '回答後にLINEで送るクーポン文面を整えます。',
+      title: '送信後を決める',
+      description: '回答後にLINEで送るメッセージを確認します。',
       href: '#step-coupon',
-      done: isCouponReady,
+      done: isMessageReady,
     },
     {
       number: 4,
@@ -205,7 +345,7 @@ export default function FormCampaignsPage() {
       ? 1
       : !isQuestionReady
         ? 2
-        : !isCouponReady
+        : !isMessageReady
           ? 3
           : 4
 
@@ -281,23 +421,36 @@ export default function FormCampaignsPage() {
       setError('流入元コードを入力してください。')
       return
     }
+    if (!targetAccount) {
+      setError('配布する公式LINEを選択してください。')
+      return
+    }
+    if (!targetAccount.liffId) {
+      setError(`「${targetAccount.displayName || targetAccount.name}」のLIFF IDが未設定です。LINEアカウント設定で登録してください。`)
+      return
+    }
 
     setLoading(true)
     try {
       const tagId = await ensureTag()
+      const onSubmitMessageType = messageMode === 'none'
+        ? null
+        : messageMode === 'custom'
+          ? customMessageType
+          : 'text'
       const formRes = await api.forms.create({
         name: formName.trim(),
         description: description.trim() || null,
         fields: normalizedFields,
         onSubmitTagId: tagId,
-        onSubmitMessageType: 'text',
-        onSubmitMessageContent: couponPreview,
-        saveToMetadata: true,
+        onSubmitMessageType,
+        onSubmitMessageContent: messageMode === 'none' ? null : messageContent,
+        saveToMetadata,
       })
       if (!formRes.success) throw new Error('フォームの作成に失敗しました。')
 
       const cleanRefCode = refCode.trim()
-      await api.entryRoutes.create({
+      const routeRes = await api.entryRoutes.create({
         refCode: cleanRefCode,
         name: routeName.trim() || formName.trim(),
         tagId: null,
@@ -307,19 +460,25 @@ export default function FormCampaignsPage() {
         runAccountFriendAddScenarios: true,
         isActive: true,
       })
+      if (!routeRes.success) throw new Error('配布用の流入経路を作成できませんでした。')
 
-      const campaignUrl = `${WORKER_BASE}/r/${encodeURIComponent(cleanRefCode)}?form=${encodeURIComponent(formRes.data.id)}`
-      const directFormUrl = selectedAccount?.liffId
-        ? `https://liff.line.me/${selectedAccount.liffId}?page=form&id=${encodeURIComponent(formRes.data.id)}`
-        : `${WORKER_BASE}?page=form&id=${encodeURIComponent(formRes.data.id)}`
+      const { campaignUrl, directFormUrl } = buildAccountFormLinks({
+        workerBase: WORKER_BASE,
+        account: targetAccount,
+        formId: formRes.data.id,
+        refCode: cleanRefCode,
+      })
       setCreated({
         formId: formRes.data.id,
         formName: formRes.data.name,
+        accountName: targetAccount.displayName || targetAccount.name,
         refCode: cleanRefCode,
         campaignUrl,
         directFormUrl,
         shareText: buildShareText(campaignUrl),
       })
+      setCopiedFrom(null)
+      await loadExistingForms()
     } catch (err) {
       setError(err instanceof Error ? err.message : '作成に失敗しました。')
     } finally {
@@ -331,7 +490,7 @@ export default function FormCampaignsPage() {
     <div>
       <Header
         title="アンケート・クーポン"
-        description="質問作成からURL・QR配布まで、順番に進められます。"
+        description="作成済みフォームの複製から、公式LINE別のURL・QR配布まで管理できます。"
         action={
           <Link
             href="/form-submissions"
@@ -341,6 +500,65 @@ export default function FormCampaignsPage() {
           </Link>
         }
       />
+
+      <section className="glass-panel mb-5 rounded-lg p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-bold text-rose-700">作成済みフォーム</p>
+            <h2 className="mt-1 text-lg font-bold text-gray-900">内容をコピーして別の公式LINEへ流用</h2>
+            <p className="mt-2 text-sm leading-6 text-gray-500">
+              元フォームと回答は変更せず、質問・説明・回答後メッセージを新しいフォームへコピーします。
+            </p>
+          </div>
+          <a
+            href="#step-basic"
+            onClick={resetDraft}
+            className="inline-flex rounded-lg border border-pink-200 bg-white/70 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-pink-50"
+          >
+            ＋ 新規フォームを作成
+          </a>
+        </div>
+
+        {formsLoading ? (
+          <p className="mt-5 text-sm text-gray-400">フォームを読み込み中...</p>
+        ) : existingForms.length === 0 ? (
+          <p className="mt-5 rounded-lg border border-pink-100 bg-white/55 p-4 text-sm text-gray-500">作成済みフォームはありません。</p>
+        ) : (
+          <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {existingForms.map((form) => (
+              <article key={form.id} className="rounded-xl border border-pink-100 bg-white/64 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="text-sm font-bold leading-6 text-gray-900">{form.name}</h3>
+                  <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${form.isActive ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                    {form.isActive ? '受付中' : '受付停止'}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-gray-500">回答 {form.submitCount}件・質問 {form.fields.length}件</p>
+                {form.usedByAccounts && form.usedByAccounts.length > 0 && (
+                  <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-gray-400">
+                    利用実績: {form.usedByAccounts.map((account) => `${account.name} ${account.count}件`).join('、')}
+                  </p>
+                )}
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => applyFormCopy(form)}
+                    className="rounded-lg bg-[#06C755] px-3 py-2 text-xs font-semibold text-white hover:bg-[#05b64d]"
+                  >
+                    内容をコピーして流用
+                  </button>
+                  <Link
+                    href={`/forms/edit?formId=${encodeURIComponent(form.id)}`}
+                    className="rounded-lg border border-pink-200 bg-white px-3 py-2 text-xs font-medium text-rose-700 hover:bg-pink-50"
+                  >
+                    編集
+                  </Link>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="glass-panel mb-5 rounded-lg p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -400,7 +618,35 @@ export default function FormCampaignsPage() {
               ここは管理用の名前です。相手に見せる文章ではないので、あとから分かる名前にしておくと安心です。
             </p>
           </div>
+          {copiedFrom && (
+            <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+              「{copiedFrom.name}」の内容をコピーしました。元フォームと既存回答は変更されません。
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <label className="block lg:col-span-2">
+              <span className="mb-1 block text-xs font-semibold text-gray-600">配布する公式LINE</span>
+              <select
+                value={targetAccountId}
+                onChange={(e) => changeTargetAccount(e.target.value)}
+                className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
+              >
+                <option value="">選択してください</option>
+                {accounts.filter((account) => account.isActive).map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.displayName || account.name}{account.liffId ? '' : '（LIFF未設定）'}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-[11px] leading-5 text-gray-500">
+                この公式LINEのLIFFを使った専用URLとQRコードを発行します。
+              </span>
+              {targetAccount && !targetAccount.liffId && (
+                <span className="mt-1 block text-xs font-medium text-rose-700">
+                  LIFF IDが未設定のため、作成前に「LINEアカウント」で設定してください。
+                </span>
+              )}
+            </label>
             <label className="block">
               <span className="mb-1 block text-xs font-semibold text-gray-600">フォーム名</span>
               <input
@@ -584,49 +830,86 @@ export default function FormCampaignsPage() {
         <aside className="space-y-5">
           <section id="step-coupon" className="glass-panel scroll-mt-6 rounded-lg p-5">
             <p className="text-xs font-bold text-rose-700">Step 3</p>
-            <h2 className="mt-1 text-base font-semibold text-gray-900">回答後に送る特典メッセージ</h2>
+            <h2 className="mt-1 text-base font-semibold text-gray-900">回答後に送るメッセージ</h2>
             <p className="mt-1 text-xs leading-5 text-gray-500">
-              アンケート送信後、相手のLINEへ自動で届く文面です。クーポンURLがなければ、教室で見せてもらう案内として使えます。
+              アンケート送信後、回答した公式LINEから自動で届く文面です。コピーしたフォームは元の文面をそのまま引き継ぎます。
             </p>
-            <div className="mt-4 space-y-3">
-              <label className="block">
-                <span className="mb-1 block text-xs font-semibold text-gray-600">特典名</span>
-                <input
-                  value={couponTitle}
-                  onChange={(e) => setCouponTitle(e.target.value)}
-                  className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-xs font-semibold text-gray-600">本文</span>
-                <textarea
-                  value={couponBody}
-                  onChange={(e) => setCouponBody(e.target.value)}
-                  className="min-h-24 w-full rounded-lg border px-3 py-2 text-sm outline-none"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-xs font-semibold text-gray-600">クーポンURL</span>
-                <input
-                  value={couponUrl}
-                  onChange={(e) => setCouponUrl(e.target.value)}
-                  className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
-                  placeholder="LINE公式クーポンURLなど"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-xs font-semibold text-gray-600">補足</span>
-                <textarea
-                  value={couponNote}
-                  onChange={(e) => setCouponNote(e.target.value)}
-                  className="min-h-20 w-full rounded-lg border px-3 py-2 text-sm outline-none"
-                />
-              </label>
+            <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {([
+                ['guided', '特典メッセージ'],
+                ['custom', '自由入力'],
+                ['none', '送信しない'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setMessageMode(value)}
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium ${messageMode === value ? 'border-[#06C755] bg-green-50 text-green-700' : 'border-pink-100 bg-white/60 text-gray-600'}`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-            <div className="mt-4 rounded-lg border border-pink-100 bg-white/62 p-4">
-              <p className="mb-2 text-xs font-semibold text-gray-500">LINE送信プレビュー</p>
-              <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-gray-800">{couponPreview}</pre>
-            </div>
+
+            {messageMode === 'guided' && (
+              <div className="mt-4 space-y-3">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">特典名</span>
+                  <input value={couponTitle} onChange={(e) => setCouponTitle(e.target.value)} className="w-full rounded-lg border px-3 py-2 text-sm outline-none" />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">本文</span>
+                  <textarea value={couponBody} onChange={(e) => setCouponBody(e.target.value)} className="min-h-24 w-full rounded-lg border px-3 py-2 text-sm outline-none" />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">クーポンURL</span>
+                  <input value={couponUrl} onChange={(e) => setCouponUrl(e.target.value)} className="w-full rounded-lg border px-3 py-2 text-sm outline-none" placeholder="LINE公式クーポンURLなど" />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">補足</span>
+                  <textarea value={couponNote} onChange={(e) => setCouponNote(e.target.value)} className="min-h-20 w-full rounded-lg border px-3 py-2 text-sm outline-none" />
+                </label>
+              </div>
+            )}
+
+            {messageMode === 'custom' && (
+              <div className="mt-4 space-y-3">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">形式</span>
+                  <select value={customMessageType} onChange={(e) => setCustomMessageType(e.target.value as 'text' | 'flex')} className="w-full rounded-lg border px-3 py-2 text-sm outline-none">
+                    <option value="text">テキスト</option>
+                    <option value="flex">Flex JSON</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-gray-600">メッセージ内容</span>
+                  <textarea
+                    value={customMessageContent}
+                    onChange={(e) => setCustomMessageContent(e.target.value)}
+                    className="min-h-40 w-full rounded-lg border px-3 py-2 text-sm outline-none"
+                    placeholder="ご回答ありがとうございます。"
+                  />
+                </label>
+              </div>
+            )}
+
+            {messageMode === 'none' ? (
+              <p className="mt-4 rounded-lg border border-gray-200 bg-white/55 p-3 text-xs leading-5 text-gray-500">回答後の自動メッセージは送信しません。</p>
+            ) : (
+              <div className="mt-4 rounded-lg border border-pink-100 bg-white/62 p-4">
+                <p className="mb-2 text-xs font-semibold text-gray-500">LINE送信プレビュー</p>
+                <pre className="whitespace-pre-wrap break-words text-sm leading-6 text-gray-800">{messageContent}</pre>
+              </div>
+            )}
+            <label className="mt-4 flex items-start gap-2 text-xs leading-5 text-gray-600">
+              <input
+                type="checkbox"
+                checked={saveToMetadata}
+                onChange={(e) => setSaveToMetadata(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[#06C755]"
+              />
+              回答内容を友だち情報にも保存する
+            </label>
           </section>
 
           <section id="step-create" className="glass-panel scroll-mt-6 rounded-lg p-5">
@@ -642,8 +925,12 @@ export default function FormCampaignsPage() {
                 <span className={isQuestionReady ? 'text-gray-700' : 'text-gray-500'}>質問が1つ以上あり、選択肢も設定済み</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className={`h-2.5 w-2.5 rounded-full ${isCouponReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
-                <span className={isCouponReady ? 'text-gray-700' : 'text-gray-500'}>回答後に送る特典メッセージがある</span>
+                <span className={`h-2.5 w-2.5 rounded-full ${isMessageReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
+                <span className={isMessageReady ? 'text-gray-700' : 'text-gray-500'}>回答後メッセージの設定を確認済み</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${isTargetReady ? 'bg-pink-400' : 'bg-gray-200'}`} />
+                <span className={isTargetReady ? 'text-gray-700' : 'text-gray-500'}>配布する公式LINEのLIFFが設定済み</span>
               </div>
             </div>
             <button
@@ -652,11 +939,11 @@ export default function FormCampaignsPage() {
               disabled={loading || !isReadyToCreate}
               className="lh-gradient-button mt-4 w-full rounded-lg px-4 py-3 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? '作成中...' : isReadyToCreate ? 'アンケートとクーポンを作成' : '未入力を確認してください'}
+              {loading ? '作成中...' : isReadyToCreate ? (copiedFrom ? 'コピーしたフォームを作成' : 'フォームを作成') : '未入力を確認してください'}
             </button>
-            {selectedAccount && (
+            {targetAccount && (
               <p className="mt-3 text-xs text-gray-500">
-                現在の対象: {selectedAccount.displayName || selectedAccount.name}
+                配布先: {targetAccount.displayName || targetAccount.name}
               </p>
             )}
             <p className="mt-3 text-xs leading-5 text-gray-500">
@@ -668,7 +955,7 @@ export default function FormCampaignsPage() {
             <section className="glass-panel rounded-lg p-5">
               <h2 className="text-base font-semibold text-gray-900">作成できました</h2>
               <p className="mt-1 text-xs leading-5 text-gray-500">
-                下のURLかQRコードを使えば、友だち追加後にアンケートへ進めます。回答後は特典メッセージが自動で届きます。
+                「{created.accountName}」専用のURLです。元フォームとは別に回答を集計します。
               </p>
               <div className="mt-4 rounded-lg border border-pink-100 bg-pink-50/60 p-3">
                 <p className="text-xs font-bold text-rose-700">次にやること</p>
@@ -680,7 +967,7 @@ export default function FormCampaignsPage() {
               </div>
               <div className="mt-4 space-y-4">
                 <div>
-                  <p className="text-xs font-semibold text-gray-500">配信用URL</p>
+                  <p className="text-xs font-semibold text-gray-500">配信用URL（友だち追加確認を含む）</p>
                   <div className="mt-1 break-all rounded-lg border border-pink-100 bg-white/65 p-3 text-xs text-gray-700">
                     {created.campaignUrl}
                   </div>
@@ -690,6 +977,19 @@ export default function FormCampaignsPage() {
                     className="mt-2 rounded-lg border border-pink-200 bg-white/70 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-pink-50"
                   >
                     {copied === 'url' ? 'コピーしました' : 'URLをコピー'}
+                  </button>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-gray-500">登録済みの友だち向け・フォーム直通URL</p>
+                  <div className="mt-1 break-all rounded-lg border border-pink-100 bg-white/65 p-3 text-xs text-gray-700">
+                    {created.directFormUrl}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => copyText('direct-url', created.directFormUrl)}
+                    className="mt-2 rounded-lg border border-pink-200 bg-white/70 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-pink-50"
+                  >
+                    {copied === 'direct-url' ? 'コピーしました' : '直通URLをコピー'}
                   </button>
                 </div>
                 <div>
@@ -716,7 +1016,7 @@ export default function FormCampaignsPage() {
                   </div>
                 </div>
                 <Link
-                  href="/form-submissions"
+                  href={`/form-submissions?formId=${encodeURIComponent(created.formId)}`}
                   className="inline-flex rounded-lg bg-white/70 px-3 py-2 text-xs font-medium text-rose-700 ring-1 ring-pink-200 hover:bg-pink-50"
                 >
                   回答一覧へ
@@ -724,8 +1024,7 @@ export default function FormCampaignsPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setCreated(null)
-                    setRefCode(buildRefCode())
+                    resetDraft()
                     window.location.hash = 'step-basic'
                   }}
                   className="ml-2 inline-flex rounded-lg bg-white/70 px-3 py-2 text-xs font-medium text-gray-600 ring-1 ring-pink-100 hover:bg-pink-50"
