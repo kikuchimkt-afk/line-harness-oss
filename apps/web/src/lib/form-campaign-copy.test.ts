@@ -44,4 +44,19 @@ describe('buildAccountFormLinks', () => {
       'https://liff.line.me/2000000000-AbCdEf?page=form&id=form+id&liffId=2000000000-AbCdEf',
     )
   })
+
+  it('rebuilds links for an existing form without requiring an entry-route code', () => {
+    const links = buildAccountFormLinks({
+      workerBase: 'https://worker.example.com',
+      account: { channelId: '2000000000', liffId: '2000000000-AbCdEf' },
+      formId: 'existing-form',
+    })
+
+    expect(links.campaignUrl).toBe(
+      'https://worker.example.com/auth/line?form=existing-form&account=2000000000',
+    )
+    expect(links.directFormUrl).toBe(
+      'https://liff.line.me/2000000000-AbCdEf?page=form&id=existing-form&liffId=2000000000-AbCdEf',
+    )
+  })
 })

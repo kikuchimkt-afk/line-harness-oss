@@ -41,14 +41,14 @@ export function buildAccountFormLinks(input: {
   workerBase: string
   account: FormLinkAccount
   formId: string
-  refCode: string
+  refCode?: string
 }): { campaignUrl: string; directFormUrl: string } {
   const workerBase = input.workerBase.replace(/\/$/, '')
-  const campaignParams = new URLSearchParams({
-    ref: input.refCode,
-    form: input.formId,
-    account: input.account.channelId,
-  })
+  const campaignParams = new URLSearchParams()
+  const refCode = input.refCode?.trim()
+  if (refCode) campaignParams.set('ref', refCode)
+  campaignParams.set('form', input.formId)
+  campaignParams.set('account', input.account.channelId)
   const formParams = new URLSearchParams({ page: 'form', id: input.formId })
   if (input.account.liffId) formParams.set('liffId', input.account.liffId)
 
