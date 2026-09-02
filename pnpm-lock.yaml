@@ -21,6 +21,31 @@ importers:
         specifier: '4'
         version: 4.77.0(@cloudflare/workers-types@4.20260317.1)
 
+  apps/aizumi-events-lp:
+    dependencies:
+      next:
+        specifier: 15.5.14
+        version: 15.5.14(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   apps/liff:
     dependencies:
       '@line/liff':
