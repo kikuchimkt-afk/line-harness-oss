@@ -378,6 +378,237 @@ h3 {
   font-size: 0.9rem;
 }
 
+.appLearningSection {
+  width: min(100%, 1080px);
+  padding-top: 34px;
+}
+
+.appSectionHeading {
+  max-width: 900px;
+}
+
+.keepTogether {
+  white-space: nowrap;
+}
+
+.learningFormula {
+  display: flex;
+  margin-top: 40px;
+  padding: 24px 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  color: var(--teal-dark);
+  background: linear-gradient(135deg, rgba(223, 241, 239, 0.8), rgba(253, 230, 239, 0.62));
+  border: 1px solid var(--line);
+  border-radius: 20px;
+}
+
+.learningFormula strong {
+  font-size: clamp(1rem, 2.2vw, 1.22rem);
+  letter-spacing: 0.03em;
+}
+
+.learningFormula span {
+  color: var(--pink);
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.learningCycle {
+  display: grid;
+  margin: 22px 0 0;
+  padding: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  list-style: none;
+  counter-reset: none;
+}
+
+.cycleCard {
+  position: relative;
+  min-width: 0;
+  padding: 22px 20px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.cycleCard:not(:last-child)::after {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: -10px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: var(--teal);
+  background: var(--page);
+  border-radius: 50%;
+  content: "›";
+  font-weight: 700;
+  transform: translateY(-50%);
+}
+
+.cycleCard > span,
+.appCardMeta > span {
+  color: var(--pink);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+}
+
+.cycleCard h3 {
+  margin: 10px 0 6px;
+  font-size: 1rem;
+}
+
+.cycleCard p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.studyAppGrid {
+  display: grid;
+  margin-top: 50px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.studyAppCard {
+  display: flex;
+  min-width: 0;
+  padding: 28px;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: 0 14px 34px rgba(38, 56, 68, 0.08);
+}
+
+.appCardMeta {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.appCardMeta small {
+  color: var(--teal-dark);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.studyAppCard h3 {
+  margin: 24px 0 5px;
+  font-size: 1.2rem;
+}
+
+.appProduct {
+  margin: 0;
+  color: var(--teal-dark);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.appDescription {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.appUse {
+  margin: 20px 0 0;
+  padding: 15px;
+  color: #4d616c;
+  background: var(--surface-soft);
+  border-radius: 13px;
+  font-size: 0.84rem;
+}
+
+.appUse strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--teal-dark);
+  font-size: 0.72rem;
+}
+
+.appTags {
+  display: flex;
+  margin: 18px 0 0;
+  padding: 0;
+  gap: 7px;
+  flex-wrap: wrap;
+  list-style: none;
+}
+
+.appTags li {
+  padding: 4px 9px;
+  color: var(--muted);
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.appLink {
+  display: flex;
+  margin-top: auto;
+  padding-top: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--teal-dark);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.appLink span {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  place-items: center;
+  background: var(--teal-pale);
+  border-radius: 50%;
+}
+
+.appLink:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.appLink:focus-visible {
+  outline: 3px solid rgba(12, 136, 141, 0.42);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.appSupportNote {
+  margin: 22px 0 0;
+  padding: 18px 20px 18px 48px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  font-size: 0.84rem;
+}
+
+.appSupportNote::before {
+  display: inline-block;
+  margin-left: -28px;
+  margin-right: 10px;
+  color: var(--teal);
+  content: "●";
+  font-size: 0.68rem;
+}
+
 .detailSectionSoft {
   width: min(calc(100% - 40px), 960px);
   padding: 62px;
@@ -456,8 +687,17 @@ h3 {
 
 @media (max-width: 760px) {
   .eventGrid,
-  .principleGrid {
+  .principleGrid,
+  .studyAppGrid {
     grid-template-columns: 1fr;
+  }
+
+  .learningCycle {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cycleCard:nth-child(2)::after {
+    display: none;
   }
 
   .eventCard {
@@ -522,6 +762,32 @@ h3 {
   .detailSection,
   .contactSection {
     padding: 72px 18px;
+  }
+
+  .appLearningSection {
+    padding-top: 28px;
+  }
+
+  .learningFormula {
+    padding: 22px 18px;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .learningCycle {
+    grid-template-columns: 1fr;
+  }
+
+  .cycleCard:not(:last-child)::after {
+    display: none;
+  }
+
+  .studyAppCard {
+    padding: 24px;
+  }
+
+  .appSupportNote {
+    padding: 16px 16px 16px 42px;
   }
 
   .detailSectionSoft {
