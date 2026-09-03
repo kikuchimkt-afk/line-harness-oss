@@ -15,6 +15,10 @@ export interface EventBookingStatusCounts {
   other: number
 }
 
+export function isVisibleEventCalendarBooking(booking: EventBookingItem): boolean {
+  return booking.status !== 'cancelled'
+}
+
 export function eventBookingDateKey(iso: string): string {
   const parts = JST_DATE_FORMATTER.formatToParts(new Date(iso))
   const year = parts.find((part) => part.type === 'year')?.value ?? ''
@@ -28,7 +32,7 @@ export function buildEventBookingCalendarIndex(items: EventBookingItem[]): {
   byDate: Map<string, EventBookingItem[]>
 } {
   const sortedItems = items
-    .slice()
+    .filter(isVisibleEventCalendarBooking)
     .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime())
   const byDate = new Map<string, EventBookingItem[]>()
 
@@ -43,14 +47,15 @@ export function buildEventBookingCalendarIndex(items: EventBookingItem[]): {
 }
 
 export function countEventBookingStatuses(items: EventBookingItem[]): EventBookingStatusCounts {
-  const requested = items.filter((booking) => booking.status === 'requested').length
-  const waitlisted = items.filter((booking) => booking.status === 'waitlisted').length
-  const confirmed = items.filter((booking) => booking.status === 'confirmed').length
+  const visibleItems = items.filter(isVisibleEventCalendarBooking)
+  const requested = visibleItems.filter((booking) => booking.status === 'requested').length
+  const waitlisted = visibleItems.filter((booking) => booking.status === 'waitlisted').length
+  const confirmed = visibleItems.filter((booking) => booking.status === 'confirmed').length
   return {
-    total: items.length,
+    total: visibleItems.length,
     requested,
     waitlisted,
     confirmed,
-    other: items.length - requested - waitlisted - confirmed,
+    other: visibleItems.length - requested - waitlisted - confirmed,
   }
 }

@@ -29,7 +29,7 @@ function booking(id: string, status: string, slotStartsAt: string): EventBooking
 }
 
 describe('event booking calendar data', () => {
-  it('groups every booking status instead of dropping historical reservations', () => {
+  it('excludes cancelled bookings while preserving the other booking states', () => {
     const items = [
       booking('cancelled', 'cancelled', '2026-08-21T09:40:00.000Z'),
       booking('requested', 'requested', '2026-08-21T09:40:00.000Z'),
@@ -44,9 +44,8 @@ describe('event booking calendar data', () => {
     const result = buildEventBookingCalendarIndex(items)
     const dayItems = result.byDate.get('2026-08-21') ?? []
 
-    expect(dayItems).toHaveLength(8)
+    expect(dayItems).toHaveLength(7)
     expect(dayItems.map((item) => item.status)).toEqual([
-      'cancelled',
       'requested',
       'waitlisted',
       'rejected',
@@ -56,12 +55,36 @@ describe('event booking calendar data', () => {
       'expired',
     ])
     expect(countEventBookingStatuses(dayItems)).toEqual({
-      total: 8,
+      total: 7,
       requested: 1,
       waitlisted: 1,
       confirmed: 1,
-      other: 5,
+      other: 4,
     })
+  })
+
+  it('does not count cancelled bookings when given an unfiltered list', () => {
+    const items = [
+      booking('cancelled', 'cancelled', '2026-08-21T09:40:00.000Z'),
+      booking('confirmed', 'confirmed', '2026-08-21T09:40:00.000Z'),
+    ]
+
+    expect(countEventBookingStatuses(items)).toEqual({
+      total: 1,
+      requested: 0,
+      waitlisted: 0,
+      confirmed: 1,
+      other: 0,
+    })
+  })
+
+  it('removes a date that contains only cancelled bookings', () => {
+    const result = buildEventBookingCalendarIndex([
+      booking('cancelled', 'cancelled', '2026-08-21T09:40:00.000Z'),
+    ])
+
+    expect(result.items).toEqual([])
+    expect(result.byDate.has('2026-08-21')).toBe(false)
   })
 
   it('uses Japan time when assigning a booking to a calendar day', () => {

@@ -280,8 +280,10 @@ function BookingsInner() {
       return
     }
     setCalendarMonth(monthKeyFromIso(firstPrimarySlotStart))
-    setSelectedDateKey((prev) => prev ?? eventBookingDateKey(firstPrimarySlotStart))
-  }, [eventId, firstPrimarySlotStart])
+    setSelectedDateKey((prev) =>
+      prev && bookingsByDate.has(prev) ? prev : eventBookingDateKey(firstPrimarySlotStart),
+    )
+  }, [eventId, firstPrimarySlotStart, bookingsByDate])
 
   function accountLabel(lineAccountId: string | null | undefined): string {
     if (!lineAccountId) return ''
@@ -754,7 +756,7 @@ function BookingsInner() {
               <div>
                 <h2 className="text-base font-bold text-gray-900">日別カレンダー</h2>
                 <p className="mt-0.5 text-xs text-gray-500">
-                  承認待ち・確定・キャンセルなど、すべての予約履歴を日ごとに表示します。
+                  キャンセル済みを除く予約を日ごとに表示します。キャンセル履歴は一覧表示で確認できます。
                 </p>
               </div>
               <div className="inline-flex items-center gap-2">
