@@ -216,7 +216,12 @@ export default function KisogakuStepupPage() {
           <h2 id="contact-heading">詳しい内容は教室からご案内します</h2>
           <p>実施日時、学習内容、お申し込み方法については、ECCベストワン藍住校までお問い合わせください。</p>
           <div className="contactActions">
-            <a className="primaryButton" href="https://lin.ee/vujhumEo" target="_blank" rel="noreferrer">
+            <a
+              className="primaryButton"
+              href="https://liff.line.me/2011200807-IztOr7TD?page=form&id=6dbebd34-3490-4323-b0de-86159dfd91c9&liffId=2011200807-IztOr7TD"
+              target="_blank"
+              rel="noreferrer"
+            >
               公式LINEで相談する
               <span aria-hidden="true">→</span>
             </a>
