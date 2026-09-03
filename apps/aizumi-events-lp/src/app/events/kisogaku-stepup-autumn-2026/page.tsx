@@ -3,9 +3,9 @@ import Link from 'next/link'
 import { NewBadge } from '../../new-badge'
 
 export const metadata: Metadata = {
-  title: '中3 基礎学ステップアップ講座',
+  title: '中3 基礎学ステップアップ集中講座',
   description:
-    'ECCベストワン藍住校の中学3年生対象「基礎学ステップアップ講座」。学習アプリも活用し、今必要な課題に集中して取り組みます。',
+    'ECCベストワン藍住校の中学3年生対象「基礎学ステップアップ集中講座」。学習アプリも活用し、今必要な課題に集中して取り組みます。',
 }
 
 const principles = [
@@ -101,7 +101,7 @@ export default function KisogakuStepupPage() {
               <span className="audience audienceStrong">中学3年生対象</span>
             </div>
             <p className="eyebrow">KISOGAKU STEP UP</p>
-            <h1>基礎学ステップアップ講座</h1>
+            <h1>基礎学ステップアップ集中講座</h1>
             <p className="detailLead">
               基礎学力テストに向けて、講師の学習設計と3つの学習アプリを組み合わせ、今必要な課題に集中する講座です。
               適切な課題を、適切な量で。解説と解き直しまでの流れを短くし、限られた期間の学習を次に解ける力へつなげます。

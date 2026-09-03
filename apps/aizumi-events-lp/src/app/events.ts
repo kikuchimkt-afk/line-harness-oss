@@ -14,7 +14,7 @@ export type EventItem = {
 export const events: EventItem[] = [
   {
     id: 'kisogaku-stepup-autumn-2026',
-    title: '基礎学ステップアップ講座',
+    title: '基礎学ステップアップ集中講座',
     audience: '中学3年生対象',
     period: '2026年9月7日〜10月31日',
     publishedAt: '2026-09-02',
