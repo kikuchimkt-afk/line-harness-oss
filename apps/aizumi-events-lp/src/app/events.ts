@@ -7,6 +7,7 @@ export type EventItem = {
   publishedAt: string
   newUntil?: string
   href: string
+  documentHref?: string
   external?: boolean
   description: string
 }
@@ -16,10 +17,11 @@ export const events: EventItem[] = [
     id: 'kisogaku-stepup-autumn-2026',
     title: '基礎学ステップアップ集中講座',
     audience: '中学3年生対象',
-    period: '2026年9月7日〜10月31日',
+    period: '第I期 9/8〜10/3｜第II期 10/6〜10/31（予定）',
     publishedAt: '2026-09-02',
     newUntil: '2026-09-08',
     href: '/events/kisogaku-stepup-autumn-2026',
+    documentHref: '/documents/kisogaku-stepup-intensive-course-guide.pdf',
     description: '基礎学力テストに向けて、これまでの学習を整理し、次に取り組むことを明確にする講座です。',
   },
   {

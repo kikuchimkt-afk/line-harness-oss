@@ -21,7 +21,7 @@ export default function HomePage() {
 
         <EventList items={events} />
 
-        <p className="pageNote">内容・日程の詳細は、各企画ページまたは案内PDFでご確認ください。</p>
+        <p className="pageNote">内容・日程の詳細は、各講座の詳細ページまたは案内PDFでご確認ください。</p>
       </main>
 
       <footer className="siteFooter">

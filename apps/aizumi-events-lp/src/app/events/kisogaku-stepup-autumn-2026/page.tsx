@@ -112,8 +112,12 @@ export default function KisogakuStepupPage() {
                 <dd>中学3年生</dd>
               </div>
               <div>
-                <dt>ご案内期間</dt>
-                <dd>2026年9月7日〜10月31日</dd>
+                <dt>第I期</dt>
+                <dd>2026年9月8日〜10月3日</dd>
+              </div>
+              <div>
+                <dt>第II期</dt>
+                <dd>2026年10月6日〜10月31日（予定）</dd>
               </div>
             </dl>
           </div>
@@ -139,6 +143,73 @@ export default function KisogakuStepupPage() {
                 <p>{principle.body}</p>
               </article>
             ))}
+          </div>
+        </section>
+
+        <section className="detailSection courseOverviewSection" aria-labelledby="overview-heading">
+          <div className="courseOverviewPanel">
+            <div className="sectionHeading compactHeading">
+              <p className="eyebrow">PROGRAM &amp; FEE</p>
+              <h2 id="overview-heading">第I期の講座概要・受講料</h2>
+            </div>
+
+            <div className="overviewHighlights">
+              <article>
+                <span>第I期の開講日</span>
+                <strong>全11日</strong>
+              </article>
+              <article>
+                <span>講座に含まれる</span>
+                <strong>個別指導3回相当</strong>
+              </article>
+              <article>
+                <span>講師サポートあり</span>
+                <strong>管理自習</strong>
+              </article>
+            </div>
+
+            <p className="overviewNote">
+              第I期は9月8日〜10月3日の全11日開講です。個別指導3回相当と、講師サポート付きの管理自習を組み合わせます。
+            </p>
+
+            <dl className="overviewFacts">
+              <div>
+                <dt>対象</dt>
+                <dd>中学3年生</dd>
+              </div>
+              <div>
+                <dt>会場</dt>
+                <dd>
+                  ECCベストワン藍住校
+                  <small>北島中央校の登録生も受講できます</small>
+                </dd>
+              </div>
+            </dl>
+
+            <div className="tuitionBlock" aria-labelledby="tuition-heading">
+              <h3 id="tuition-heading">受講料（税込）</h3>
+              <div className="tuitionGrid">
+                <article>
+                  <span>ベストワン藍住校・北島中央校 中3生</span>
+                  <strong>14,520円</strong>
+                </article>
+                <article>
+                  <span>ECCジュニア生・外部生</span>
+                  <strong>19,360円</strong>
+                </article>
+              </div>
+              <p className="materialFee">上記受講料とは別に、教材費2,000円（税込）が必要です。</p>
+              <p className="scheduleNote">第I期の詳しい開講日は、申込フォーム送信後にLINEでご案内します。</p>
+              <a
+                className="documentButton"
+                href="/documents/kisogaku-stepup-intensive-course-guide.pdf"
+                target="_blank"
+                rel="noreferrer"
+              >
+                案内PDFを見る
+                <span aria-hidden="true">↗</span>
+              </a>
+            </div>
           </div>
         </section>
 
@@ -213,8 +284,8 @@ export default function KisogakuStepupPage() {
 
         <section className="contactSection" aria-labelledby="contact-heading">
           <p className="eyebrow">INFORMATION</p>
-          <h2 id="contact-heading">詳しい内容は教室からご案内します</h2>
-          <p>実施日時、学習内容、お申し込み方法については、ECCベストワン藍住校までお問い合わせください。</p>
+          <h2 id="contact-heading">参加申込はこちらから</h2>
+          <p>下のボタンから公式LINEの申込フォームへ進めます。送信後、詳しい開講日をLINEでご案内します。</p>
           <div className="contactActions">
             <a
               className="primaryButton"
@@ -222,7 +293,7 @@ export default function KisogakuStepupPage() {
               target="_blank"
               rel="noreferrer"
             >
-              公式LINEで相談する
+              参加申込
               <span aria-hidden="true">→</span>
             </a>
             <Link className="textLink" href="/">

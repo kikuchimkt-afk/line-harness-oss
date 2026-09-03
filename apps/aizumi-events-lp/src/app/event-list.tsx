@@ -7,16 +7,12 @@ export function EventList({ items }: { items: EventItem[] }) {
   return (
     <div className="eventGrid">
       {items.map((event) => {
-        const linkLabel = event.external ? '案内PDFを見る' : '企画の詳細を見る'
+        const linkLabel = event.external ? '案内PDFを見る' : '講座の詳細を見る'
 
         return (
-          <a
+          <article
             className="eventCard"
-            href={event.href}
             key={event.id}
-            target={event.external ? '_blank' : undefined}
-            rel={event.external ? 'noreferrer' : undefined}
-            aria-label={`${event.title}の${linkLabel}`}
           >
             <div className="eventMeta">
               <NewBadge publishedAt={event.publishedAt} newUntil={event.newUntil} />
@@ -32,11 +28,30 @@ export function EventList({ items }: { items: EventItem[] }) {
               <strong>{event.period}</strong>
             </div>
 
-            <span className="eventLink">
-              {linkLabel}
-              <span className="eventArrow" aria-hidden="true">→</span>
-            </span>
-          </a>
+            <div className="eventActions">
+              <a
+                className="eventLink"
+                href={event.href}
+                target={event.external ? '_blank' : undefined}
+                rel={event.external ? 'noreferrer' : undefined}
+                aria-label={`${event.title}：${linkLabel}`}
+              >
+                {linkLabel}
+                <span className="eventArrow" aria-hidden="true">→</span>
+              </a>
+              {event.documentHref ? (
+                <a
+                  className="eventPdfLink"
+                  href={event.documentHref}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  案内PDFを見る
+                  <span aria-hidden="true">↗</span>
+                </a>
+              ) : null}
+            </div>
+          </article>
         )
       })}
     </div>
