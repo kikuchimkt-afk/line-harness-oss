@@ -974,6 +974,20 @@ events.put('/api/events/admin/events/:id/slots/:slotId', async (c) => {
   const v = validateSlotInput(merged, false);
   if (!v.ok) return bad(c, v.code, 422);
 
+  if (Object.prototype.hasOwnProperty.call(body, 'capacity') && body.capacity != null) {
+    const active = await c.env.DB
+      .prepare(
+        `SELECT COUNT(*) AS c
+           FROM event_bookings
+          WHERE slot_id = ? AND status IN ('requested','confirmed')`,
+      )
+      .bind(slot_id)
+      .first<{ c: number }>();
+    if ((active?.c ?? 0) > body.capacity) {
+      return bad(c, 'capacity_below_active_bookings', 409);
+    }
+  }
+
   const updatable = ['starts_at', 'ends_at', 'capacity', 'is_active', 'sort_order', 'visibility_conditions'] as const;
   const setClauses: string[] = [];
   const setValues: unknown[] = [];

@@ -1476,6 +1476,29 @@ describe('event_slots admin', () => {
     expect(res.status).toBe(422);
   });
 
+  test('PUT 409 when capacity is lower than active booking count', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', status: 'confirmed' },
+        { id: 'b2', event_id: 'e1', slot_id: 's1', status: 'requested' },
+        { id: 'b3', event_id: 'e1', slot_id: 's1', status: 'waitlisted' },
+      ],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots/s1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ capacity: 1 }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('capacity_below_active_bookings');
+    expect(state.slots[0].capacity).toBe(5);
+  });
+
   test('DELETE soft-deletes when no active bookings', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],

@@ -950,9 +950,11 @@ function SlotsTab({
 }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [showBulk, setShowBulk] = useState(false)
   const [showBulkEdit, setShowBulkEdit] = useState(false)
+  const [editingSlot, setEditingSlot] = useState<EventSlot | null>(null)
   const [selectedSlotIds, setSelectedSlotIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
@@ -975,6 +977,11 @@ function SlotsTab({
     if (!eventId) return
     const res = await eventsApi.listSlots(accountId, eventId)
     setSlots(res.items)
+  }
+
+  function flashNotice(message: string) {
+    setNotice(message)
+    setTimeout(() => setNotice(null), 2200)
   }
 
   async function deleteSlot(slotId: string) {
@@ -1062,6 +1069,15 @@ function SlotsTab({
       return
     }
 
+    if (input.changeCapacity && input.capacity != null) {
+      const overCapacity = targets.filter((slot) => (slot.active_count ?? 0) > input.capacity!)
+      if (overCapacity.length > 0) {
+        const largestBookingCount = Math.max(...overCapacity.map((slot) => slot.active_count ?? 0))
+        alert(`選択した枠に予約数が定員を上回るものがあります。定員は ${largestBookingCount}名以上にしてください。`)
+        return
+      }
+    }
+
     const bookedCount = targets.filter((s) => (s.active_count ?? 0) > 0).length
     if (bookedCount > 0 && !confirm(`選択した枠のうち ${bookedCount}件には予約があります。\n時刻や定員を変更すると、既存予約にも影響します。続けますか？`)) {
       return
@@ -1087,8 +1103,42 @@ function SlotsTab({
       await refresh()
       setSelectedSlotIds(new Set())
       setShowBulkEdit(false)
+      flashNotice(`${targets.length}件の予約枠を一括変更しました。`)
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(
+        e instanceof Error && e.message === 'capacity_below_active_bookings'
+          ? '定員は現在の予約数以上にしてください。'
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function updateSingleSlot(slot: EventSlot, input: SlotEditInput) {
+    if (!eventId) return
+    const activeCount = slot.active_count ?? 0
+    if (input.capacity != null && input.capacity < activeCount) {
+      throw new Error(`定員は現在の予約数（${activeCount}名）以上にしてください。`)
+    }
+    if (activeCount > 0 && !confirm(`この枠には ${activeCount}件の予約があります。\n日時・定員などの変更は既存予約にも反映されます。続けますか？`)) {
+      return
+    }
+
+    setBusy(true)
+    setErr(null)
+    try {
+      await eventsApi.updateSlot(accountId, eventId, slot.id, input)
+      await refresh()
+      setEditingSlot(null)
+      flashNotice('予約枠を変更しました。')
+    } catch (e) {
+      if (e instanceof Error && e.message === 'capacity_below_active_bookings') {
+        throw new Error(`定員は現在の予約数（${activeCount}名）以上にしてください。`)
+      }
+      throw e
     } finally {
       setBusy(false)
     }
@@ -1116,6 +1166,7 @@ function SlotsTab({
           </button>
         </div>
       </div>
+      {notice && <div className="mb-3 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800">{notice}</div>}
       {err && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg mb-3 text-sm">{err}</div>}
       {slots.length === 0 ? (
         <div className="text-center py-12 text-gray-500 text-sm border border-dashed border-gray-300 rounded-lg">
@@ -1125,7 +1176,7 @@ function SlotsTab({
         <>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-pink-100 bg-white/70 p-3">
           <div className="text-sm text-gray-700">
-            {selectedSlotIds.size > 0 ? `${selectedSlotIds.size}件を選択中` : 'チェックした予約枠をまとめて変更・削除できます'}
+            {selectedSlotIds.size > 0 ? `${selectedSlotIds.size}件を選択中` : 'チェックした予約枠の共通項目をまとめて変更できます'}
           </div>
           <div className="flex flex-wrap gap-2">
             <button
@@ -1142,7 +1193,7 @@ function SlotsTab({
               disabled={busy || selectedSlotIds.size === 0}
               className="px-3 py-1.5 text-sm border border-pink-300 text-pink-700 rounded-lg hover:bg-pink-50 disabled:opacity-50"
             >
-              選択を一括変更
+              選択枠を一括変更
             </button>
             <button
               type="button"
@@ -1222,6 +1273,13 @@ function SlotsTab({
                   </td>
                   <td className="px-3 py-2 text-right">
                     <button
+                      onClick={() => setEditingSlot(s)}
+                      disabled={busy}
+                      className="mr-3 text-xs font-medium text-blue-600 hover:underline disabled:opacity-30 disabled:no-underline"
+                    >
+                      編集
+                    </button>
+                    <button
                       onClick={() => deleteSlot(s.id)}
                       disabled={busy || (s.active_count ?? 0) > 0}
                       title={(s.active_count ?? 0) > 0 ? '既存予約があるため削除できません' : '削除'}
@@ -1273,8 +1331,24 @@ function SlotsTab({
           onSubmit={bulkUpdateSlots}
         />
       )}
+      {editingSlot && (
+        <EditSlotDialog
+          slot={editingSlot}
+          fields={fields}
+          onClose={() => setEditingSlot(null)}
+          onSubmit={(input) => updateSingleSlot(editingSlot, input)}
+        />
+      )}
     </div>
   )
+}
+
+interface SlotEditInput {
+  starts_at: string
+  ends_at: string
+  capacity: number | null
+  is_active: number
+  visibility_conditions: SlotVisibilityRule | null
 }
 
 interface SlotBulkEditInput {
@@ -1560,7 +1634,7 @@ function BulkEditSlotsDialog({
       <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
         <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
           <h3 className="text-lg font-bold text-gray-900">選択した予約枠を一括変更</h3>
-          <p className="mt-1 text-sm text-gray-600">{slots.length}件の予約枠に同じ変更を反映します。</p>
+          <p className="mt-1 text-sm text-gray-600">{slots.length}件の予約枠に、選択した共通項目だけを反映します。</p>
           {err && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-700">{err}</div>}
 
           <div className="mt-4 space-y-3">
@@ -1667,6 +1741,159 @@ function BulkEditSlotsDialog({
               className="rounded-lg bg-pink-500 px-4 py-2 text-sm font-medium text-white hover:bg-pink-600 disabled:opacity-50"
             >
               まとめて変更
+            </button>
+          </div>
+        </div>
+      </div>
+    </DialogPortal>
+  )
+}
+
+function EditSlotDialog({
+  slot,
+  fields,
+  onClose,
+  onSubmit,
+}: {
+  slot: EventSlot
+  fields: EventBookingFormField[]
+  onClose: () => void
+  onSubmit: (input: SlotEditInput) => Promise<void>
+}) {
+  const activeCount = slot.active_count ?? 0
+  const [date, setDate] = useState(isoToJstDate(slot.starts_at))
+  const [startTime, setStartTime] = useState(isoToJstHHMM(slot.starts_at))
+  const [endTime, setEndTime] = useState(isoToJstHHMM(slot.ends_at))
+  const [capacity, setCapacity] = useState(slot.capacity == null ? '' : String(slot.capacity))
+  const [isActive, setIsActive] = useState(slot.is_active === 0 ? '0' : '1')
+  const [visibilityRule, setVisibilityRule] = useState<SlotVisibilityRule>(parseSlotVisibilityRule(slot.visibility_conditions))
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function submit() {
+    setErr(null)
+    if (!date) {
+      setErr('日付を入力してください。')
+      return
+    }
+    if (!startTime || !endTime || startTime >= endTime) {
+      setErr('開始時刻は終了時刻より前にしてください。')
+      return
+    }
+    const cap = capacity.trim() === '' ? null : Number(capacity)
+    if (cap != null && (!Number.isInteger(cap) || cap < 1)) {
+      setErr('定員は1以上の整数にしてください。空欄にすると無制限になります。')
+      return
+    }
+    if (cap != null && cap < activeCount) {
+      setErr(`定員は現在の予約数（${activeCount}名）以上にしてください。`)
+      return
+    }
+
+    setBusy(true)
+    try {
+      await onSubmit({
+        starts_at: jstHHMMToUtcIso(date, startTime),
+        ends_at: jstHHMMToUtcIso(date, endTime),
+        capacity: cap,
+        is_active: Number(isActive),
+        visibility_conditions: visibilityRule.conditions.length > 0 ? visibilityRule : null,
+      })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DialogPortal>
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+        <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
+          <h3 className="text-lg font-bold text-gray-900">予約枠を編集</h3>
+          <p className="mt-1 text-sm text-gray-600">日時、定員、状態、表示条件を変更できます。</p>
+          {activeCount > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+              この枠には現在 {activeCount}件の予約があります。定員は{activeCount}名未満にできません。
+            </div>
+          )}
+          {err && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-700">{err}</div>}
+
+          <div className="mt-4 space-y-4">
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">日付（JST）</span>
+              <input
+                type="date"
+                value={date}
+                onChange={(event) => setDate(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+            </label>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label>
+                <span className="text-sm font-medium text-gray-700">開始</span>
+                <input
+                  type="time"
+                  value={startTime}
+                  onChange={(event) => setStartTime(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+              </label>
+              <label>
+                <span className="text-sm font-medium text-gray-700">終了</span>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(event) => setEndTime(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                />
+              </label>
+            </div>
+
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">定員（空欄＝無制限）</span>
+              <input
+                type="number"
+                min={Math.max(1, activeCount)}
+                value={capacity}
+                onChange={(event) => setCapacity(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              />
+              <span className="mt-1 block text-xs text-gray-500">現在の予約数：{activeCount}件</span>
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">状態</span>
+              <select
+                value={isActive}
+                onChange={(event) => setIsActive(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+              >
+                <option value="1">有効</option>
+                <option value="0">停止</option>
+              </select>
+            </label>
+
+            <SlotVisibilityEditor fields={fields} value={visibilityRule} onChange={setVisibilityRule} />
+          </div>
+
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+            >
+              キャンセル
+            </button>
+            <button
+              type="button"
+              onClick={submit}
+              disabled={busy}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {busy ? '保存中...' : '変更を保存'}
             </button>
           </div>
         </div>
