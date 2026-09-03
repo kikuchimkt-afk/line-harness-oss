@@ -68,7 +68,7 @@ const studyApps = [
     body: '全国の高校入試問題を、都道府県・年度・教科などから探せます。解説付き問題を使い、基礎学で見つかった弱点を別の出題でも解けるか確かめます。',
     use: '同じ単元の類題演習と、知識を使う練習に活用します。',
     tags: ['全国の入試問題', '類題演習', '解説付き'],
-    href: 'https://koukou-nyushi-database.vercel.app/',
+    href: 'https://velora-studio-rust.vercel.app/',
   },
   {
     number: '03',
@@ -78,7 +78,7 @@ const studyApps = [
     body: '中1・中2範囲の理科を、物理・化学・地学・生物の分野や単元から絞り込めます。問題・正解・解説まで続けて確認し、苦手な範囲を集中的に復習します。',
     use: '理科の苦手単元を特定し、必要な大問だけを選ぶために活用します。',
     tags: ['中1・中2範囲', '理科4分野', '単元別'],
-    href: 'https://koukou-nyushi-rika-archive.vercel.app/',
+    href: 'https://lattice-studio-amber.vercel.app/',
   },
 ]
 
