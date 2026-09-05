@@ -74,7 +74,8 @@ a {
 
 .schoolTag,
 .badge,
-.audienceStrong {
+.audienceStrong,
+.trialBadge {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
@@ -96,6 +97,12 @@ a {
   color: #7c264c;
   background: var(--pink-pale);
   border: 1px solid rgba(236, 120, 170, 0.42);
+}
+
+.trialBadge {
+  color: #684500;
+  background: #fff4cf;
+  border: 1px solid rgba(211, 157, 35, 0.38);
 }
 
 .pageMain {
@@ -177,6 +184,7 @@ h3 {
 .eventLink:focus-visible,
 .eventPdfLink:focus-visible,
 .documentButton:focus-visible,
+.heroTrialLink:focus-visible,
 .primaryButton:focus-visible,
 .textLink:focus-visible,
 .brand:focus-visible {
@@ -360,8 +368,126 @@ h3 {
   font-weight: 700;
 }
 
+.heroTrialLink {
+  display: inline-flex;
+  min-height: 48px;
+  margin-top: 26px;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 18px;
+  color: var(--teal-dark);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(12, 136, 141, 0.38);
+  border-radius: 12px;
+  font-weight: 700;
+}
+
+.heroTrialLink:hover {
+  background: #ffffff;
+}
+
 .detailSection {
   padding: 96px 20px;
+}
+
+.trialSection {
+  padding-bottom: 28px;
+}
+
+.trialPanel {
+  padding: 50px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(255, 244, 207, 0.6));
+  border: 1px solid rgba(211, 157, 35, 0.38);
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+}
+
+.trialHighlights {
+  display: grid;
+  margin-top: 34px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.trialHighlights article {
+  display: flex;
+  min-height: 118px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(211, 157, 35, 0.25);
+  border-radius: 18px;
+}
+
+.trialHighlights span,
+.trialSchedule span {
+  color: #7a5709;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.trialHighlights strong {
+  margin-top: 8px;
+  font-size: clamp(1.18rem, 2.5vw, 1.55rem);
+  line-height: 1.4;
+}
+
+.trialSchedule {
+  display: flex;
+  margin-top: 16px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px;
+  background: #ffffff;
+  border: 1px solid rgba(211, 157, 35, 0.3);
+  border-radius: 16px;
+}
+
+.trialSchedule strong {
+  text-align: right;
+}
+
+.trialHowTo {
+  margin-top: 28px;
+  padding: 24px 26px;
+  background: rgba(255, 255, 255, 0.82);
+  border-radius: 18px;
+}
+
+.trialHowTo h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.trialHowTo ol {
+  display: grid;
+  margin: 16px 0 0;
+  padding-left: 1.5rem;
+  gap: 10px;
+}
+
+.trialHowTo p {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.trialHowTo li::marker {
+  color: var(--teal-dark);
+  font-weight: 700;
+}
+
+.trialNote {
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.trialButton {
+  margin-top: 26px;
 }
 
 .sectionHeading {
@@ -867,10 +993,12 @@ h3 {
   .principleGrid,
   .studyAppGrid,
   .overviewHighlights,
+  .trialHighlights,
   .tuitionGrid {
     grid-template-columns: 1fr;
   }
 
+  .trialPanel,
   .courseOverviewPanel {
     padding: 36px 26px;
   }
@@ -947,6 +1075,15 @@ h3 {
     flex-wrap: wrap;
   }
 
+  .trialSchedule {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .trialSchedule strong {
+    text-align: left;
+  }
+
   .detailFacts {
     display: grid;
     grid-template-columns: 1fr;
@@ -992,6 +1129,7 @@ h3 {
     padding: 38px 20px;
   }
 
+  .trialPanel,
   .courseOverviewPanel {
     padding: 32px 20px;
     border-radius: 22px;

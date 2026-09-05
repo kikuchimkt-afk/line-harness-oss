@@ -5,8 +5,14 @@ import { NewBadge } from '../../new-badge'
 export const metadata: Metadata = {
   title: '中3 基礎学ステップアップ集中講座',
   description:
-    'ECCベストワン藍住校の中学3年生対象「基礎学ステップアップ集中講座」。学習アプリも活用し、今必要な課題に集中して取り組みます。',
+    'ECCベストワン藍住校の中学3年生対象「基礎学ステップアップ集中講座」。英語・数学・理科から選べる、1人1回の無料体験も受け付けています。',
 }
+
+const applicationFormUrl =
+  'https://liff.line.me/2011200807-IztOr7TD?page=form&id=6dbebd34-3490-4323-b0de-86159dfd91c9&liffId=2011200807-IztOr7TD'
+
+const freeTrialBookingUrl =
+  'https://liff.line.me/2011200807-IztOr7TD/?page=event&id=2c6cc0cf-2f6c-4cb0-887b-e22b9779529a'
 
 const principles = [
   {
@@ -98,6 +104,7 @@ export default function KisogakuStepupPage() {
           <div className="detailHeroInner">
             <div className="detailBadges">
               <NewBadge publishedAt="2026-09-02" newUntil="2026-09-08" />
+              <span className="trialBadge">1人1回 無料体験</span>
               <span className="audience audienceStrong">中学3年生対象</span>
             </div>
             <p className="eyebrow">KISOGAKU STEP UP</p>
@@ -120,6 +127,62 @@ export default function KisogakuStepupPage() {
                 <dd>2026年10月6日〜10月31日（予定）</dd>
               </div>
             </dl>
+            <a className="heroTrialLink" href="#free-trial">
+              無料体験の詳細を見る
+              <span aria-hidden="true">↓</span>
+            </a>
+          </div>
+        </section>
+
+        <section className="detailSection trialSection" id="free-trial" aria-labelledby="trial-heading">
+          <div className="trialPanel">
+            <div className="sectionHeading compactHeading">
+              <p className="eyebrow">FREE TRIAL</p>
+              <h2 id="trial-heading">まずは1回、無料で体験できます</h2>
+              <p>
+                講座への参加を検討されている中学3年生を対象に、1人1回の無料体験をご用意しました。
+                一人ひとりの理解度に合わせた個別指導と、教室での学習環境を確認してから、本講座への参加をご検討いただけます。
+              </p>
+            </div>
+
+            <div className="trialHighlights">
+              <article>
+                <span>対象</span>
+                <strong>中学3年生</strong>
+              </article>
+              <article>
+                <span>体験回数</span>
+                <strong>1人1回</strong>
+              </article>
+              <article>
+                <span>対応教科</span>
+                <strong>英語・数学・理科</strong>
+              </article>
+            </div>
+
+            <div className="trialSchedule">
+              <span>予約可能日</span>
+              <strong>本講座の開講日のうち、9月11日以降</strong>
+            </div>
+
+            <div className="trialHowTo">
+              <h3>無料体験のお申し込み方法</h3>
+              <ol>
+                <li>受講者氏名・学校名・保護者氏名を入力します。</li>
+                <li>英語・数学・理科から、体験を希望する教科を1つ選択します。</li>
+                <li>9月11日以降の本講座開講日から希望日を1日選び、予約を送信します。</li>
+              </ol>
+              <p>予約内容を教室で確認後、公式LINEへ確定のご案内をお送りします。</p>
+            </div>
+
+            <p className="trialNote">
+              無料体験は、本講座に含まれる個別指導3回相当とは別枠です。体験後の本申込を強制するものではありません。
+            </p>
+
+            <a className="primaryButton trialButton" href={freeTrialBookingUrl} target="_blank" rel="noreferrer">
+              1回無料体験に申し込む
+              <span aria-hidden="true">→</span>
+            </a>
           </div>
         </section>
 
@@ -289,7 +352,7 @@ export default function KisogakuStepupPage() {
           <div className="contactActions">
             <a
               className="primaryButton"
-              href="https://liff.line.me/2011200807-IztOr7TD?page=form&id=6dbebd34-3490-4323-b0de-86159dfd91c9&liffId=2011200807-IztOr7TD"
+              href={applicationFormUrl}
               target="_blank"
               rel="noreferrer"
             >
