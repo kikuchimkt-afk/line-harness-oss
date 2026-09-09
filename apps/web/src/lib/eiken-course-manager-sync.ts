@@ -11,6 +11,7 @@ export const EIKEN_MANAGER_PRIMARY_ORIGIN = new URL(configuredEikenManagerOrigin
 
 const EIKEN_MANAGER_ALLOWED_ORIGINS = new Set([
   EIKEN_MANAGER_PRIMARY_ORIGIN,
+  'https://eiken-study-meeting-manager-2026-round2.vercel.app',
   'https://eiken-intensive-course-manager-2026.makoto-keitai-list.chatgpt.site',
   'http://localhost:3000',
 ])
@@ -94,27 +95,30 @@ export function buildEikenManagerSyncPayload(
   fields: EventBookingFormField[],
   exportedAt = new Date().toISOString(),
 ): EikenManagerSyncPayload {
-  const fieldsToSync = fields.filter((field) =>
-    ['受講者氏名', '学年', '教室へ伝えておきたいこと'].includes(field.label),
-  )
+  const studentNameField = fields.find((field) => field.label === '受講者氏名')
+  const schoolGradeField = fields.find((field) => field.label === '学年')
+  const messageField = fields.find((field) => field.label === '教室へ伝えておきたいこと')
   const courseLevelField = fields.find((field) =>
     ['受講級', '受検予定級', '受検級', '受験級', '英検級'].includes(field.label),
   )
+  const studentNameFor = (booking: EventBookingItem) =>
+    (studentNameField ? answerValue(booking, studentNameField) : '') || booking.friend_display_name || ''
+  const schoolGradeFor = (booking: EventBookingItem) =>
+    schoolGradeField ? answerValue(booking, schoolGradeField) : ''
   const courseLevelFor = (booking: EventBookingItem) =>
     (courseLevelField ? answerValue(booking, courseLevelField) : '') || booking.friend_course_level || ''
-  const courseLevelInsertIndex = Math.max(
-    0,
-    fieldsToSync.findIndex((field) => field.label === '学年') + 1,
-  )
-  const syncedHeaders = fieldsToSync.map((field) => field.label)
-  syncedHeaders.splice(courseLevelInsertIndex, 0, '受講級')
+  const messageFor = (booking: EventBookingItem) =>
+    messageField ? answerValue(booking, messageField) : ''
   const headers = [
     'イベント名',
     '予約日',
     '開始時刻',
     '終了時刻',
     '状態',
-    ...syncedHeaders,
+    '受講者氏名',
+    '学年',
+    '受講級',
+    '教室へ伝えておきたいこと',
     '受講会場',
     '備考',
     '受付日時',
@@ -123,15 +127,16 @@ export function buildEikenManagerSyncPayload(
     .slice()
     .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime())
     .map((booking) => {
-      const syncedAnswers = fieldsToSync.map((field) => answerValue(booking, field))
-      syncedAnswers.splice(courseLevelInsertIndex, 0, courseLevelFor(booking))
       return [
         event.name,
         dateFormatter.format(new Date(booking.slot_starts_at)),
         timeFormatter.format(new Date(booking.slot_starts_at)),
         timeFormatter.format(new Date(booking.slot_ends_at)),
         STATUS_LABELS[booking.status] ?? booking.status,
-        ...syncedAnswers,
+        studentNameFor(booking),
+        schoolGradeFor(booking),
+        courseLevelFor(booking),
+        messageFor(booking),
         event.venue_name ?? '',
         booking.customer_note ?? '',
         dateTimeFormatter.format(new Date(booking.requested_at)),

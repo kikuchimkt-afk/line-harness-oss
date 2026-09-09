@@ -42,6 +42,8 @@ describe('Eiken course manager sync', () => {
   it('accepts only the configured manager origins', () => {
     expect(resolveEikenManagerOrigin('https://eiken-intensive-course-manager-2026.vercel.app/path'))
       .toBe('https://eiken-intensive-course-manager-2026.vercel.app')
+    expect(resolveEikenManagerOrigin('https://eiken-study-meeting-manager-2026-round2.vercel.app/calendar'))
+      .toBe('https://eiken-study-meeting-manager-2026-round2.vercel.app')
     expect(resolveEikenManagerOrigin('https://example.com')).toBeNull()
   })
 
@@ -63,5 +65,18 @@ describe('Eiken course manager sync', () => {
     ]))
     expect(JSON.stringify(payload)).not.toContain('U1')
     expect(JSON.stringify(payload)).not.toContain('保護者')
+  })
+
+  it('uses the LINE display name when an event has no booking form fields', () => {
+    const payload = buildEikenManagerSyncPayload(
+      { ...event, id: 'study-meeting', name: '2026年度第2回英検勉強会' } as EventDetail,
+      [{ ...booking, form_answers: '{}', friend_display_name: '受講 花子', friend_course_level: null }],
+      [],
+      '2026-09-09T03:00:00.000Z',
+    )
+
+    expect(payload.rows[0]).toEqual(expect.arrayContaining(['受講者氏名', '学年', '受講級']))
+    expect(payload.rows[1]).toEqual(expect.arrayContaining(['受講 花子', '']))
+    expect(JSON.stringify(payload)).not.toContain('U1')
   })
 })
