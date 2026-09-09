@@ -2004,7 +2004,16 @@ events.get('/api/events/admin/events/:id/bookings', async (c) => {
               ) ELSE NULL END AS waitlist_position,
               s.starts_at AS slot_starts_at, s.ends_at AS slot_ends_at,
               f.display_name AS friend_display_name, f.line_user_id AS friend_line_user_id,
-              json_extract(f.metadata, '$.q5') AS friend_course_level
+              -- 参加申込フォームの回答は friends.metadata に q1..q7 で入る。
+              -- 日程予約側のフォームは二重入力を避けるため運用で外しており、
+              -- 受講者の情報はこちらにしか無いので、予約と一緒に返す。
+              json_extract(f.metadata, '$.q1') AS friend_student_name,
+              json_extract(f.metadata, '$.q2') AS friend_guardian_name,
+              json_extract(f.metadata, '$.q3') AS friend_school_name,
+              json_extract(f.metadata, '$.q4') AS friend_school_grade,
+              json_extract(f.metadata, '$.q5') AS friend_course_level,
+              json_extract(f.metadata, '$.q6') AS friend_affiliation,
+              json_extract(f.metadata, '$.q7') AS friend_request_note
          FROM event_bookings b
          JOIN event_slots s ON s.id = b.slot_id
          LEFT JOIN friends f ON f.id = b.friend_id

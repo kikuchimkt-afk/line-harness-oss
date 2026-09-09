@@ -82,6 +82,28 @@ function answerValue(booking: EventBookingItem, field: EventBookingFormField): s
   return Array.isArray(raw) ? raw.join('、') : typeof raw === 'string' ? raw : ''
 }
 
+/**
+ * 参加申込フォームの回答を、表示できる文字列にそろえる。
+ *
+ * 回答は friends.metadata に JSON で入り、SQLite の json_extract をそのまま
+ * 通すため、チェックボックス設問は '["5級"]' のような JSON 文字列で届く。
+ * これを剥がさないと画面にも Excel にも角括弧付きで出てしまう。
+ */
+export function friendAnswerText(value: string | null | undefined): string {
+  if (value == null) return ''
+  const text = String(value).trim()
+  if (!text) return ''
+  if (!text.startsWith('[') && !text.startsWith('"')) return text
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item ?? '').trim()).filter(Boolean).join('、')
+    if (typeof parsed === 'string') return parsed.trim()
+  } catch {
+    // JSON として読めなければ、元の文字列をそのまま見せる
+  }
+  return text
+}
+
 export function resolveEikenManagerOrigin(value: string | null | undefined): string | null {
   if (!value) return null
   try {
@@ -104,14 +126,22 @@ export function buildEikenManagerSyncPayload(
   const courseLevelField = fields.find((field) =>
     ['受講級', '受検予定級', '受検級', '受験級', '英検級'].includes(field.label),
   )
+  // 日程予約側のフォームは運用で外してあるため、通常はこちらが空になる。
+  // その場合は参加申込フォームの回答（friends.metadata）で補う。
   const studentNameFor = (booking: EventBookingItem) =>
-    (studentNameField ? answerValue(booking, studentNameField) : '') || booking.friend_display_name || ''
+    (studentNameField ? answerValue(booking, studentNameField) : '') ||
+    friendAnswerText(booking.friend_student_name) ||
+    booking.friend_display_name ||
+    ''
   const schoolGradeFor = (booking: EventBookingItem) =>
-    schoolGradeField ? answerValue(booking, schoolGradeField) : ''
+    (schoolGradeField ? answerValue(booking, schoolGradeField) : '') ||
+    friendAnswerText(booking.friend_school_grade)
   const courseLevelFor = (booking: EventBookingItem) =>
-    (courseLevelField ? answerValue(booking, courseLevelField) : '') || booking.friend_course_level || ''
+    (courseLevelField ? answerValue(booking, courseLevelField) : '') ||
+    friendAnswerText(booking.friend_course_level)
   const messageFor = (booking: EventBookingItem) =>
-    messageField ? answerValue(booking, messageField) : ''
+    (messageField ? answerValue(booking, messageField) : '') ||
+    friendAnswerText(booking.friend_request_note)
   const headers = [
     'イベント名',
     '予約日',

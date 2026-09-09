@@ -3,6 +3,7 @@ import type { EventBookingFormField, EventBookingItem, EventDetail } from './api
 import {
   buildEikenManagerSyncPayload,
   EIKEN_MANAGER_MESSAGE_TYPE,
+  friendAnswerText,
   resolveEikenManagerOrigin,
 } from './eiken-course-manager-sync'
 
@@ -81,5 +82,22 @@ describe('Eiken course manager sync', () => {
     expect(payload.rows[0]).toEqual(expect.arrayContaining(['受講者氏名', '学年', '受講級']))
     expect(payload.rows[1]).toEqual(expect.arrayContaining(['受講 花子', '']))
     expect(JSON.stringify(payload)).not.toContain('U1')
+  })
+
+  it('flattens checkbox answers stored as JSON text', () => {
+    // json_extract を通した回答は、チェックボックス設問だと
+    // '["5級"]' のような JSON 文字列で届く。そのまま出すと角括弧が見える。
+    expect(friendAnswerText('["5級"]')).toBe('5級')
+    expect(friendAnswerText('["5級","4級"]')).toBe('5級、4級')
+    expect(friendAnswerText('"準2級"')).toBe('準2級')
+    // ラジオやテキストの回答はそのまま
+    expect(friendAnswerText('準2級')).toBe('準2級')
+    expect(friendAnswerText('中学2年生')).toBe('中学2年生')
+    // 未回答
+    expect(friendAnswerText(null)).toBe('')
+    expect(friendAnswerText(undefined)).toBe('')
+    expect(friendAnswerText('')).toBe('')
+    // 壊れた JSON でも中身を捨てない
+    expect(friendAnswerText('[壊れています')).toBe('[壊れています')
   })
 })

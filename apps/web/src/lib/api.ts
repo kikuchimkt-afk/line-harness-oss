@@ -1754,8 +1754,20 @@ export interface EventBookingItem {
   slot_ends_at: string;
   friend_display_name: string | null;
   friend_line_user_id: string | null;
-  /** 英検集中講座の申込フォームで回答した受検予定級。 */
+  /**
+   * 参加申込フォーム（friends.metadata の q1..q7）の回答。
+   * 日程予約側のフォームは二重入力になるため運用で外しており、
+   * 受講者の情報はこちらにしか無い。
+   * チェックボックス設問は配列のまま入るので、表示前に平坦化すること。
+   */
+  friend_student_name?: string | null;
+  friend_guardian_name?: string | null;
+  friend_school_name?: string | null;
+  friend_school_grade?: string | null;
+  /** 受検予定級。チェックボックス設問なので ["5級"] の形で届くことがある。 */
   friend_course_level?: string | null;
+  friend_affiliation?: string | null;
+  friend_request_note?: string | null;
 }
 
 export const eventsApi = {

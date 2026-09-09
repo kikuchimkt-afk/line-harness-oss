@@ -9,6 +9,7 @@ import { useAccount } from '@/contexts/account-context'
 import { eventsApi, type EventBookingFormField, type EventBookingItem, type EventDetail } from '@/lib/api'
 import {
   buildEikenManagerSyncPayload,
+  friendAnswerText,
   EIKEN_MANAGER_PRIMARY_ORIGIN,
   EIKEN_MANAGER_READY_MESSAGE,
   resolveEikenManagerOrigin,
@@ -347,7 +348,15 @@ function BookingsInner() {
       '経由アカウント',
       '受付日時',
       ...formFields.map((field) => field.label),
-      '受講級',
+      // 参加申込フォームの回答。日程予約側のフォームを外している運用のため、
+      // 受講者の情報はここにしか出てこない。
+      '受講者名',
+      '保護者氏名',
+      '学校名',
+      '学年',
+      '受検予定級',
+      '所属',
+      '事前に伝えておきたいこと',
       '備考',
       '内部メモ',
     ]
@@ -363,7 +372,13 @@ function BookingsInner() {
         accountLabel(booking.line_account_id),
         formatJp(booking.requested_at),
         ...formFields.map((field) => answerValue(booking, field)),
-        booking.friend_course_level ?? '',
+        friendAnswerText(booking.friend_student_name),
+        friendAnswerText(booking.friend_guardian_name),
+        friendAnswerText(booking.friend_school_name),
+        friendAnswerText(booking.friend_school_grade),
+        friendAnswerText(booking.friend_course_level),
+        friendAnswerText(booking.friend_affiliation),
+        friendAnswerText(booking.friend_request_note),
         booking.customer_note ?? '',
         booking.internal_note ?? '',
       ]),
