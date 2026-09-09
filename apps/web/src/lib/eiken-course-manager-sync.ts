@@ -11,6 +11,9 @@ export const EIKEN_MANAGER_PRIMARY_ORIGIN = new URL(configuredEikenManagerOrigin
 
 const EIKEN_MANAGER_ALLOWED_ORIGINS = new Set([
   EIKEN_MANAGER_PRIMARY_ORIGIN,
+  // Vercel は長いプロジェクト名を切り詰めて本番ドメインを作る。
+  // 実際に配信されるのは -ro のほうで、-round2 は保護付きの別名にしかならない。
+  'https://eiken-study-meeting-manager-2026-ro.vercel.app',
   'https://eiken-study-meeting-manager-2026-round2.vercel.app',
   'https://eiken-intensive-course-manager-2026.makoto-keitai-list.chatgpt.site',
   'http://localhost:3000',
