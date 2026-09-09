@@ -609,7 +609,7 @@ export default function FormCampaignsPage() {
                 <p className="mt-2 text-xs text-gray-500">回答 {form.submitCount}件・質問 {form.fields.length}件</p>
                 {form.usedByAccounts && form.usedByAccounts.length > 0 && (
                   <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-gray-400">
-                    利用実績: {form.usedByAccounts.map((account) => `${account.name} ${account.count}件`).join('、')}
+                    配信・回答状況: {form.usedByAccounts.map((account) => `${account.name} ${account.count}件`).join('、')}
                   </p>
                 )}
                 <div className="mt-4 flex flex-wrap gap-2">

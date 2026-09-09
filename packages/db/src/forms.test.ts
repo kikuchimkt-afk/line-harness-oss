@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import Database from 'better-sqlite3';
-import { deleteForm, deleteFormSubmission } from './forms.js';
+import { deleteForm, deleteFormSubmission, getFormsWithStats } from './forms.js';
 
 class SqliteD1Statement {
   private params: unknown[] = [];
@@ -55,7 +55,8 @@ function setupDb() {
     CREATE TABLE forms (
       id TEXT PRIMARY KEY,
       submit_count INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT '2026-09-09T00:00:00.000'
     );
 
     CREATE TABLE form_submissions (
@@ -70,6 +71,33 @@ function setupDb() {
       id TEXT PRIMARY KEY,
       form_id TEXT NOT NULL,
       opened_at TEXT NOT NULL
+    );
+
+    CREATE TABLE line_accounts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      country TEXT,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE TABLE friends (
+      id TEXT PRIMARY KEY,
+      line_account_id TEXT
+    );
+
+    CREATE TABLE templates (
+      id TEXT PRIMARY KEY,
+      message_content TEXT NOT NULL
+    );
+
+    CREATE TABLE auto_replies (
+      id TEXT PRIMARY KEY,
+      response_type TEXT NOT NULL,
+      response_content TEXT NOT NULL,
+      template_id TEXT,
+      line_account_id TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1
     );
   `);
   sqlite
@@ -93,6 +121,71 @@ function setupDb() {
 
   return { sqlite, d1: makeD1(sqlite) };
 }
+
+describe('getFormsWithStats', () => {
+  test('includes an account from an active inline auto-reply before the first response', async () => {
+    const { sqlite, d1 } = setupDb();
+    sqlite
+      .prepare(`INSERT INTO line_accounts (id, name, country, display_order) VALUES (?, ?, ?, ?)`)
+      .run('account-aiko', 'あいことば', 'JP', 1);
+    sqlite
+      .prepare(
+        `INSERT INTO auto_replies
+         (id, response_type, response_content, template_id, line_account_id, is_active)
+         VALUES (?, ?, ?, NULL, ?, 1)`,
+      )
+      .run('reply-1', 'text', 'https://example.test/?page=form&id=form-1', 'account-aiko');
+
+    const [form] = await getFormsWithStats(d1);
+
+    expect(form.used_by_accounts).toEqual([
+      { id: 'account-aiko', name: 'あいことば', country: 'JP', displayOrder: 1, count: 0 },
+    ]);
+  });
+
+  test('merges configured auto-reply accounts with per-account submission counts', async () => {
+    const { sqlite, d1 } = setupDb();
+    sqlite.exec(`
+      INSERT INTO line_accounts (id, name, country, display_order) VALUES
+        ('account-aiko', 'あいことば', 'JP', 1),
+        ('account-bestone', 'ベストワン', 'JP', 2);
+      INSERT INTO friends (id, line_account_id) VALUES
+        ('friend-1', 'account-bestone'),
+        ('friend-2', 'account-bestone');
+      INSERT INTO auto_replies
+        (id, response_type, response_content, template_id, line_account_id, is_active)
+      VALUES
+        ('reply-1', 'text', 'https://example.test/?page=form&id=form-1', NULL, 'account-aiko', 1);
+    `);
+
+    const [form] = await getFormsWithStats(d1);
+
+    expect(form.used_by_accounts).toEqual([
+      { id: 'account-aiko', name: 'あいことば', country: 'JP', displayOrder: 1, count: 0 },
+      { id: 'account-bestone', name: 'ベストワン', country: 'JP', displayOrder: 2, count: 2 },
+    ]);
+  });
+
+  test('detects a form URL inside a template used by a global auto-reply', async () => {
+    const { sqlite, d1 } = setupDb();
+    sqlite.exec(`
+      INSERT INTO line_accounts (id, name, country, display_order, is_active) VALUES
+        ('account-active', '有効アカウント', 'JP', 1, 1),
+        ('account-inactive', '停止アカウント', 'JP', 2, 0);
+      INSERT INTO templates (id, message_content)
+      VALUES ('template-1', 'https://example.test/?page=form&id=form-1');
+      INSERT INTO auto_replies
+        (id, response_type, response_content, template_id, line_account_id, is_active)
+      VALUES ('reply-global', 'text', 'fallback', 'template-1', NULL, 1);
+    `);
+
+    const [form] = await getFormsWithStats(d1);
+
+    expect(form.used_by_accounts).toEqual([
+      { id: 'account-active', name: '有効アカウント', country: 'JP', displayOrder: 1, count: 0 },
+    ]);
+  });
+});
 
 describe('deleteForm', () => {
   test('deletes the form together with its submissions and access history', async () => {
