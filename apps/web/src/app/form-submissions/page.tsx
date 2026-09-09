@@ -82,6 +82,8 @@ export default function FormSubmissionsPage() {
   const [detailSubmission, setDetailSubmission] = useState<Submission | null>(null)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+  const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(null)
 
   const loadForms = useCallback(async () => {
     setLoading(true)
@@ -135,6 +137,7 @@ export default function FormSubmissionsPage() {
 
   const handleSelectForm = (formId: string) => {
     setExportError('')
+    setDeleteError('')
     setSelectedFormId(formId)
     loadSubmissions(formId)
   }
@@ -188,6 +191,34 @@ export default function FormSubmissionsPage() {
       setExportError('Excelファイルを作成できませんでした。もう一度お試しください。')
     } finally {
       setExporting(false)
+    }
+  }
+
+  const deleteSubmission = async (submission: Submission) => {
+    if (!selectedForm || deletingSubmissionId) return
+
+    const ok = window.confirm(
+      `この回答を削除しますか？\n\n${formatDateTime(submission.createdAt)} の回答データが一覧とExcel出力から削除されます。`,
+    )
+    if (!ok) return
+
+    setDeletingSubmissionId(submission.id)
+    setDeleteError('')
+
+    try {
+      await fetchApi<{ success: boolean; data: null }>(
+        `/api/forms/${encodeURIComponent(selectedForm.id)}/submissions/${encodeURIComponent(submission.id)}`,
+        { method: 'DELETE' },
+      )
+      const nextSubmissions = submissions.filter((item) => item.id !== submission.id)
+      setSubmissions(nextSubmissions)
+      setPage((current) => Math.min(current, Math.max(1, Math.ceil(nextSubmissions.length / PAGE_SIZE))))
+      setDetailSubmission((current) => (current?.id === submission.id ? null : current))
+      await loadForms()
+    } catch {
+      setDeleteError('回答を削除できませんでした。時間をおいてもう一度お試しください。')
+    } finally {
+      setDeletingSubmissionId(null)
     }
   }
 
@@ -297,6 +328,7 @@ export default function FormSubmissionsPage() {
                   setSubmissions([])
                   setFormFields([])
                   setExportError('')
+                  setDeleteError('')
                   setDetailSubmission(null)
                 }}
                 className="text-xs text-gray-400 hover:text-gray-600"
@@ -309,6 +341,12 @@ export default function FormSubmissionsPage() {
           {exportError && (
             <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
               {exportError}
+            </div>
+          )}
+
+          {deleteError && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {deleteError}
             </div>
           )}
 
@@ -332,6 +370,7 @@ export default function FormSubmissionsPage() {
                       {fieldKeys.length > 4 && (
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">…</th>
                       )}
+                      <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -367,6 +406,19 @@ export default function FormSubmissionsPage() {
                         {fieldKeys.length > 4 && (
                           <td className="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">他 {fieldKeys.length - 4} 項目</td>
                         )}
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              deleteSubmission(sub)
+                            }}
+                            disabled={deletingSubmissionId === sub.id}
+                            className="inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {deletingSubmissionId === sub.id ? '削除中...' : '削除'}
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>

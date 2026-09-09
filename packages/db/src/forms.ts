@@ -283,3 +283,34 @@ export async function createFormSubmission(
     .bind(id)
     .first<FormSubmission>())!;
 }
+
+export async function deleteFormSubmission(
+  db: D1Database,
+  formId: string,
+  submissionId: string,
+): Promise<boolean> {
+  const existing = await db
+    .prepare(`SELECT id FROM form_submissions WHERE id = ? AND form_id = ?`)
+    .bind(submissionId, formId)
+    .first<{ id: string }>();
+  if (!existing) return false;
+
+  await db
+    .prepare(`DELETE FROM form_submissions WHERE id = ? AND form_id = ?`)
+    .bind(submissionId, formId)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE forms
+       SET submit_count = (
+             SELECT COUNT(*) FROM form_submissions WHERE form_id = ?
+           ),
+           updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(formId, jstNow(), formId)
+    .run();
+
+  return true;
+}

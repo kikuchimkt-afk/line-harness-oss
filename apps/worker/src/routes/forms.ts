@@ -8,6 +8,7 @@ import {
   deleteForm,
   getFormSubmissions,
   createFormSubmission,
+  deleteFormSubmission,
   jstNow,
 } from '@line-crm/db';
 import { getFriendByLineUserId, getFriendById } from '@line-crm/db';
@@ -325,6 +326,28 @@ forms.get('/api/forms/:id/submissions', async (c) => {
     return c.json({ success: true, data: submissions.map(serializeSubmission) });
   } catch (err) {
     console.error('GET /api/forms/:id/submissions error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// DELETE /api/forms/:formId/submissions/:submissionId — delete one submission
+forms.delete('/api/forms/:formId/submissions/:submissionId', async (c) => {
+  try {
+    const formId = c.req.param('formId');
+    const submissionId = c.req.param('submissionId');
+    const form = await getFormById(c.env.DB, formId);
+    if (!form) {
+      return c.json({ success: false, error: 'Form not found' }, 404);
+    }
+
+    const deleted = await deleteFormSubmission(c.env.DB, formId, submissionId);
+    if (!deleted) {
+      return c.json({ success: false, error: 'Submission not found' }, 404);
+    }
+
+    return c.json({ success: true, data: null });
+  } catch (err) {
+    console.error('DELETE /api/forms/:formId/submissions/:submissionId error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
