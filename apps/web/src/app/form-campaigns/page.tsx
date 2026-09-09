@@ -165,6 +165,8 @@ export default function FormCampaignsPage() {
   const [targetAccountId, setTargetAccountId] = useState('')
   const [sharingFormId, setSharingFormId] = useState<string | null>(null)
   const [shareAccountId, setShareAccountId] = useState('')
+  const [deletingFormId, setDeletingFormId] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState('')
   const appliedCopyId = useRef<string | null>(null)
 
   const [formName, setFormName] = useState('夏期講習クーポン用アンケート')
@@ -319,6 +321,31 @@ export default function FormCampaignsPage() {
 
     setShareAccountId((usedAccount ?? selectedReadyAccount ?? fallbackAccount)?.id ?? '')
     setSharingFormId(form.id)
+  }
+
+  const handleDeleteForm = async (form: ExistingForm) => {
+    const confirmed = window.confirm(
+      `「${form.name}」を削除します。\n\n` +
+      `フォーム本体、回答 ${form.submitCount}件、アクセス履歴が完全に削除されます。\n` +
+      'この操作は元に戻せません。よろしいですか？',
+    )
+    if (!confirmed) return
+
+    setDeletingFormId(form.id)
+    setDeleteError('')
+    try {
+      const res = await api.forms.delete(form.id)
+      if (!res.success) throw new Error('フォームを削除できませんでした。')
+
+      setExistingForms((current) => current.filter((item) => item.id !== form.id))
+      if (sharingFormId === form.id) setSharingFormId(null)
+      if (copiedFrom?.id === form.id) setCopiedFrom(null)
+      if (created?.formId === form.id) setCreated(null)
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'フォームを削除できませんでした。')
+    } finally {
+      setDeletingFormId(null)
+    }
   }
 
   useEffect(() => {
@@ -564,9 +591,15 @@ export default function FormCampaignsPage() {
         ) : existingForms.length === 0 ? (
           <p className="mt-5 rounded-lg border border-pink-100 bg-white/55 p-4 text-sm text-gray-500">作成済みフォームはありません。</p>
         ) : (
-          <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {existingForms.map((form) => (
-              <article key={form.id} className="rounded-xl border border-pink-100 bg-white/64 p-4">
+          <>
+            {deleteError && (
+              <p role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {deleteError}
+              </p>
+            )}
+            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {existingForms.map((form) => (
+                <article key={form.id} className="rounded-xl border border-pink-100 bg-white/64 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <h3 className="text-sm font-bold leading-6 text-gray-900">{form.name}</h3>
                   <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${form.isActive ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
@@ -601,6 +634,15 @@ export default function FormCampaignsPage() {
                   >
                     編集
                   </Link>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteForm(form)}
+                    disabled={deletingFormId !== null}
+                    aria-label={`フォーム「${form.name}」を削除`}
+                    className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {deletingFormId === form.id ? '削除中...' : '削除'}
+                  </button>
                 </div>
                 {sharingFormId === form.id && (
                   <div className="mt-4 rounded-xl border border-green-100 bg-green-50/55 p-3">
@@ -673,9 +715,10 @@ export default function FormCampaignsPage() {
                     )}
                   </div>
                 )}
-              </article>
-            ))}
-          </div>
+                </article>
+              ))}
+            </div>
+          </>
         )}
       </section>
 

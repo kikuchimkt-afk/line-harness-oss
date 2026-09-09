@@ -1366,6 +1366,10 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+    delete: (id: string) =>
+      fetchApi<ApiResponse<null>>(`/api/forms/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
   },
   entryRoutes: {
     list: () => fetchApi<ApiResponse<EntryRoute[]>>('/api/entry-routes'),

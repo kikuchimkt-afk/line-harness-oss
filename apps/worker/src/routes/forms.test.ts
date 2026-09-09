@@ -51,6 +51,28 @@ beforeEach(() => {
   dbMocks.jstNow.mockReturnValue('2026-09-09T00:00:00.000');
 });
 
+describe('DELETE /api/forms/:id', () => {
+  test('deletes an existing form', async () => {
+    dbMocks.getFormById.mockResolvedValue({ id: 'form-1' });
+
+    const res = await setupApp().request('/api/forms/form-1', { method: 'DELETE' });
+
+    expect(res.status).toBe(200);
+    expect(dbMocks.deleteForm).toHaveBeenCalledWith(expect.anything(), 'form-1');
+    expect(await res.json()).toEqual({ success: true, data: null });
+  });
+
+  test('returns 404 when the form does not exist', async () => {
+    dbMocks.getFormById.mockResolvedValue(null);
+
+    const res = await setupApp().request('/api/forms/form-missing', { method: 'DELETE' });
+
+    expect(res.status).toBe(404);
+    expect(dbMocks.deleteForm).not.toHaveBeenCalled();
+    expect(await res.json()).toEqual({ success: false, error: 'Form not found' });
+  });
+});
+
 describe('DELETE /api/forms/:formId/submissions/:submissionId', () => {
   test('deletes one form submission', async () => {
     dbMocks.getFormById.mockResolvedValue({ id: 'form-1' });

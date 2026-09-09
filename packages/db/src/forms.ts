@@ -231,7 +231,11 @@ export async function updateForm(
 }
 
 export async function deleteForm(db: D1Database, id: string): Promise<void> {
-  await db.prepare(`DELETE FROM forms WHERE id = ?`).bind(id).run();
+  await db.batch([
+    db.prepare(`DELETE FROM form_opens WHERE form_id = ?`).bind(id),
+    db.prepare(`DELETE FROM form_submissions WHERE form_id = ?`).bind(id),
+    db.prepare(`DELETE FROM forms WHERE id = ?`).bind(id),
+  ]);
 }
 
 // ── Submissions ───────────────────────────────────────────────────────────────
