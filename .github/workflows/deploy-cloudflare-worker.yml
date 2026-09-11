@@ -65,6 +65,7 @@ jobs:
           VITE_CALENDAR_CONNECTION_ID: ${{ vars.VITE_CALENDAR_CONNECTION_ID }}
 
       - name: Patch wrangler config
+        id: worker-config
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_DATABASE_NAME: ${{ secrets.D1_DATABASE_NAME }}
@@ -81,11 +82,14 @@ jobs:
         run: |
           test -n "$D1_DATABASE_ID"
           cd apps/worker
+          config_path="$(find dist -mindepth 2 -maxdepth 2 -type f -name wrangler.json -print -quit)"
+          test -n "$config_path"
+          echo "config_path=$config_path" >> "$GITHUB_OUTPUT"
           sed -i \
             -e "s|\"account_id\":\"[^\"]*\"|\"account_id\":\"${CLOUDFLARE_ACCOUNT_ID}\"|g" \
             -e "s|\"database_name\":\"[^\"]*\"|\"database_name\":\"${D1_DATABASE_NAME}\"|g" \
             -e "s|\"database_id\":\"[^\"]*\"|\"database_id\":\"${D1_DATABASE_ID}\"|g" \
-            dist/line_harness/wrangler.json
+            "$config_path"
           # Inject admin CORS vars into the deployed config when ADMIN_ORIGIN is
           # set. ADMIN_ALLOW_CROSS_SITE defaults to "true" (SameSite=None; Secure
           # cookies) since cross-origin admin/API is the case that needs it.
@@ -95,7 +99,7 @@ jobs:
               .vars.ADMIN_ORIGIN = $o
               | .vars.ADMIN_ALLOW_CROSS_SITE = (if $x == "" then "true" else $x end)
               | (if $w != "" then .vars.WORKER_URL = $w else . end)
-            ' dist/line_harness/wrangler.json > "$tmp" && mv "$tmp" dist/line_harness/wrangler.json
+            ' "$config_path" > "$tmp" && mv "$tmp" "$config_path"
             echo "Patched admin CORS vars: ADMIN_ORIGIN=$ADMIN_ORIGIN ADMIN_ALLOW_CROSS_SITE=${ADMIN_ALLOW_CROSS_SITE:-true}"
           fi
 
@@ -105,4 +109,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/worker
-          command: deploy --config dist/line_harness/wrangler.json --name ${{ vars.WORKER_NAME || 'your-worker-name' }}
+          command: deploy --config ${{ steps.worker-config.outputs.config_path }} --name ${{ vars.WORKER_NAME || 'your-worker-name' }} --keep-vars
