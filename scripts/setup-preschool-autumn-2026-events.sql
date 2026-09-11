@@ -39,7 +39,7 @@ SET venue_url = NULL,
 水筒とハンカチをご用意ください。体調がすぐれない場合は無理をせず、予約履歴からご変更ください。元気なお顔に会えることを楽しみにしています。',
     og_title = '【2〜3歳】秋の土曜・英語イベント',
     og_description = '親子で楽しむ英語絵本・うた・季節の遊び。各回6名、1回500円程度（予定）です。',
-    og_image_url = 'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.webp',
+    og_image_url = 'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.png',
     booking_form_fields = '[{"id":"guardian_name","label":"保護者さまのお名前","type":"text","required":true,"placeholder":"例：山田 花子"},{"id":"child_name","label":"お子さまのお名前（ひらがな）","type":"text","required":true,"placeholder":"例：やまだ はな"},{"id":"child_age","label":"お子さまの年齢","type":"select","required":true,"placeholder":"年齢を選択してください","options":["2歳","3歳"]},{"id":"considerations","label":"食物アレルギー・配慮事項","type":"textarea","required":false,"placeholder":"ない場合は入力不要です"}]',
     sort_order = 10,
     updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
@@ -60,7 +60,7 @@ INSERT INTO events (
   '【仮日程】4〜5歳｜秋の土曜・英語イベント',
   'ECCジュニア大学前教室',
   NULL,
-  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.webp',
+  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.png',
   '絵本、簡単な会話、ゲーム、季節の制作やミニクッキングを通して、「英語を使うと楽しい」という経験を積み重ねる土曜イベントです。
 
 【対象】4〜5歳のお子さま
