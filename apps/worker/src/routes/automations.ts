@@ -7,9 +7,26 @@ import {
   deleteAutomation,
   getAutomationLogs,
 } from '@line-crm/db';
+import type { AutomationRow } from '@line-crm/db';
 import type { Env } from '../index.js';
 
 const automations = new Hono<Env>();
+
+function serializeAutomation(item: AutomationRow) {
+  return {
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    eventType: item.event_type,
+    conditions: JSON.parse(item.conditions),
+    actions: JSON.parse(item.actions),
+    lineAccountId: item.line_account_id,
+    isActive: Boolean(item.is_active),
+    priority: item.priority,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
+}
 
 // ========== 自動化ルールCRUD ==========
 
@@ -28,19 +45,7 @@ automations.get('/api/automations', async (c) => {
     }
     return c.json({
       success: true,
-      data: items.map((a) => ({
-        id: a.id,
-        name: a.name,
-        description: a.description,
-        eventType: a.event_type,
-        conditions: JSON.parse(a.conditions),
-        actions: JSON.parse(a.actions),
-        lineAccountId: (a as { line_account_id?: string | null }).line_account_id ?? null,
-        isActive: Boolean(a.is_active),
-        priority: a.priority,
-        createdAt: a.created_at,
-        updatedAt: a.updated_at,
-      })),
+      data: items.map(serializeAutomation),
     });
   } catch (err) {
     console.error('GET /api/automations error:', err);
@@ -59,16 +64,7 @@ automations.get('/api/automations/:id', async (c) => {
     return c.json({
       success: true,
       data: {
-        id: item.id,
-        name: item.name,
-        description: item.description,
-        eventType: item.event_type,
-        conditions: JSON.parse(item.conditions),
-        actions: JSON.parse(item.actions),
-        isActive: Boolean(item.is_active),
-        priority: item.priority,
-        createdAt: item.created_at,
-        updatedAt: item.updated_at,
+        ...serializeAutomation(item),
         logs: logs.map((l) => ({
           id: l.id,
           friendId: l.friend_id,
@@ -100,22 +96,9 @@ automations.post('/api/automations', async (c) => {
       return c.json({ success: false, error: 'name, eventType, actions are required' }, 400);
     }
     const item = await createAutomation(c.env.DB, body);
-    // Save line_account_id if provided
-    if (body.lineAccountId) {
-      await c.env.DB.prepare(`UPDATE automations SET line_account_id = ? WHERE id = ?`)
-        .bind(body.lineAccountId, item.id).run();
-    }
     return c.json({
       success: true,
-      data: {
-        id: item.id,
-        name: item.name,
-        eventType: item.event_type,
-        actions: JSON.parse(item.actions),
-        isActive: Boolean(item.is_active),
-        priority: item.priority,
-        createdAt: item.created_at,
-      },
+      data: serializeAutomation(item),
     }, 201);
   } catch (err) {
     console.error('POST /api/automations error:', err);
@@ -126,21 +109,22 @@ automations.post('/api/automations', async (c) => {
 automations.put('/api/automations/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const body = await c.req.json();
+    const body = await c.req.json<Partial<{
+      name: string;
+      description: string;
+      eventType: string;
+      conditions: Record<string, unknown>;
+      actions: unknown[];
+      lineAccountId: string | null;
+      isActive: boolean;
+      priority: number;
+    }>>();
     await updateAutomation(c.env.DB, id, body);
     const updated = await getAutomationById(c.env.DB, id);
     if (!updated) return c.json({ success: false, error: 'Not found' }, 404);
     return c.json({
       success: true,
-      data: {
-        id: updated.id,
-        name: updated.name,
-        eventType: updated.event_type,
-        conditions: JSON.parse(updated.conditions),
-        actions: JSON.parse(updated.actions),
-        isActive: Boolean(updated.is_active),
-        priority: updated.priority,
-      },
+      data: serializeAutomation(updated),
     });
   } catch (err) {
     console.error('PUT /api/automations/:id error:', err);

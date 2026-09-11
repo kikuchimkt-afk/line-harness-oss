@@ -151,6 +151,10 @@ export default function AutomationsPage() {
   }, [selectedAccountId, accountLoading])
 
   const handleCreate = async () => {
+    if (!selectedAccountId) {
+      setFormError('LINEアカウントを選択してください')
+      return
+    }
     if (!form.name.trim()) {
       setFormError('ルール名を入力してください')
       return
@@ -181,6 +185,7 @@ export default function AutomationsPage() {
         actions: parsedActions,
         conditions: parsedConditions,
         priority: form.priority,
+        lineAccountId: selectedAccountId,
       })
       if (res.success) {
         setShowCreate(false)

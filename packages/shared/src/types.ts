@@ -823,6 +823,7 @@ export interface Automation {
   eventType: AutomationEventType;
   conditions: Record<string, unknown>;
   actions: AutomationAction[];
+  lineAccountId: string | null;
   isActive: boolean;
   priority: number;
   createdAt: string;

@@ -109,6 +109,7 @@ interface DueEventReminderRow {
   channel_access_token: string;
   line_user_id: string;
   reminder_hours_before: number | null;
+  reminder_message_extra: string | null;
 }
 
 function startsAtJstFmt(utcIso: string): string {
@@ -138,6 +139,7 @@ export async function processDueEventReminders(
       `SELECT r.id, r.booking_id, r.kind, r.retry_count,
               b.friend_id, b.line_account_id,
               e.name AS event_name, e.venue_name, e.venue_url, e.reminder_hours_before,
+              e.reminder_message_extra,
               s.starts_at,
               la.channel_access_token,
               f.line_user_id
@@ -194,6 +196,7 @@ export async function processDueEventReminders(
           venueName: row.venue_name,
           venueUrl: row.venue_url,
           hoursBefore: row.reminder_hours_before ?? 0,
+          messageExtra: row.reminder_message_extra,
         },
       });
       await db

@@ -24,6 +24,17 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('変更・キャンセルは予約履歴画面');
   });
 
+  test('即時確定通知の末尾に教室からの案内を追加できる', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      messageExtra: ' 持ち物は水筒です。\nhttps://example.com/guide ',
+    });
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('持ち物は水筒です。');
+    expect(text).toContain('https://example.com/guide');
+    expect(text.endsWith('https://example.com/guide')).toBe(true);
+  });
+
   test('キャンセル待ち受付は順位と48時間期限を案内する', () => {
     const text = renderEventNotificationText('waitlisted', {
       ...baseCtx,
@@ -105,17 +116,33 @@ describe('renderEventNotificationText', () => {
   });
 
   test('前日リマインダ', () => {
-    const text = renderEventNotificationText('reminder_day_before', baseCtx);
+    const text = renderEventNotificationText('reminder_day_before', {
+      ...baseCtx,
+      messageExtra: '入口で受付をお願いします。',
+    });
     expect(text).toContain('明日イベントが開催');
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('入口で受付をお願いします。');
   });
 
   test('開始 N 時間前リマインダ', () => {
     const text = renderEventNotificationText('reminder_hours_before', {
       ...baseCtx,
       hoursBefore: 2,
+      messageExtra: 'お気をつけてお越しください。',
     });
     expect(text).toContain('まもなくイベント開始');
     expect(text).toContain('あと 2 時間');
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('お気をつけてお越しください。');
+  });
+
+  test('空白だけの追加案内では見出しを表示しない', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      messageExtra: '   \n  ',
+    });
+    expect(text).not.toContain('教室からのご案内:');
   });
 
   test('venue が無くてもクラッシュしない', () => {

@@ -184,6 +184,7 @@ interface DueRow {
   channel_access_token: string;
   line_user_id: string;
   reminder_hours_before: number | null;
+  reminder_message_extra: string | null;
   status: string;
   scheduled_at: string;
   sent_at: string | null;
@@ -249,6 +250,7 @@ function dueRow(over: Partial<DueRow> = {}): DueRow {
     channel_access_token: 'tok',
     line_user_id: 'U1',
     reminder_hours_before: null,
+    reminder_message_extra: null,
     status: 'pending',
     scheduled_at: '2026-05-09T00:00:00Z',
     sent_at: null,
@@ -259,7 +261,9 @@ function dueRow(over: Partial<DueRow> = {}): DueRow {
 
 describe('processDueEventReminders', () => {
   test('sends due pending reminders', async () => {
-    const state = { rows: [dueRow({ id: 'r1' })] };
+    const state = {
+      rows: [dueRow({ id: 'r1', reminder_message_extra: '入口で受付をお願いします。' })],
+    };
     const db = dueDB(state);
     const sender = vi.fn(async () => undefined);
     const result = await processDueEventReminders(db, {
@@ -269,7 +273,10 @@ describe('processDueEventReminders', () => {
     expect(result).toEqual({ sent: 1, failed: 0 });
     expect(state.rows[0].status).toBe('sent');
     expect(sender).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: 'reminder_day_before' }),
+      expect.objectContaining({
+        kind: 'reminder_day_before',
+        ctx: expect.objectContaining({ messageExtra: '入口で受付をお願いします。' }),
+      }),
     );
   });
 

@@ -142,3 +142,77 @@ describe('GET /api/automations?lineAccountId=X', () => {
     expect(body.data).toEqual([]);
   });
 });
+
+describe('automation account scope mutations', () => {
+  test('POST forwards lineAccountId and returns it', async () => {
+    const row: AutomationRow = {
+      id: 'a-created',
+      name: '5歳 reply',
+      line_account_id: 'acc-aikotoba',
+      ...rowBase,
+    };
+    dbMocks.createAutomation.mockResolvedValue(row);
+    const { db } = makeAutomationDb([]);
+
+    const res = await setupApp(db).request('/api/automations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: '5歳 reply',
+        eventType: 'message_received',
+        conditions: { keyword_exact: '5歳' },
+        actions: [{ type: 'send_message', params: { content: 'hello' } }],
+        lineAccountId: 'acc-aikotoba',
+        priority: 100,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(dbMocks.createAutomation).toHaveBeenCalledWith(db, expect.objectContaining({
+      lineAccountId: 'acc-aikotoba',
+    }));
+    const body = (await res.json()) as { data: { lineAccountId: string | null } };
+    expect(body.data.lineAccountId).toBe('acc-aikotoba');
+  });
+
+  test('GET by id returns lineAccountId', async () => {
+    dbMocks.getAutomationById.mockResolvedValue({
+      id: 'a-scoped',
+      name: 'scoped',
+      line_account_id: 'acc-aikotoba',
+      ...rowBase,
+    });
+    dbMocks.getAutomationLogs.mockResolvedValue([]);
+    const { db } = makeAutomationDb([]);
+
+    const res = await setupApp(db).request('/api/automations/a-scoped');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { lineAccountId: string | null } };
+    expect(body.data.lineAccountId).toBe('acc-aikotoba');
+  });
+
+  test('PUT forwards and returns lineAccountId', async () => {
+    dbMocks.updateAutomation.mockResolvedValue(undefined);
+    dbMocks.getAutomationById.mockResolvedValue({
+      id: 'a-scoped',
+      name: 'scoped',
+      line_account_id: 'acc-after',
+      ...rowBase,
+    });
+    const { db } = makeAutomationDb([]);
+
+    const res = await setupApp(db).request('/api/automations/a-scoped', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lineAccountId: 'acc-after', isActive: false }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dbMocks.updateAutomation).toHaveBeenCalledWith(db, 'a-scoped', {
+      lineAccountId: 'acc-after',
+      isActive: false,
+    });
+    const body = (await res.json()) as { data: { lineAccountId: string | null } };
+    expect(body.data.lineAccountId).toBe('acc-after');
+  });
+});

@@ -91,6 +91,7 @@ interface EventRow {
   dedup_priority?: string | null;
   booking_form_fields?: string | null;
   confirmation_message_extra?: string | null;
+  reminder_message_extra?: string | null;
   [k: string]: unknown;
 }
 
@@ -1705,9 +1706,16 @@ describe('LIFF event slots', () => {
 });
 
 describe('LIFF POST /api/liff/events/:id/bookings', () => {
-  test('creates confirmed booking when requires_approval=0', async () => {
+  test('creates confirmed booking and passes the event message when requires_approval=0', async () => {
+    const confirmationMessage = '当日は水筒をお持ちください。';
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 0 })],
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        requires_approval: 0,
+        confirmation_message_extra: confirmationMessage,
+      })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
       bookings: [],
       accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
@@ -1727,7 +1735,10 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(state.bookings).toHaveLength(1);
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: 'received_confirmed' }),
+      expect.objectContaining({
+        kind: 'received_confirmed',
+        ctx: expect.objectContaining({ messageExtra: confirmationMessage }),
+      }),
     );
     expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledTimes(1);
     expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledWith(
@@ -1890,6 +1901,45 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
         eventName: 'X',
         startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
         status: 'requested',
+      }),
+    );
+  });
+
+  test('POST summary passes the event message to an auto-confirmed grouped notification', async () => {
+    const confirmationMessage = '教材は教室でお渡しします。';
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        requires_approval: 0,
+        confirmation_message_extra: confirmationMessage,
+      })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings/summary?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ booking_ids: ['b1', 'b2'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'received_confirmed',
+        ctx: expect.objectContaining({ messageExtra: confirmationMessage }),
       }),
     );
   });
@@ -2918,6 +2968,7 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     dedup_priority: null,
     booking_form_fields: '[]',
     confirmation_message_extra: null,
+    reminder_message_extra: null,
     ...over,
   };
 }

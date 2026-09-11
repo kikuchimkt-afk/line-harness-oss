@@ -38,19 +38,27 @@ export async function getAutomationById(db: D1Database, id: string): Promise<Aut
 
 export async function createAutomation(
   db: D1Database,
-  input: { name: string; description?: string; eventType: string; conditions?: Record<string, unknown>; actions: unknown[]; priority?: number },
+  input: {
+    name: string;
+    description?: string;
+    eventType: string;
+    conditions?: Record<string, unknown>;
+    actions: unknown[];
+    lineAccountId?: string | null;
+    priority?: number;
+  },
 ): Promise<AutomationRow> {
   const id = crypto.randomUUID();
   const now = jstNow();
-  await db.prepare(`INSERT INTO automations (id, name, description, event_type, conditions, actions, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, input.name, input.description ?? null, input.eventType, JSON.stringify(input.conditions ?? {}), JSON.stringify(input.actions), input.priority ?? 0, now, now).run();
+  await db.prepare(`INSERT INTO automations (id, name, description, event_type, conditions, actions, line_account_id, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, input.name, input.description ?? null, input.eventType, JSON.stringify(input.conditions ?? {}), JSON.stringify(input.actions), input.lineAccountId ?? null, input.priority ?? 0, now, now).run();
   return (await getAutomationById(db, id))!;
 }
 
 export async function updateAutomation(
   db: D1Database,
   id: string,
-  updates: Partial<{ name: string; description: string; eventType: string; conditions: Record<string, unknown>; actions: unknown[]; isActive: boolean; priority: number }>,
+  updates: Partial<{ name: string; description: string; eventType: string; conditions: Record<string, unknown>; actions: unknown[]; lineAccountId: string | null; isActive: boolean; priority: number }>,
 ): Promise<void> {
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -59,6 +67,7 @@ export async function updateAutomation(
   if (updates.eventType !== undefined) { sets.push('event_type = ?'); values.push(updates.eventType); }
   if (updates.conditions !== undefined) { sets.push('conditions = ?'); values.push(JSON.stringify(updates.conditions)); }
   if (updates.actions !== undefined) { sets.push('actions = ?'); values.push(JSON.stringify(updates.actions)); }
+  if (updates.lineAccountId !== undefined) { sets.push('line_account_id = ?'); values.push(updates.lineAccountId); }
   if (updates.isActive !== undefined) { sets.push('is_active = ?'); values.push(updates.isActive ? 1 : 0); }
   if (updates.priority !== undefined) { sets.push('priority = ?'); values.push(updates.priority); }
   if (sets.length === 0) return;

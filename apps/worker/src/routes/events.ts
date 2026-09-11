@@ -1224,6 +1224,7 @@ interface EventDbRow {
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
   booking_form_fields: string | null;
+  confirmation_message_extra: string | null;
 }
 
 interface SlotDbRow {
@@ -1386,6 +1387,9 @@ async function sendGroupedBookingNotifications(
       venueUrl: first.venue_url,
       bookingHistoryUrl: buildEventBookingHistoryUrl(first.liff_id),
       approvalComment,
+      messageExtra: kind === 'received_confirmed'
+        ? first.confirmation_message_extra
+        : undefined,
       cancelDeadlineHoursBefore: first.cancel_deadline_hours_before,
     };
     if (
@@ -1458,6 +1462,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
               e.cancel_deadline_hours_before,
+              e.confirmation_message_extra,
               s.starts_at AS slot_starts_at,
               la.channel_access_token, la.liff_id,
               f.line_user_id, f.display_name AS friend_display_name
@@ -1612,8 +1617,9 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   const event = await c.env.DB
     .prepare(
       `SELECT id, name, venue_name, venue_url, requires_approval, waitlist_enabled,
-              cancel_deadline_hours_before, max_bookings_per_friend,
-              reminder_day_before_enabled, reminder_hours_before, booking_form_fields
+               cancel_deadline_hours_before, max_bookings_per_friend,
+               reminder_day_before_enabled, reminder_hours_before, booking_form_fields,
+               confirmation_message_extra
          FROM events
         WHERE id = ? AND deleted_at IS NULL AND is_published = 1 AND (
           (target_type = 'single' AND line_account_id = ?)
@@ -1904,6 +1910,9 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
           venueName: event.venue_name,
           venueUrl: event.venue_url,
           bookingHistoryUrl: buildEventBookingHistoryUrl(c.req.query('liffId')),
+          messageExtra: kind === 'received_confirmed'
+            ? event.confirmation_message_extra
+            : undefined,
           waitlistPosition,
           cancelDeadlineHoursBefore: event.cancel_deadline_hours_before,
         },

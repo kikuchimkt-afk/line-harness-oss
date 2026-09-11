@@ -732,6 +732,7 @@ export const api = {
       name: string
       eventType: Automation['eventType']
       actions: Automation['actions']
+      lineAccountId: string
       description?: string | null
       conditions?: Record<string, unknown>
       priority?: number
@@ -740,7 +741,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: Partial<Pick<Automation, 'name' | 'description' | 'eventType' | 'conditions' | 'actions' | 'isActive' | 'priority'>>) =>
+    update: (id: string, data: Partial<Pick<Automation, 'name' | 'description' | 'eventType' | 'conditions' | 'actions' | 'lineAccountId' | 'isActive' | 'priority'>>) =>
       fetchApi<ApiResponse<Automation>>(`/api/automations/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
