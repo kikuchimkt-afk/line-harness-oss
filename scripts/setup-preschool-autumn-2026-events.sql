@@ -60,7 +60,7 @@ INSERT INTO events (
   '【仮日程】4〜5歳｜秋の土曜・英語イベント',
   'ECCジュニア大学前教室',
   NULL,
-  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.png',
+  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.webp',
   '絵本、簡単な会話、ゲーム、季節の制作やミニクッキングを通して、「英語を使うと楽しい」という経験を積み重ねる土曜イベントです。
 
 【対象】4〜5歳のお子さま
@@ -100,7 +100,7 @@ INSERT INTO events (
   NULL,
   '【4〜5歳】秋の土曜・英語イベント',
   '絵本・ゲーム・季節の制作・ミニクッキングで英語を楽しむ75分。各回6名、1回500円程度（予定）です。',
-  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.webp',
+  'https://ecc-preschool-autumn-events.vercel.app/assets/autumn-classroom-hero.png',
   '[{"id":"guardian_name","label":"保護者さまのお名前","type":"text","required":true,"placeholder":"例：山田 花子"},{"id":"child_name","label":"お子さまのお名前（ひらがな）","type":"text","required":true,"placeholder":"例：やまだ はな"},{"id":"child_age","label":"お子さまの年齢","type":"select","required":true,"placeholder":"年齢を選択してください","options":["4歳","5歳"]},{"id":"considerations","label":"食物アレルギー・配慮事項","type":"textarea","required":false,"placeholder":"ない場合は入力不要です"}]'
 )
 ON CONFLICT(id) DO UPDATE SET
