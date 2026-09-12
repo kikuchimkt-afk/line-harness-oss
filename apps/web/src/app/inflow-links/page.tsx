@@ -454,12 +454,17 @@ export default function InflowLinksPage() {
                       {formatDate(r.stats?.latestAt ?? null)}
                     </td>
                     <td className="px-4 py-3 text-sm" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => onCopy(r.refCode, r.refCode)}
-                        className="text-xs text-blue-500 hover:text-blue-700"
-                      >
-                        {copiedId === r.refCode ? 'コピー済' : 'コピー'}
-                      </button>
+                      <div className="flex flex-col gap-1">
+                        <code className="font-mono text-[11px] text-gray-700 break-all">
+                          {`${WORKER_BASE}/r/${r.refCode}`}
+                        </code>
+                        <button
+                          onClick={() => onCopy(r.refCode, r.refCode)}
+                          className="self-start text-xs text-blue-500 hover:text-blue-700"
+                        >
+                          {copiedId === r.refCode ? 'コピー済' : 'コピー'}
+                        </button>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                       {editTarget ? (

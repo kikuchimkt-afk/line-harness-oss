@@ -10,6 +10,8 @@ import type {
   Tag,
 } from '@line-crm/shared'
 
+const WORKER_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
+
 interface MessageTemplate {
   id: string
   name: string
@@ -64,6 +66,7 @@ export default function EditRouteModal({
   // that has already been seen in inflow), so we lock the input to prevent
   // the user from accidentally renaming the ref and orphaning the prior stats.
   const refCodeLocked = isNew && !!initialRefCode
+  const [urlCopied, setUrlCopied] = useState(false)
   const [form, setForm] = useState<CreateEntryRouteInput>(() => ({
     refCode: route?.refCode ?? initialRefCode ?? '',
     name: route?.name ?? '',
@@ -140,6 +143,26 @@ export default function EditRouteModal({
             className="w-full border border-gray-200 rounded px-3 py-2 text-sm font-mono disabled:bg-gray-50 disabled:text-gray-500"
             placeholder="例: youtube"
           />
+          <p className="mt-2 text-[11px] text-gray-500">
+            友だち追加のURL（このまま配れます）
+          </p>
+          <div className="mt-1 flex items-center gap-2">
+            <code className="flex-1 break-all rounded border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-700">
+              {form.refCode ? `${WORKER_BASE}/r/${form.refCode}` : '— ref_code を入力すると出ます —'}
+            </code>
+            <button
+              type="button"
+              disabled={!form.refCode}
+              onClick={async () => {
+                await navigator.clipboard.writeText(`${WORKER_BASE}/r/${form.refCode}`)
+                setUrlCopied(true)
+                setTimeout(() => setUrlCopied(false), 1500)
+              }}
+              className="shrink-0 rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+            >
+              {urlCopied ? 'コピー済' : 'コピー'}
+            </button>
+          </div>
           {refCodeLocked && (
             <p className="text-xs text-gray-500 mt-1">
               既に流入があった ref を登録中のため、ref_code は変更できません。

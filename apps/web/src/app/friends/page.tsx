@@ -32,6 +32,15 @@ const ccPrompts = [
 
 const PAGE_SIZE = 20
 
+// 管理者・講師は友だち一覧の上に分けて出す。ここに載せたタグが対象。
+// 「日記◯◯」は前の呼び方。まだ残っている教室があるので同じものとして扱う。
+const ADMIN_TAG_NAMES = ['日誌管理者', '日記管理者']
+const TEACHER_TAG_NAMES = ['日誌講師', '日記講師', '講師', 'スタッフ']
+const STAFF_TAG_NAMES = [...ADMIN_TAG_NAMES, ...TEACHER_TAG_NAMES]
+
+const hasAnyTag = (friend: FriendListItem, names: string[]) =>
+  friend.tags.some((tag) => names.includes(tag.name))
+
 type SortMode = 'recent' | 'oldest'
 type ResponseFilter = 'all' | 'unhandled'
 
@@ -48,6 +57,7 @@ export default function FriendsPage() {
   const [sortMode, setSortMode] = useState<SortMode>('recent')
   const [responseFilter, setResponseFilter] = useState<ResponseFilter>('all')
   const [showTagManager, setShowTagManager] = useState(false)
+  const [staff, setStaff] = useState<FriendListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -88,9 +98,42 @@ export default function FriendsPage() {
     }
   }, [page, selectedTagId, selectedAccountId, searchSubmitted, sortMode, responseFilter])
 
+  // 管理者・講師のタグが付いた友だちだけを、別に読み込む。
+  const loadStaff = useCallback(async () => {
+    const targets = allTags.filter((tag) => STAFF_TAG_NAMES.includes(tag.name))
+    if (targets.length === 0) {
+      setStaff([])
+      return
+    }
+    try {
+      const results = await Promise.all(
+        targets.map((tag) =>
+          api.friends.list({
+            limit: 50,
+            tagId: tag.id,
+            accountId: selectedAccountId || undefined,
+            includeChatStatus: true,
+          }),
+        ),
+      )
+      const merged = new Map<string, FriendListItem>()
+      for (const res of results) {
+        if (!res.success) continue
+        for (const item of res.data.items) merged.set(item.id, item)
+      }
+      setStaff([...merged.values()])
+    } catch {
+      setStaff([])
+    }
+  }, [allTags, selectedAccountId])
+
   useEffect(() => {
     loadTags()
   }, [loadTags])
+
+  useEffect(() => {
+    loadStaff()
+  }, [loadStaff])
 
   useEffect(() => {
     setPage(1)
@@ -125,6 +168,16 @@ export default function FriendsPage() {
     await loadTags()
     await loadFriends()
   }
+
+  const staffIds = new Set(staff.map((item) => item.id))
+  // 検索や絞り込みをしているときは、そのままの並びを尊重する。
+  const showStaffSection = staff.length > 0 && !searchSubmitted && !selectedTagId && page === 1
+  const listedFriends = showStaffSection ? friends.filter((item) => !staffIds.has(item.id)) : friends
+  // 管理者と講師の両方が付いている人は、管理者の側にだけ出す。
+  const admins = staff.filter((item) => hasAnyTag(item, ADMIN_TAG_NAMES))
+  const teachers = staff.filter(
+    (item) => !hasAnyTag(item, ADMIN_TAG_NAMES) && hasAnyTag(item, TEACHER_TAG_NAMES),
+  )
 
   return (
     <div>
@@ -204,6 +257,42 @@ export default function FriendsPage() {
         </div>
       )}
 
+      {showStaffSection &&
+        ([
+          { title: '管理者', people: admins, tagNames: ADMIN_TAG_NAMES },
+          { title: '講師', people: teachers, tagNames: TEACHER_TAG_NAMES },
+        ] as const).map((group) =>
+          group.people.length === 0 ? null : (
+            <section key={group.title} className="mb-6">
+              <div className="mb-2 flex items-center gap-2">
+                <h2 className="text-sm font-medium text-pink-900/80">{group.title}</h2>
+                <span className="rounded-full bg-pink-100 px-2 py-0.5 text-xs text-pink-900/70">
+                  {group.people.length}人
+                </span>
+                <span className="text-xs text-pink-900/50">タグ：{group.tagNames.join('・')}</span>
+              </div>
+              <FriendListTable
+                friends={group.people}
+                allTags={allTags}
+                onRefresh={async () => {
+                  await Promise.all([loadStaff(), loadFriends()])
+                }}
+                onTagsChanged={refreshAfterTagChange}
+              />
+            </section>
+          ),
+        )}
+
+      {showStaffSection && (
+        <div className="mb-2 flex items-center gap-2">
+          <h2 className="text-sm font-medium text-pink-900/80">生徒</h2>
+          <span className="rounded-full bg-pink-100 px-2 py-0.5 text-xs text-pink-900/70">
+            {listedFriends.length}人
+          </span>
+          <span className="text-xs text-pink-900/50">管理者・講師以外の友だち</span>
+        </div>
+      )}
+
       {loading ? (
         <div className="overflow-hidden rounded-lg border border-pink-100 bg-white/80 shadow-sm">
           {[...Array(5)].map((_, i) => (
@@ -224,7 +313,7 @@ export default function FriendsPage() {
         </div>
       ) : (
         <FriendListTable
-          friends={friends}
+          friends={listedFriends}
           allTags={allTags}
           onRefresh={loadFriends}
           onTagsChanged={refreshAfterTagChange}

@@ -15,6 +15,8 @@ import ScheduleInput, {
 } from '@/components/scenarios/schedule-input'
 import BulkPreviewModal from '@/components/scenarios/bulk-preview-modal'
 
+const WORKER_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
+
 type ScenarioWithSteps = Scenario & { steps: ScenarioStep[] }
 
 const triggerOptions: { value: ScenarioTriggerType; label: string }[] = [
@@ -162,6 +164,9 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
   const [stats, setStats] = useState<ScenarioStats | null>(null)
   const [templates, setTemplates] = useState<TemplateOpt[]>([])
   const [tags, setTags] = useState<TagOpt[]>([])
+  // このシナリオを起動する流入リンク（友だち追加のURL）
+  const [routes, setRoutes] = useState<Array<{ id: string; name: string; refCode: string }>>([])
+  const [urlCopied, setUrlCopied] = useState('')
 
   const deliveryMode: DeliveryMode = (scenario?.deliveryMode ?? 'relative') as DeliveryMode
 
@@ -200,7 +205,12 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
       api.scenarios.stats(id).catch(() => null),
       api.templates.list().catch(() => null),
       api.tags.list().catch(() => null),
-    ]).then(([statsRes, tplRes, tagRes]) => {
+      api.entryRoutes.list().catch(() => null),
+    ]).then(([statsRes, tplRes, tagRes, routeRes]) => {
+      if (routeRes && routeRes.success) {
+        const all = Array.isArray(routeRes.data) ? routeRes.data : []
+        setRoutes(all.filter((route) => route.scenarioId === id).map((route) => ({ id: route.id, name: route.name, refCode: route.refCode })))
+      }
       if (cancelled) return
       if (statsRes && statsRes.success) setStats(statsRes.data)
       if (tplRes && tplRes.success) {
@@ -554,6 +564,42 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
               <span>トリガー: {triggerOptions.find(o => o.value === scenario.triggerType)?.label ?? scenario.triggerType}</span>
               <span>ステップ数: {scenario.steps.length}</span>
               <span>作成日: {new Date(scenario.createdAt).toLocaleDateString('ja-JP')}</span>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-pink-100 bg-pink-50/50 p-3">
+              <p className="text-xs font-medium text-gray-700">このシナリオが流れる流入URL</p>
+              {routes.length === 0 ? (
+                <p className="mt-1 text-xs text-gray-500">
+                  まだありません。
+                  <a href="/inflow-links" className="ml-1 text-blue-600 hover:underline">流入リンク</a>
+                  で、起動シナリオにこのシナリオを選んで作成してください。
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-2">
+                  {routes.map((route) => {
+                    const url = `${WORKER_BASE}/r/${route.refCode}`
+                    return (
+                      <li key={route.id} className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-gray-600">{route.name}</span>
+                        <code className="flex-1 break-all rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-700">
+                          {url}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(url)
+                            setUrlCopied(route.id)
+                            setTimeout(() => setUrlCopied(''), 1500)
+                          }}
+                          className="shrink-0 rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50"
+                        >
+                          {urlCopied === route.id ? 'コピー済' : 'コピー'}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
             </div>
           </div>
         )}
