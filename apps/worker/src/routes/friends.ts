@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import {
   getFriends,
   getFriendById,
+  getFriendByLineUserId,
   getFriendCount,
   addTagToFriend,
   removeTagFromFriend,
@@ -490,6 +491,45 @@ friends.get('/api/friends/ref-stats', async (c) => {
     });
   } catch (err) {
     console.error('GET /api/friends/ref-stats error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// GET /api/friends/by-line-user/:lineUserId - look up one friend by LINE userId
+//
+// 外部の LIFF アプリ用。LINE の ID トークン検証で分かるのは LINE ユーザー ID
+// だけなので、そこから友だち（とタグ）を引けるようにする。同じ LINE ユーザーが
+// 複数アカウントの友だちになっている場合に取り違えないよう、?lineAccountId=
+// を付けてアカウントを限定できる。
+friends.get('/api/friends/by-line-user/:lineUserId', async (c) => {
+  try {
+    const lineUserId = c.req.param('lineUserId');
+    const lineAccountId = c.req.query('lineAccountId');
+
+    if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+    }
+
+    const friend = await getFriendByLineUserId(c.env.DB, lineUserId, lineAccountId ?? null);
+    if (!friend) {
+      return c.json({ success: false, error: 'Friend not found' }, 404);
+    }
+    const denied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (denied) return denied;
+
+    const tags = await getFriendTags(c.env.DB, friend.id);
+
+    return c.json({
+      success: true,
+      data: {
+        ...serializeFriend(friend),
+        lineAccountId: friend.line_account_id ?? null,
+        tags: tags.map(serializeTag),
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/friends/by-line-user/:lineUserId error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
