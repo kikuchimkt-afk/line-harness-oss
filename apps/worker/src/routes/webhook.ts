@@ -27,6 +27,14 @@ import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
 
+/**
+ * 合言葉の照合をやさしくする。
+ * スマホの自動大文字化や全角入力でも通るよう、NFKC・小文字・前後の空白をそろえて比べる。
+ */
+function normalizeKeywordText(value: string): string {
+  return (value ?? '').normalize('NFKC').trim().toLowerCase();
+}
+
 // LINE webhook bodies are small (events array). Cap defends against unauthenticated
 // large-payload DoS before signature verification (#104). 1 MiB leaves room for
 // bursty batched deliveries (~100 events × ~5 KB) while still well below the
@@ -895,10 +903,9 @@ async function handleEvent(
     let matched = false;
     let replyTokenConsumed = false;
     for (const rule of autoReplies.results) {
-      const isMatch =
-        rule.match_type === 'exact'
-          ? incomingText === rule.keyword
-          : incomingText.includes(rule.keyword);
+      const incoming = normalizeKeywordText(incomingText);
+      const keyword = normalizeKeywordText(rule.keyword);
+      const isMatch = rule.match_type === 'exact' ? incoming === keyword : incoming.includes(keyword);
 
       if (isMatch) {
         // silent タイプ: 返信しないが matched=true にして unread / push を抑止する

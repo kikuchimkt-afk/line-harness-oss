@@ -205,16 +205,19 @@ function matchConditions(
     if (payload.eventData.tagId !== conditions.tag_id) return false;
   }
 
+  // 合言葉は、大文字・小文字と全角・半角の違いを無視して比べる
+  const normalizeKeyword = (value: unknown) =>
+    typeof value === 'string' ? value.normalize('NFKC').trim().toLowerCase() : '';
+
   // keyword チェック（message_received イベント用）
   if (conditions.keyword !== undefined && payload.eventData) {
-    const text = payload.eventData.text as string | undefined;
-    if (!text || !text.includes(conditions.keyword as string)) return false;
+    const text = normalizeKeyword(payload.eventData.text);
+    if (!text || !text.includes(normalizeKeyword(conditions.keyword))) return false;
   }
 
   // keyword_exact（完全一致）
   if (typeof conditions.keyword_exact === 'string') {
-    const text = typeof payload.eventData?.text === 'string' ? payload.eventData.text.trim() : '';
-    if (text !== conditions.keyword_exact) {
+    if (normalizeKeyword(payload.eventData?.text) !== normalizeKeyword(conditions.keyword_exact)) {
       return false;
     }
   }
