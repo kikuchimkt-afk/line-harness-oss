@@ -2307,18 +2307,29 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
     updatedRows.push({ ...row, status: next, decided_at: nowIso });
   }
 
-  if (updatedRows.length > 0) {
-    await sendGroupedBookingNotifications(
-      c.env.DB,
-      updatedRows,
-      action === 'confirm' ? 'confirmed' : 'rejected',
-      approvalComment,
-      normalizedNotification.value,
-    );
-  }
+  // Releasing capacity and promoting the FIFO waitlist is part of the booking
+  // state transition, not a notification side effect. Do it before attempting
+  // LINE Push so an exhausted messaging quota cannot leave an available seat
+  // unfilled after a bulk rejection.
   if (action === 'reject') {
     for (const slotId of new Set(updatedRows.map((row) => row.slot_id))) {
       await fillEventSlotFromWaitlist(c.env.DB, slotId, nowIso);
+    }
+  }
+  if (updatedRows.length > 0) {
+    try {
+      await sendGroupedBookingNotifications(
+        c.env.DB,
+        updatedRows,
+        action === 'confirm' ? 'confirmed' : 'rejected',
+        approvalComment,
+        normalizedNotification.value,
+      );
+    } catch (error) {
+      // Booking decisions are already durable. Match the single-booking and
+      // booking-create paths by treating LINE notification delivery as
+      // best-effort, especially when the account has reached its monthly cap.
+      console.error('[event-booking] bulk decision notification failed', error);
     }
   }
   return c.json({

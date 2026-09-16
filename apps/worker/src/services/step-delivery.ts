@@ -21,6 +21,34 @@ import {
   type IndividualNotificationReservation,
 } from './individual-notification-budget.js';
 
+const DELIVERY_FAILURE_RETRY_DELAY_MS = 5 * 60_000;
+
+/**
+ * Release a claimed scenario step after LINE rejected the outbound request.
+ *
+ * Keep the current step unchanged so it can be retried, but move the next
+ * attempt into the future to avoid an overlapping Cron invocation immediately
+ * claiming the same row again. The current step is part of the WHERE clause so
+ * this cannot roll back a row that has already advanced.
+ */
+export async function requeueFailedScenarioDelivery(
+  db: D1Database,
+  id: string,
+  expectedStepOrder: number,
+): Promise<void> {
+  const retryAt = new Date(Date.now() + 9 * 60 * 60_000 + DELIVERY_FAILURE_RETRY_DELAY_MS)
+    .toISOString()
+    .slice(0, -1) + '+09:00';
+  await db
+    .prepare(
+      `UPDATE friend_scenarios
+       SET status = 'active', next_delivery_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'delivering' AND current_step_order = ?`,
+    )
+    .bind(retryAt, jstNow(), id, expectedStepOrder)
+    .run();
+}
+
 /**
  * Replace template variables in message content.
  *
@@ -245,7 +273,20 @@ async function processSingleDelivery(
   // The scenario is already claimed in D1. Commit the shared Cron slot only
   // when an outbound LINE request is actually about to be attempted.
   reservation?.commit();
-  await deliveryClient.pushMessage(friend.line_user_id, [message]);
+  try {
+    await deliveryClient.pushMessage(friend.line_user_id, [message]);
+  } catch (pushError) {
+    // LINE rejected (or could not complete) the request, so release the claim
+    // immediately instead of leaving it in `delivering` until crash recovery.
+    // If this state update itself fails, recoverStuckDeliveries remains the
+    // final safety net.
+    try {
+      await requeueFailedScenarioDelivery(db, fs.id, fs.current_step_order);
+    } catch (requeueError) {
+      console.error(`[scenario] failed to requeue delivery ${fs.id}:`, requeueError);
+    }
+    throw pushError;
+  }
 
   // Log what we actually pushed: variables expanded, URLs auto-tracked, AND
   // any cleanEmptyNodes() mutation or parse-failure text fallback applied by

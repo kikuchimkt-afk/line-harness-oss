@@ -19,6 +19,7 @@ import { initBooking } from './booking.js';
 import { initForm } from './form.js';
 import { buildDirectFormUrl } from '../lib/direct-form-url.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
+import { retryLiffLinkAfterFriendAdd, type LiffLinkAttemptResult } from './liff-link-retry.js';
 
 declare const liff: {
   init(config: { liffId: string }): Promise<void>;
@@ -93,6 +94,29 @@ function saveUuid(uuid: string): void {
   }
 }
 
+async function linkCurrentFriend(
+  profile: { displayName: string },
+): Promise<LiffLinkAttemptResult> {
+  const params = new URLSearchParams(window.location.search);
+  const response = await apiCall('/api/liff/link', {
+    method: 'POST',
+    body: JSON.stringify({
+      idToken: liff.getIDToken(),
+      displayName: profile.displayName,
+      existingUuid: getSavedUuid(),
+      ref: params.get('ref') || undefined,
+      ig: params.get('ig') || undefined,
+    }),
+  });
+
+  if (response.ok) {
+    const data = await response.json() as { success: boolean; data?: { userId?: string } };
+    if (data?.data?.userId) saveUuid(data.data.userId);
+  }
+
+  return { ok: response.ok, status: response.status };
+}
+
 function escapeHtml(str: string): string {
   const div = document.createElement('div');
   div.textContent = str;
@@ -124,20 +148,42 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
   // 友だち追加後に戻ってきたら自動で再チェック
   // 一度発火したら listener を外して、ユーザーが LIFF をフォアグラウンド復帰するたびに
   // フォーム遷移が重複しないようにする。
-  let formNavigationStarted = false;
+  let friendResumeStarted = false;
   const onVisibilityChange = async () => {
     if (document.visibilityState !== 'visible') return;
     try {
       const { friendFlag } = await liff.getFriendship();
-      if (!friendFlag) return;
+      if (!friendFlag || friendResumeStarted) return;
+      friendResumeStarted = true;
+
+      // The follow webhook may still be creating the friends row when LIFF
+      // becomes visible again. Do not discard ref/tag/scenario attribution or
+      // navigate away until /api/liff/link has succeeded.
+      const linkResult = await retryLiffLinkAfterFriendAdd(
+        () => linkCurrentFriend(profile),
+      );
+      if (!linkResult?.ok) {
+        friendResumeStarted = false;
+        showError('友だち情報の連携に時間がかかっています。しばらく待って画面を再読み込みしてください。');
+        return;
+      }
 
       // Open the form directly after friend-add instead of sending a generic
       // reward-style message back into the chat.
       const formParam = new URLSearchParams(window.location.search).get('form');
-      if (formParam && !formNavigationStarted) {
-        formNavigationStarted = true;
+      if (formParam) {
         document.removeEventListener('visibilitychange', onVisibilityChange);
         window.location.replace(buildDirectFormUrl(window.location.href, formParam));
+        return;
+      }
+
+      // Booking pages must resume the requested screen after friend-add.
+      // Reloading re-enters the normal authenticated initializer and avoids
+      // leaving a newly-added parent on the generic completion screen.
+      const page = getPage();
+      if (page === 'salon-book' || page === 'event' || page === 'event-me') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        window.location.reload();
         return;
       }
       document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -198,33 +244,19 @@ async function linkAndAddFlow() {
   try {
     const existingUuid = getSavedUuid();
 
-    // Get profile, ID token, and friendship status in parallel
-    const [profile, rawIdToken, friendship] = await Promise.all([
+    // Get profile and friendship status in parallel
+    const [profile, friendship] = await Promise.all([
       liff.getProfile(),
-      Promise.resolve(liff.getIDToken()),
       liff.getFriendship(),
     ]);
 
-    // 1. UUID linking (always, regardless of friendship)
-    const linkParams = new URLSearchParams(window.location.search);
-    const linkPromise = apiCall('/api/liff/link', {
-      method: 'POST',
-      body: JSON.stringify({
-        idToken: rawIdToken,
-        displayName: profile.displayName,
-        existingUuid: existingUuid,
-        ref: ref,
-        ig: linkParams.get('ig') || '',
-      }),
-    }).then(async (res) => {
-      if (res.ok) {
-        const data = await res.json() as { success: boolean; data?: { userId?: string } };
-        if (data?.data?.userId) {
-          saveUuid(data.data.userId);
-        }
-      }
-      return res;
-    }).catch(() => {
+    // 1. UUID linking (always, regardless of friendship). If LINE already
+    // reports the user as a friend but its follow webhook is still creating
+    // the DB row, retry the expected 404 race before showing completion.
+    const linkPromise = (friendship.friendFlag
+      ? retryLiffLinkAfterFriendAdd(() => linkCurrentFriend(profile))
+      : linkCurrentFriend(profile)
+    ).catch(() => {
       // Silent fail — UUID linking is best-effort
     });
 
@@ -253,13 +285,17 @@ async function linkAndAddFlow() {
     }
 
     // 4. Wait for UUID linking to complete
-    await linkPromise;
+    const linkResult = await linkPromise;
 
     // 5. Friendship check — the key decision point
     if (!friendship.friendFlag) {
       // Not a friend yet → show friend-add button
       showFriendAdd(profile);
     } else {
+      if (!linkResult?.ok) {
+        showError('友だち情報の連携に時間がかかっています。しばらく待って画面を再読み込みしてください。');
+        return;
+      }
       // Already a friend — check for form param
       const formParam = new URLSearchParams(window.location.search).get('form');
       if (formParam) {

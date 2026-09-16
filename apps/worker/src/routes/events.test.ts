@@ -2618,6 +2618,43 @@ describe('admin bookings management', () => {
     );
   });
 
+  test('POST bulk-decide keeps rejection and waitlist promotion when LINE notification fails', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', waitlist_enabled: 1 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    notifierMocks.sendEventBookingNotification.mockRejectedValueOnce(
+      new Error('LINE API error: 429 Too Many Requests'),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = setupApp(state);
+
+    const res = await app.request('/api/events/admin/events/e1/bookings/bulk-decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'reject', booking_ids: ['b1'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('rejected');
+    expect(waitlistMocks.promoteEventWaitlist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ slotId: 's1' }),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[event-booking] bulk decision notification failed',
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
+  });
+
   test('POST decide confirm transitions to confirmed and creates reminders', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', reminder_day_before_enabled: 1, reminder_hours_before: 2 })],
