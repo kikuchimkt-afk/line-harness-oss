@@ -48,6 +48,8 @@ describe('Eiken course manager sync', () => {
     // Vercel が名前を切り詰めて実際に配信するのはこちら。ここが漏れると同期が無言で止まる。
     expect(resolveEikenManagerOrigin('https://eiken-study-meeting-manager-2026-ro.vercel.app/calendar'))
       .toBe('https://eiken-study-meeting-manager-2026-ro.vercel.app')
+    expect(resolveEikenManagerOrigin('https://tokushima-elementary-english-presentation-2026.vercel.app/admin'))
+      .toBe('https://tokushima-elementary-english-presentation-2026.vercel.app')
     expect(resolveEikenManagerOrigin('https://example.com')).toBeNull()
   })
 

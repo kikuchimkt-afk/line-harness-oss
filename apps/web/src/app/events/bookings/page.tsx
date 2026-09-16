@@ -305,11 +305,16 @@ function BookingsInner() {
   useEffect(() => {
     if (!managerSyncTarget || !managerSyncPayload || loading || !window.opener) return
     window.opener.postMessage(managerSyncPayload, managerSyncTarget)
-    setManagerSyncNotice('英検集中講座 管理アプリへ予約データを送りました。')
+    setManagerSyncNotice('運営管理アプリへ予約データを送りました。')
   }, [loading, managerSyncPayload, managerSyncTarget])
 
   function sendToEikenManager() {
     if (!managerSyncPayload) return
+    if (managerSyncTarget && window.opener) {
+      window.opener.postMessage(managerSyncPayload, managerSyncTarget)
+      setManagerSyncNotice('運営管理アプリへ予約データを送りました。')
+      return
+    }
     const managerWindow = window.open(EIKEN_MANAGER_PRIMARY_ORIGIN, 'eiken-course-manager')
     if (!managerWindow) {
       setError('管理アプリを開けませんでした。ブラウザのポップアップを許可してください。')
@@ -326,7 +331,7 @@ function BookingsInner() {
       ) return
       managerWindow.postMessage(managerSyncPayload, EIKEN_MANAGER_PRIMARY_ORIGIN)
       window.removeEventListener('message', handleReady)
-      setManagerSyncNotice('英検集中講座 管理アプリへ予約データを送りました。')
+      setManagerSyncNotice('運営管理アプリへ予約データを送りました。')
     }
 
     window.addEventListener('message', handleReady)
@@ -599,7 +604,7 @@ function BookingsInner() {
               disabled={!event || allItems.length === 0}
               className="rounded-xl border border-green-200 bg-green-50 px-4 py-2 text-sm font-medium text-green-700 shadow-sm transition hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              英検管理へ送る
+              運営管理へ送る
             </button>
             <button
               type="button"

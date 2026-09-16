@@ -15,6 +15,7 @@ const EIKEN_MANAGER_ALLOWED_ORIGINS = new Set([
   // 実際に配信されるのは -ro のほうで、-round2 は保護付きの別名にしかならない。
   'https://eiken-study-meeting-manager-2026-ro.vercel.app',
   'https://eiken-study-meeting-manager-2026-round2.vercel.app',
+  'https://tokushima-elementary-english-presentation-2026.vercel.app',
   'https://eiken-intensive-course-manager-2026.makoto-keitai-list.chatgpt.site',
   'http://localhost:3000',
 ])
