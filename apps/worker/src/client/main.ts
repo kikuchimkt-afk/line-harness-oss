@@ -155,44 +155,62 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
       const { friendFlag } = await liff.getFriendship();
       if (!friendFlag || friendResumeStarted) return;
       friendResumeStarted = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      showLinking();
 
       // The follow webhook may still be creating the friends row when LIFF
-      // becomes visible again. Do not discard ref/tag/scenario attribution or
-      // navigate away until /api/liff/link has succeeded.
+      // becomes visible again, so give attribution a chance to land first.
       const linkResult = await retryLiffLinkAfterFriendAdd(
         () => linkCurrentFriend(profile),
       );
-      if (!linkResult?.ok) {
-        friendResumeStarted = false;
-        showError('友だち情報の連携に時間がかかっています。しばらく待って画面を再読み込みしてください。');
-        return;
-      }
-
-      // Open the form directly after friend-add instead of sending a generic
-      // reward-style message back into the chat.
-      const formParam = new URLSearchParams(window.location.search).get('form');
-      if (formParam) {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-        window.location.replace(buildDirectFormUrl(window.location.href, formParam));
-        return;
-      }
-
-      // Booking pages must resume the requested screen after friend-add.
-      // Reloading re-enters the normal authenticated initializer and avoids
-      // leaving a newly-added parent on the generic completion screen.
-      const page = getPage();
-      if (page === 'salon-book' || page === 'event' || page === 'event-me') {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-        window.location.reload();
-        return;
-      }
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-      showCompletion(profile, false);
+      warnIfLinkFailed(linkResult);
+      continueAsFriend(profile, false);
     } catch {
       // ignore
     }
   };
   document.addEventListener('visibilitychange', onVisibilityChange);
+}
+
+function showLinking() {
+  const container = document.getElementById('app')!;
+  container.innerHTML = `
+    <div class="card">
+      <div class="loading-spinner"></div>
+      <p class="message">友だち登録を確認しています...</p>
+    </div>
+  `;
+}
+
+// LINE has already confirmed the friendship at this point. Attribution
+// (/api/liff/link) is best-effort: a failure must never strand the user on an
+// error screen instead of the Official Account talk room.
+function warnIfLinkFailed(linkResult: LiffLinkAttemptResult | null | void) {
+  if (linkResult?.ok) return;
+  console.warn('[liff] friend link failed', linkResult ? linkResult.status : 'network');
+}
+
+function continueAsFriend(
+  profile: { displayName: string; pictureUrl?: string },
+  isRecovery: boolean,
+) {
+  // Open the form directly after friend-add instead of sending a generic
+  // reward-style message back into the chat.
+  const formParam = new URLSearchParams(window.location.search).get('form');
+  if (formParam) {
+    window.location.replace(buildDirectFormUrl(window.location.href, formParam));
+    return;
+  }
+
+  // Booking pages must resume the requested screen after friend-add.
+  // Reloading re-enters the normal authenticated initializer and avoids
+  // leaving a newly-added parent on the generic completion screen.
+  const page = getPage();
+  if (page === 'salon-book' || page === 'event' || page === 'event-me') {
+    window.location.reload();
+    return;
+  }
+  showCompletion(profile, isRecovery);
 }
 
 function showCompletion(profile: { displayName: string; pictureUrl?: string }, isRecovery: boolean) {
@@ -292,20 +310,10 @@ async function linkAndAddFlow() {
       // Not a friend yet → show friend-add button
       showFriendAdd(profile);
     } else {
-      if (!linkResult?.ok) {
-        showError('友だち情報の連携に時間がかかっています。しばらく待って画面を再読み込みしてください。');
-        return;
-      }
-      // Already a friend — check for form param
-      const formParam = new URLSearchParams(window.location.search).get('form');
-      if (formParam) {
-        // The rich-menu application button should land on the form itself.
-        // Replacing the current URL also makes refreshes stay on the form page.
-        window.location.replace(buildDirectFormUrl(window.location.href, formParam));
-        return;
-      } else {
-        showCompletion(profile, !!existingUuid);
-      }
+      warnIfLinkFailed(linkResult);
+      // The rich-menu application button should land on the form itself;
+      // replacing the URL also makes refreshes stay on the form page.
+      continueAsFriend(profile, !!existingUuid);
     }
 
   } catch (err) {

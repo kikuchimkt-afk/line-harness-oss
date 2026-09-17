@@ -132,7 +132,11 @@ async function applyRefAttribution(
   const effectiveScenarioId = route?.scenario_id ?? trackedLink?.scenario_id ?? null;
 
   if (effectiveTagId) {
-    await addTagToFriend(db, friend.id, effectiveTagId);
+    try {
+      await addTagToFriend(db, friend.id, effectiveTagId);
+    } catch (err) {
+      console.error(`[ref-attribution] tag attach failed ref=${ref} tag=${effectiveTagId}:`, err);
+    }
   }
   if (effectiveScenarioId) {
     try {
@@ -1154,7 +1158,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
     }
 
     // Try verifying with default Login channel, then DB accounts
-    const loginChannelIds = [c.env.LINE_LOGIN_CHANNEL_ID];
+    const loginChannelIds = c.env.LINE_LOGIN_CHANNEL_ID ? [c.env.LINE_LOGIN_CHANNEL_ID] : [];
     const dbAccounts = await getLineAccounts(c.env.DB);
     for (const acct of dbAccounts) {
       if (acct.login_channel_id && !loginChannelIds.includes(acct.login_channel_id)) {
@@ -1164,6 +1168,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
 
     let verifyRes: Response | null = null;
     let verifiedLoginChannelId: string | null = null;
+    const verifyFailures: string[] = [];
     for (const channelId of loginChannelIds) {
       verifyRes = await fetch('https://api.line.me/oauth2/v2.1/verify', {
         method: 'POST',
@@ -1174,9 +1179,14 @@ liffRoutes.post('/api/liff/link', async (c) => {
         verifiedLoginChannelId = channelId;
         break;
       }
+      const failure = await verifyRes.json<{ error_description?: string }>().catch(() => null);
+      verifyFailures.push(`${channelId}:${verifyRes.status}:${failure?.error_description ?? 'unknown'}`);
     }
 
     if (!verifyRes?.ok) {
+      // No PII here: channel IDs and LINE's error text are enough to tell an
+      // expired token from a Login channel that is missing in line_accounts.
+      console.warn(`[liff/link] id token rejected ref=${body.ref ?? ''} attempts=${verifyFailures.join(' | ') || 'no login channels configured'}`);
       return c.json({ success: false, error: 'Invalid ID token' }, 401);
     }
 
@@ -1191,6 +1201,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
     );
     const friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
     if (!friend) {
+      console.warn(`[liff/link] friend not found ref=${body.ref ?? ''} loginChannel=${verifiedLoginChannelId} account=${verifiedLineAccountId ?? 'unresolved'}`);
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
 
