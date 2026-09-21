@@ -4,7 +4,6 @@
 
 import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { shouldSuppressTemporaryUatBookingNotifications } from '../../services/temporary-uat-notification-suppression.js';
 import { normalizeExternalHttpsUrl, openWithLiffExternal } from './external-browser.js';
 import './styles.css';
 
@@ -771,13 +770,6 @@ export function ConfirmScreen({
       const successes: Array<{ id: string; status: string; waitlist_position?: number | null }> = [];
       const failures: string[] = [];
       const shouldSummarizeNotification = slots.length > 1;
-      // Keep the UAT mute effective even if another Worker deployment races
-      // with the server-side guard: every supported server version already
-      // honors the explicit suppress_notification request field.
-      const suppressTemporaryUatNotification =
-        shouldSuppressTemporaryUatBookingNotifications(event.id, answers);
-      const shouldSuppressNotification =
-        shouldSummarizeNotification || suppressTemporaryUatNotification;
       for (const selectedSlot of slots) {
         try {
           const res = await apiPost<{ id: string; status: string; waitlist_position?: number | null }>(
@@ -786,7 +778,7 @@ export function ConfirmScreen({
               slot_id: selectedSlot.id,
               customer_note: note || null,
               form_answers: answers,
-              suppress_notification: shouldSuppressNotification,
+              suppress_notification: shouldSummarizeNotification,
             },
             ctx,
             { 'Idempotency-Key': `${idemKey}-${selectedSlot.id}` },
@@ -797,7 +789,7 @@ export function ConfirmScreen({
         }
       }
       if (successes.length > 0) {
-        if (shouldSummarizeNotification && !suppressTemporaryUatNotification) {
+        if (shouldSummarizeNotification) {
           try {
             await apiPost<{ ok: boolean; count: number }>(
               `/api/liff/events/${event.id}/bookings/summary`,

@@ -59,10 +59,6 @@ import {
   isBeforeEventWaitlistCutoff,
   promoteEventWaitlist,
 } from '../services/event-booking-waitlist.js';
-import {
-  shouldSuppressTemporaryUatBookingNotifications,
-} from '../services/temporary-uat-notification-suppression.js';
-
 const events = new Hono<Env>();
 
 // ----------------------------------------------------------------
@@ -1411,7 +1407,6 @@ interface EventBookingNotificationRow {
   reminder_hours_before: number | null;
   cancel_deadline_hours_before: number | null;
   confirmation_message_extra: string | null;
-  form_answers?: string | null;
 }
 
 async function sendGroupedBookingNotifications(
@@ -1520,7 +1515,6 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
-              b.form_answers,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
               e.cancel_deadline_hours_before,
@@ -1565,17 +1559,14 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
       }
     }
 
-    const notifiableRows = rows.filter(
-      (row) => !shouldSuppressTemporaryUatBookingNotifications(row.event_id, row.form_answers),
-    );
     const notificationGroups: Array<{
       rows: EventBookingNotificationRow[];
       kind: EventNotificationKind;
       adminStatus?: 'requested' | 'confirmed';
     }> = [
-      { rows: notifiableRows.filter((row) => row.status === 'requested'), kind: 'received_pending', adminStatus: 'requested' },
-      { rows: notifiableRows.filter((row) => row.status === 'waitlisted'), kind: 'waitlisted' },
-      { rows: notifiableRows.filter((row) => row.status === 'confirmed'), kind: 'received_confirmed', adminStatus: 'confirmed' },
+      { rows: rows.filter((row) => row.status === 'requested'), kind: 'received_pending', adminStatus: 'requested' },
+      { rows: rows.filter((row) => row.status === 'waitlisted'), kind: 'waitlisted' },
+      { rows: rows.filter((row) => row.status === 'confirmed'), kind: 'received_confirmed', adminStatus: 'confirmed' },
     ];
     for (const group of notificationGroups) {
       if (group.rows.length === 0) continue;
@@ -1715,10 +1706,6 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   if (!formAnswers.ok) {
     return finalize(422, { error: formAnswers.code });
   }
-  const suppressTemporaryUatNotifications = shouldSuppressTemporaryUatBookingNotifications(
-    event.id,
-    formAnswers.answers,
-  );
 
   const slot = await c.env.DB
     .prepare(
@@ -1959,11 +1946,7 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
     .bind(account_id)
     .first<{ channel_access_token: string }>();
-  if (
-    acc?.channel_access_token &&
-    body.suppress_notification !== true &&
-    !suppressTemporaryUatNotifications
-  ) {
+  if (acc?.channel_access_token && body.suppress_notification !== true) {
     try {
       const kind: EventNotificationKind = status === 'requested'
         ? 'received_pending'
@@ -2122,7 +2105,6 @@ interface BookingActionRow {
   status: string;
   decided_at: string | null;
   confirmation_message_extra: string | null;
-  form_answers: string | null;
 }
 
 async function loadBookingForAction(
@@ -2139,7 +2121,6 @@ async function loadBookingForAction(
   const row = await db
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
-              b.form_answers,
               e.confirmation_message_extra
          FROM event_bookings b
          JOIN events e ON e.id = b.event_id
@@ -2310,7 +2291,6 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
-              b.form_answers,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
               e.cancel_deadline_hours_before,
@@ -2396,14 +2376,11 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       await fillEventSlotFromWaitlist(c.env.DB, slotId, nowIso);
     }
   }
-  const notifiableUpdatedRows = updatedRows.filter(
-    (row) => !shouldSuppressTemporaryUatBookingNotifications(row.event_id, row.form_answers),
-  );
-  if (notifiableUpdatedRows.length > 0) {
+  if (updatedRows.length > 0) {
     try {
       await sendGroupedBookingNotifications(
         c.env.DB,
-        notifiableUpdatedRows,
+        updatedRows,
         action === 'confirm' ? 'confirmed' : 'rejected',
         approvalComment,
         normalizedNotification.value,
@@ -2518,15 +2495,13 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     }
   }
 
-  if (!shouldSuppressTemporaryUatBookingNotifications(booking.event_id, booking.form_answers)) {
-    await notifyBookingFriend(
-      c.env.DB,
-      booking.id,
-      action === 'confirm' ? 'confirmed' : 'rejected',
-      approvalComment,
-      normalizedNotification.value,
-    );
-  }
+  await notifyBookingFriend(
+    c.env.DB,
+    booking.id,
+    action === 'confirm' ? 'confirmed' : 'rejected',
+    approvalComment,
+    normalizedNotification.value,
+  );
   if (action === 'reject') {
     await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
   }
@@ -2559,9 +2534,7 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/cancel', async (c)
     .run();
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, booking.id);
-  if (!shouldSuppressTemporaryUatBookingNotifications(booking.event_id, booking.form_answers)) {
-    await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
-  }
+  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
   if (booking.status === 'requested' || booking.status === 'confirmed') {
     await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
   }
