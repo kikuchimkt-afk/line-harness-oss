@@ -121,7 +121,9 @@ export function buildEikenManagerSyncPayload(
   fields: EventBookingFormField[],
   exportedAt = new Date().toISOString(),
 ): EikenManagerSyncPayload {
-  const studentNameField = fields.find((field) => field.label === '受講者氏名')
+  const studentNameField = fields.find((field) =>
+    ['受講者氏名', '受講児童名'].includes(field.label),
+  )
   const schoolGradeField = fields.find((field) => field.label === '学年')
   const messageField = fields.find((field) => field.label === '教室へ伝えておきたいこと')
   const courseLevelField = fields.find((field) =>

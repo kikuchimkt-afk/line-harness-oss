@@ -86,6 +86,41 @@ describe('Eiken course manager sync', () => {
     expect(JSON.stringify(payload)).not.toContain('U1')
   })
 
+  it('reads the legacy presentation child-name label without confusing it with the acknowledgement field', () => {
+    const presentationFields: EventBookingFormField[] = [
+      {
+        id: 'student_name',
+        label: '運用確認データについて',
+        type: 'select',
+        required: true,
+        options: ['実在する個人情報を入力せず、仮名で確認します'],
+      },
+      { id: 'grade', label: '保護者さまのお名前', type: 'text', required: true },
+      { id: 'parent_name', label: '受講児童名', type: 'text', required: true },
+      { id: 'study_content', label: '学年', type: 'select', required: true },
+    ]
+    const presentationBooking = {
+      ...booking,
+      form_answers: JSON.stringify({
+        student_name: '実在する個人情報を入力せず、仮名で確認します',
+        grade: 'テスト保護者',
+        parent_name: 'テスト児童',
+        study_content: '小学4年',
+      }),
+    }
+
+    const payload = buildEikenManagerSyncPayload(
+      { ...event, id: 'presentation-practice', name: '小学生英語プレゼン練習' } as EventDetail,
+      [presentationBooking],
+      presentationFields,
+      '2026-09-22T03:00:00.000Z',
+    )
+
+    expect(payload.rows[1]).toEqual(expect.arrayContaining(['テスト児童', '小学4年']))
+    expect(payload.rows[1]).not.toContain('実在する個人情報を入力せず、仮名で確認します')
+    expect(payload.rows[1]).not.toContain('テスト保護者')
+  })
+
   it('flattens checkbox answers stored as JSON text', () => {
     // json_extract を通した回答は、チェックボックス設問だと
     // '["5級"]' のような JSON 文字列で届く。そのまま出すと角括弧が見える。
