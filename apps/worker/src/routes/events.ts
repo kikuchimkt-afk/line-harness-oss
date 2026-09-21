@@ -485,7 +485,24 @@ events.get('/api/events/admin/events', async (c) => {
          OR (e.target_type = 'multi-account-dedup'
              AND EXISTS (SELECT 1 FROM json_each(e.account_ids) WHERE value = ?))
        )
-       ORDER BY e.sort_order ASC, e.created_at DESC`,
+       ORDER BY
+         julianday(
+           CASE
+             WHEN substr(e.updated_at, -1) = 'Z'
+               OR substr(e.updated_at, -6, 1) IN ('+', '-')
+             THEN e.updated_at
+             ELSE e.updated_at || '+09:00'
+           END
+         ) DESC,
+         julianday(
+           CASE
+             WHEN substr(e.created_at, -1) = 'Z'
+               OR substr(e.created_at, -6, 1) IN ('+', '-')
+             THEN e.created_at
+             ELSE e.created_at || '+09:00'
+           END
+         ) DESC,
+         e.id ASC`,
     )
     .bind(account_id, account_id)
     .all();
@@ -920,15 +937,16 @@ events.post('/api/events/admin/events/:id/slots', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { slots?: SlotInput[] };
   if (!Array.isArray(body.slots) || body.slots.length === 0) return bad(c, 'slots_required', 422);
 
-  const inserted: Array<Record<string, unknown>> = [];
+  const pendingInserts: Array<{ id: string; statement: D1PreparedStatement }> = [];
   for (const s of body.slots) {
     const v = validateSlotInput(s, true);
     if (!v.ok) return bad(c, v.code, 422);
     const visibility = normalizeSlotVisibilityConditions(s.visibility_conditions);
     if (!visibility.ok) return bad(c, visibility.code, 422);
     const id = crypto.randomUUID();
-    await c.env.DB
-      .prepare(
+    pendingInserts.push({
+      id,
+      statement: c.env.DB.prepare(
         `INSERT INTO event_slots
            (id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -942,8 +960,18 @@ events.post('/api/events/admin/events/:id/slots', async (c) => {
         s.is_active ?? 1,
         s.sort_order ?? 0,
         visibility.rule.conditions.length > 0 ? JSON.stringify(visibility.rule) : null,
-      )
-      .run();
+      ),
+    });
+  }
+  await c.env.DB.batch([
+    ...pendingInserts.map(({ statement }) => statement),
+    c.env.DB
+      .prepare(`UPDATE events SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`)
+      .bind(event_id),
+  ]);
+
+  const inserted: Array<Record<string, unknown>> = [];
+  for (const { id } of pendingInserts) {
     const row = await c.env.DB.prepare(`SELECT * FROM event_slots WHERE id = ?`).bind(id).first();
     if (row) inserted.push(row as Record<string, unknown>);
   }
@@ -1008,10 +1036,14 @@ events.put('/api/events/admin/events/:id/slots/:slotId', async (c) => {
   }
   setClauses.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
   setValues.push(slot_id);
-  await c.env.DB
-    .prepare(`UPDATE event_slots SET ${setClauses.join(', ')} WHERE id = ?`)
-    .bind(...setValues)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(`UPDATE event_slots SET ${setClauses.join(', ')} WHERE id = ?`)
+      .bind(...setValues),
+    c.env.DB
+      .prepare(`UPDATE events SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`)
+      .bind(event_id),
+  ]);
   // If the slot time moved, reminders for the slot's confirmed bookings are
   // now stale (they still point at the old starts_at).
   if (Object.prototype.hasOwnProperty.call(body, 'starts_at')) {
@@ -1961,10 +1993,14 @@ events.delete('/api/events/admin/events/:id/slots/:slotId', async (c) => {
     .first<{ c: number }>();
   if ((active?.c ?? 0) > 0) return bad(c, 'slot_has_bookings', 409);
   const now = new Date().toISOString();
-  await c.env.DB
-    .prepare(`UPDATE event_slots SET deleted_at = ?, updated_at = ? WHERE id = ?`)
-    .bind(now, now, slot_id)
-    .run();
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(`UPDATE event_slots SET deleted_at = ?, updated_at = ? WHERE id = ?`)
+      .bind(now, now, slot_id),
+    c.env.DB
+      .prepare(`UPDATE events SET updated_at = ? WHERE id = ?`)
+      .bind(now, event_id),
+  ]);
   return new Response(null, { status: 204 });
 });
 

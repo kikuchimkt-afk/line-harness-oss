@@ -491,11 +491,20 @@ function makeEventDb(state: {
                   pending_count,
                 };
               })
-              .sort((a, b) =>
-                a.sort_order !== b.sort_order
+              .sort((a, b) => {
+                if (sql.includes('WHEN substr(e.updated_at, -1) = \'Z\'')) {
+                  const timestamp = (value: string): number =>
+                    Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}+09:00`);
+                  return (
+                    timestamp(b.updated_at) - timestamp(a.updated_at) ||
+                    timestamp(b.created_at) - timestamp(a.created_at) ||
+                    a.id.localeCompare(b.id)
+                  );
+                }
+                return a.sort_order !== b.sort_order
                   ? a.sort_order - b.sort_order
-                  : b.created_at.localeCompare(a.created_at),
-              );
+                  : b.created_at.localeCompare(a.created_at);
+              });
             return { results: items as unknown as T[] };
           }
           // notification summary JOIN used by LIFF multi-booking and admin bulk decisions.
@@ -831,6 +840,9 @@ function makeEventDb(state: {
       };
       return stmt;
     },
+    async batch(statements: Array<{ run(): Promise<unknown> }>) {
+      return Promise.all(statements.map((statement) => statement.run()));
+    },
   } as unknown as D1Database;
   return db;
 }
@@ -1119,6 +1131,66 @@ describe('GET /api/events/admin/events', () => {
     expect(body.items.map((e) => e.id).sort()).toEqual(['e1', 'e2']);
   });
 
+  test('lists most recently edited events first with deterministic ties', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'older',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-09-20T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'timezone-naive-jst',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000',
+          // 09:30 JST = 00:30 UTC. This must stay below the 01:00 UTC item.
+          updated_at: '2026-09-21T09:30:00.000',
+        }),
+        baseEvent({
+          id: 'timezone-utc',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-09-21T01:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'tie-b',
+          line_account_id: 'la1',
+          created_at: '2026-02-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'newer-created',
+          line_account_id: 'la1',
+          created_at: '2026-03-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'tie-a',
+          line_account_id: 'la1',
+          created_at: '2026-02-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+      ],
+      slots: [],
+      bookings: [],
+    };
+    const app = setupApp(state);
+
+    const res = await app.request('/api/events/admin/events?account_id=la1');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: EventRow[] };
+    expect(body.items.map((event) => event.id)).toEqual([
+      'timezone-utc',
+      'timezone-naive-jst',
+      'newer-created',
+      'tie-a',
+      'tie-b',
+      'older',
+    ]);
+  });
+
   test('lists includes multi-account event when account in account_ids', async () => {
     const state = {
       events: [
@@ -1332,7 +1404,7 @@ describe('event_slots admin', () => {
 
   test('POST creates multiple slots', async () => {
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [] as SlotRow[],
     };
     const app = setupApp(state);
@@ -1350,6 +1422,7 @@ describe('event_slots admin', () => {
     const body = (await res.json()) as { items: SlotRow[] };
     expect(body.items).toHaveLength(2);
     expect(state.slots).toHaveLength(2);
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
   });
 
   test('POST stores slot visibility conditions', async () => {
@@ -1420,7 +1493,7 @@ describe('event_slots admin', () => {
 
   test('PUT updates slot fields', async () => {
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
     };
     const app = setupApp(state);
@@ -1432,6 +1505,7 @@ describe('event_slots admin', () => {
     expect(res.status).toBe(200);
     expect(state.slots[0].capacity).toBe(10);
     expect(state.slots[0].is_active).toBe(0);
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
   });
 
   test('PUT updates slot visibility conditions', async () => {
@@ -1502,7 +1576,7 @@ describe('event_slots admin', () => {
 
   test('DELETE soft-deletes when no active bookings', async () => {
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
       bookings: [],
     };
@@ -1512,6 +1586,7 @@ describe('event_slots admin', () => {
     });
     expect(res.status).toBe(204);
     expect(state.slots[0].deleted_at).not.toBeNull();
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
   });
 
   test('DELETE 409 when active bookings exist', async () => {
