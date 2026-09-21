@@ -73,6 +73,7 @@ interface EventRow {
   venue_url: string | null;
   image_url: string | null;
   description: string | null;
+  detail_url: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
@@ -760,14 +761,14 @@ function makeEventDb(state: {
               reminder_day_before_enabled, reminder_hours_before,
               is_published, sort_order,
               target_type, account_ids, dedup_priority, booking_form_fields,
-              confirmation_message_extra,
+              confirmation_message_extra, detail_url,
             ] = bound as [
               string, string, string, string | null, string | null, string | null,
               string | null, number,
               number | null, number, number, number | null,
               number, number | null,
               number, number,
-              string, string | null, string | null, string, string | null,
+              string, string | null, string | null, string, string | null, string | null,
             ];
             const now = new Date().toISOString();
             state.events.push({
@@ -796,6 +797,7 @@ function makeEventDb(state: {
               dedup_priority,
               booking_form_fields,
               confirmation_message_extra,
+              detail_url,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -895,6 +897,7 @@ describe('POST /api/events/admin/events', () => {
     expect(body.requires_approval).toBe(0);
     expect(body.reminder_day_before_enabled).toBe(1);
     expect(body.booking_form_fields).toBe('[]');
+    expect(body.detail_url).toBeNull();
     expect(state.events).toHaveLength(1);
   });
 
@@ -909,6 +912,7 @@ describe('POST /api/events/admin/events', () => {
         venue_name: '渋谷',
         venue_url: 'https://example.com',
         description: 'hello',
+        detail_url: 'https://ecc-preschool-autumn-events.vercel.app/lessons',
         description_centered: 1,
         max_bookings_per_friend: 1,
         requires_approval: 1,
@@ -929,6 +933,7 @@ describe('POST /api/events/admin/events', () => {
     expect(body.requires_approval).toBe(1);
     expect(body.cancel_deadline_hours_before).toBe(12);
     expect(body.is_published).toBe(1);
+    expect(body.detail_url).toBe('https://ecc-preschool-autumn-events.vercel.app/lessons');
     expect(JSON.parse(body.booking_form_fields ?? '[]')).toHaveLength(2);
     expect(body.confirmation_message_extra).toBe(
       '教材はこちらです。\nhttps://example.com/materials',
@@ -977,6 +982,37 @@ describe('POST /api/events/admin/events', () => {
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('invalid_description');
+  });
+
+  test.each([
+    'http://example.com/lessons',
+    '/lessons',
+    'example.com/lessons',
+    'https://',
+    'https://user:pass@example.com/lessons',
+  ])('422 when detail_url is not an absolute HTTPS URL: %s', async (detail_url) => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'X', detail_url }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
+  });
+
+  test('422 when detail_url exceeds 2048 characters', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'X',
+        detail_url: `https://example.com/${'a'.repeat(2030)}`,
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
   });
 
   test('422 when requires_approval is not 0/1', async () => {
@@ -1053,6 +1089,7 @@ describe('POST /api/events/admin/events', () => {
           line_account_id: 'la1',
           name: 'Original',
           is_published: 1,
+          detail_url: 'https://example.com/original-lessons',
           booking_form_fields: JSON.stringify([
             { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
           ]),
@@ -1084,6 +1121,7 @@ describe('POST /api/events/admin/events', () => {
     expect(body.id).not.toBe('e1');
     expect(body.name).toBe('Original のコピー');
     expect(body.is_published).toBe(0);
+    expect(body.detail_url).toBe('https://example.com/original-lessons');
     expect(state.events).toHaveLength(2);
     expect(state.bookings).toHaveLength(1);
     const copiedSlot = state.slots.find((slot) => slot.event_id === body.id);
@@ -1288,6 +1326,40 @@ describe('PUT /api/events/admin/events/:id', () => {
     expect(res.status).toBe(200);
     expect(state.events[0].name).toBe('new');
     expect(state.events[0].requires_approval).toBe(1);
+  });
+
+  test('updates and clears detail_url', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', detail_url: null })],
+    };
+    const app = setupApp(state);
+    const update = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: '  https://example.com/lesson  ' }),
+    });
+    expect(update.status).toBe(200);
+    expect(state.events[0].detail_url).toBe('https://example.com/lesson');
+
+    const clear = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: null }),
+    });
+    expect(clear.status).toBe(200);
+    expect(state.events[0].detail_url).toBeNull();
+  });
+
+  test('422 when updating detail_url to a non-HTTPS URL', async () => {
+    const state = { events: [baseEvent({ id: 'e1', line_account_id: 'la1' })] };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: 'javascript:alert(1)' }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
   });
 
   test('enables waitlisting with an existing positive cancellation deadline', async () => {
@@ -1628,6 +1700,24 @@ describe('LIFF event detail', () => {
     const app = setupApp(state);
     const res = await app.request('/api/liff/events/e1?liffId=L1');
     expect(res.status).toBe(200);
+  });
+
+  test('GET exposes the lesson detail URL for the booking screen', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        detail_url: 'https://example.com/lesson',
+      })],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1?liffId=L1');
+    expect(res.status).toBe(200);
+    expect((await res.json()) as EventRow).toMatchObject({
+      detail_url: 'https://example.com/lesson',
+    });
   });
 
   test('GET 404 when not published', async () => {
@@ -3062,6 +3152,7 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     venue_url: null,
     image_url: null,
     description: null,
+    detail_url: null,
     description_centered: 0,
     max_bookings_per_friend: null,
     requires_approval: 0,

@@ -7,6 +7,7 @@ import { eventsApi, type EventBookingFormField, type EventBookingFormFieldType, 
 import ImageUploader from '@/components/shared/image-uploader'
 import { useAccount } from '@/contexts/account-context'
 import { buildTimeSlotChoices, generateBulkSlots, type BulkSlotInput, type TimePattern } from './bulk-slot-generator'
+import { normalizeEventDetailUrl, validateEventDetailUrl } from './event-detail-url'
 import { formatEventSlotDateTime, formatEventSlotTime } from './event-date-format'
 
 type Tab = 'overview' | 'slots' | 'publish'
@@ -22,6 +23,7 @@ const DEFAULT_DRAFT: EventDetail = {
   name: '',
   venue_name: null,
   venue_url: null,
+  detail_url: null,
   image_url: null,
   description: null,
   description_centered: 0,
@@ -224,6 +226,8 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
       if (draft.description && draft.description.length > 20000) {
         throw new Error('詳細は20000字以内で入力してください')
       }
+      const detailUrlError = validateEventDetailUrl(draft.detail_url)
+      if (detailUrlError) throw new Error(detailUrlError)
       if (
         draft.waitlist_enabled === 1 &&
         (draft.cancel_deadline_hours_before == null || draft.cancel_deadline_hours_before <= 0)
@@ -249,6 +253,7 @@ export default function EventForm({ accountId, eventId }: EventFormProps) {
         name: draft.name,
         venue_name: draft.venue_name,
         venue_url: draft.venue_url,
+        detail_url: normalizeEventDetailUrl(draft.detail_url),
         image_url: draft.image_url,
         description: draft.description,
         description_centered: draft.description_centered,
@@ -556,6 +561,7 @@ function OverviewTab({
   currentAccountId: string
 }) {
   const descLen = (draft.description ?? '').length
+  const detailUrlError = validateEventDetailUrl(draft.detail_url)
   const targetType = draft.target_type ?? 'single'
   const accountIds: string[] = Array.isArray(draft.account_ids)
     ? draft.account_ids
@@ -599,6 +605,30 @@ function OverviewTab({
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1.5">
+          レッスン詳細ページ URL
+        </label>
+        <input
+          type="url"
+          value={draft.detail_url ?? ''}
+          onChange={(e) => update('detail_url', e.target.value || null)}
+          placeholder="https://..."
+          aria-invalid={detailUrlError ? true : undefined}
+          aria-describedby="event-detail-url-help"
+          className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 ${
+            detailUrlError
+              ? 'border-red-400 focus:ring-red-500'
+              : 'border-gray-300 focus:ring-blue-500'
+          }`}
+        />
+        <p
+          id="event-detail-url-help"
+          className={`mt-1.5 text-xs ${detailUrlError ? 'text-red-600' : 'text-gray-500'}`}
+        >
+          {detailUrlError ?? '予約画面に「レッスン内容を詳しく見る」ボタンを表示します。外部ブラウザで開きます。'}
+        </p>
       </div>
       <div>
         <ImageUploader

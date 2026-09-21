@@ -46,6 +46,7 @@ export interface EventRow {
   venue_url: string | null;
   image_url: string | null;
   description: string | null;
+  detail_url: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
@@ -116,6 +117,7 @@ export interface EventBookingReminderRow {
 
 export const EVENT_NAME_MAX = 255;
 export const EVENT_DESCRIPTION_MAX = 20000;
+export const EVENT_DETAIL_URL_MAX = 2048;
 export const CUSTOMER_NOTE_MAX = 5000;
 export const EVENT_FORM_FIELDS_MAX = 20;
 export const EVENT_FORM_LABEL_MAX = 80;

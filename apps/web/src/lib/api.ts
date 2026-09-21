@@ -1646,6 +1646,7 @@ export interface EventListItem {
   name: string;
   venue_name: string | null;
   venue_url: string | null;
+  detail_url: string | null;
   image_url: string | null;
   description: string | null;
   description_centered: number;
@@ -1676,6 +1677,7 @@ export interface EventDetail {
   name: string;
   venue_name: string | null;
   venue_url: string | null;
+  detail_url: string | null;
   image_url: string | null;
   description: string | null;
   description_centered: number;

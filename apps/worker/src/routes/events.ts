@@ -14,6 +14,7 @@ import type { Env } from '../index.js';
 import {
   EVENT_NAME_MAX,
   EVENT_DESCRIPTION_MAX,
+  EVENT_DETAIL_URL_MAX,
   CUSTOMER_NOTE_MAX,
   EVENT_FORM_ANSWER_MAX,
   EVENT_FORM_ANSWERS_JSON_MAX,
@@ -88,6 +89,7 @@ interface EventInput {
   venue_url?: string | null;
   image_url?: string | null;
   description?: string | null;
+  detail_url?: string | null;
   description_centered?: number;
   max_bookings_per_friend?: number | null;
   requires_approval?: number;
@@ -113,6 +115,23 @@ function cleanString(value: unknown, max: number): string | null {
   const s = value.trim();
   if (s.length === 0 || s.length > max) return null;
   return s;
+}
+
+function isValidHttpsUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > EVENT_DETAIL_URL_MAX) return false;
+  try {
+    const parsed = new URL(normalized);
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.length > 0 &&
+      parsed.username.length === 0 &&
+      parsed.password.length === 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function normalizeBookingFormFields(
@@ -326,6 +345,9 @@ function validateEventInput(
       return { ok: false, code: 'invalid_description' };
     }
   }
+  if (has('detail_url') && body.detail_url != null && !isValidHttpsUrl(body.detail_url)) {
+    return { ok: false, code: 'invalid_detail_url' };
+  }
   for (const key of ['cancel_deadline_hours_before', 'reminder_hours_before', 'max_bookings_per_friend'] as const) {
     if (has(key) && body[key] != null) {
       const v = body[key];
@@ -415,8 +437,8 @@ events.post('/api/events/admin/events', async (c) => {
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
          target_type, account_ids, dedup_priority, booking_form_fields,
-         confirmation_message_extra
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         confirmation_message_extra, detail_url
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -440,6 +462,7 @@ events.post('/api/events/admin/events', async (c) => {
       dedupPriority ? JSON.stringify(dedupPriority) : null,
       JSON.stringify(formFields.fields),
       (body.confirmation_message_extra as string | null | undefined) ?? null,
+      typeof body.detail_url === 'string' ? body.detail_url.trim() : null,
     )
     .run();
   const row = await c.env.DB
@@ -574,9 +597,9 @@ events.post('/api/events/admin/events/:id/duplicate', async (c) => {
          reminder_day_before_enabled, reminder_hours_before,
          is_published, sort_order,
          target_type, account_ids, dedup_priority, booking_form_fields,
-         confirmation_message_extra, reminder_message_extra,
+         confirmation_message_extra, detail_url, reminder_message_extra,
          og_title, og_description, og_image_url
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       newId,
@@ -600,6 +623,7 @@ events.post('/api/events/admin/events/:id/duplicate', async (c) => {
       source.dedup_priority ?? null,
       source.booking_form_fields ?? '[]',
       source.confirmation_message_extra ?? null,
+      source.detail_url ?? null,
       source.reminder_message_extra ?? null,
       source.og_title ?? null,
       source.og_description ?? null,
@@ -685,6 +709,7 @@ events.put('/api/events/admin/events/:id', async (c) => {
     'venue_url',
     'image_url',
     'description',
+    'detail_url',
     'description_centered',
     'max_bookings_per_friend',
     'requires_approval',
@@ -702,7 +727,7 @@ events.put('/api/events/admin/events/:id', async (c) => {
   for (const k of updatable) {
     if (Object.prototype.hasOwnProperty.call(body, k)) {
       setClauses.push(`${k} = ?`);
-      setValues.push(body[k]);
+      setValues.push(k === 'detail_url' && typeof body[k] === 'string' ? body[k].trim() : body[k]);
     }
   }
   // JSON-encoded columns (broadcasts と同じ扱い): account_ids / dedup_priority

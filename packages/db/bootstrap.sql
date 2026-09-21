@@ -292,7 +292,7 @@ CREATE TABLE event_booking_idempotency_keys (
   expires_at       TEXT NOT NULL
 );
 
-CREATE TABLE event_booking_reminders (
+CREATE TABLE "event_booking_reminders" (
   id            TEXT PRIMARY KEY,
   booking_id    TEXT NOT NULL,
   kind          TEXT NOT NULL CHECK (kind IN ('day_before','hours_before')),
@@ -301,25 +301,28 @@ CREATE TABLE event_booking_reminders (
   status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','failed_permanent','cancelled')),
   retry_count   INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT,
-  FOREIGN KEY (booking_id) REFERENCES event_bookings(id)
+  FOREIGN KEY (booking_id) REFERENCES "event_bookings"(id)
 );
 
-CREATE TABLE event_bookings (
+CREATE TABLE "event_bookings" (
   id                    TEXT PRIMARY KEY,
   line_account_id       TEXT NOT NULL,
   event_id              TEXT NOT NULL,
   slot_id               TEXT NOT NULL,
   friend_id             TEXT NOT NULL,
-  status                TEXT NOT NULL CHECK (status IN ('requested','confirmed','rejected','cancelled','expired','no_show','attended')),
+  status                TEXT NOT NULL CHECK (status IN ('requested','waitlisted','confirmed','rejected','cancelled','expired','no_show','attended')),
   customer_note         TEXT,
   internal_note         TEXT,
   requested_at          TEXT NOT NULL,
+  promoted_at           TEXT,
   decided_at            TEXT,
   decided_by_staff_id   TEXT,
   cancelled_at          TEXT,
   cancelled_by          TEXT CHECK (cancelled_by IN ('friend','admin','system')),
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')), identity_key TEXT, form_answers TEXT NOT NULL DEFAULT '{}',
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  identity_key          TEXT,
+  form_answers          TEXT NOT NULL DEFAULT '{}',
   FOREIGN KEY (line_account_id) REFERENCES line_accounts(id),
   FOREIGN KEY (event_id) REFERENCES events(id),
   FOREIGN KEY (slot_id) REFERENCES event_slots(id),
@@ -363,7 +366,8 @@ CREATE TABLE events (
   CHECK (target_type IN ('single', 'multi-account-dedup')), account_ids TEXT
   CHECK (account_ids IS NULL OR json_valid(account_ids)), dedup_priority TEXT
   CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)), failed_account_ids TEXT
-  CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)), confirmation_message_extra TEXT, reminder_message_extra TEXT, og_title TEXT, og_description TEXT, og_image_url TEXT, booking_form_fields TEXT NOT NULL DEFAULT '[]',
+  CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)), confirmation_message_extra TEXT, reminder_message_extra TEXT, og_title TEXT, og_description TEXT, og_image_url TEXT, booking_form_fields TEXT NOT NULL DEFAULT '[]', waitlist_enabled INTEGER NOT NULL DEFAULT 0
+  CHECK (waitlist_enabled IN (0, 1)), detail_url TEXT,
   FOREIGN KEY (line_account_id) REFERENCES line_accounts(id)
 );
 
@@ -913,16 +917,23 @@ CREATE INDEX idx_event_booking_decision_notifications_due
 
 CREATE INDEX idx_event_booking_idempotency_expires ON event_booking_idempotency_keys (expires_at);
 
-CREATE INDEX idx_event_booking_reminders_status_scheduled ON event_booking_reminders (status, scheduled_at);
+CREATE INDEX idx_event_booking_reminders_status_scheduled
+  ON event_booking_reminders (status, scheduled_at);
 
-CREATE INDEX idx_event_bookings_account_status_event ON event_bookings (line_account_id, status, event_id);
+CREATE INDEX idx_event_bookings_account_status_event
+  ON event_bookings (line_account_id, status, event_id);
 
-CREATE INDEX idx_event_bookings_friend_requested ON event_bookings (friend_id, requested_at DESC);
+CREATE INDEX idx_event_bookings_friend_requested
+  ON event_bookings (friend_id, requested_at DESC);
 
 CREATE INDEX idx_event_bookings_identity_status
   ON event_bookings (event_id, identity_key, status);
 
-CREATE INDEX idx_event_bookings_slot_status ON event_bookings (slot_id, status);
+CREATE INDEX idx_event_bookings_slot_status
+  ON event_bookings (slot_id, status);
+
+CREATE INDEX idx_event_bookings_waitlist_fifo
+  ON event_bookings (slot_id, status, requested_at, id);
 
 CREATE INDEX idx_event_slots_event_starts ON event_slots (event_id, starts_at);
 

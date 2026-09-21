@@ -4,6 +4,7 @@
 
 import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { normalizeExternalHttpsUrl, openWithLiffExternal } from './external-browser.js';
 import './styles.css';
 
 let _root: Root | null = null;
@@ -19,6 +20,7 @@ interface EventDetail {
   name: string;
   venue_name: string | null;
   venue_url: string | null;
+  detail_url: string | null;
   image_url: string | null;
   description: string | null;
   description_centered: number;
@@ -287,6 +289,38 @@ function Spinner() {
   );
 }
 
+function LessonDetailLink({ url, className = '' }: { url: string | null; className?: string }) {
+  const safeUrl = normalizeExternalHttpsUrl(url);
+  if (!safeUrl) return null;
+
+  return (
+    <div className={`eb-lesson-detail ${className}`.trim()}>
+      <a
+        href={safeUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="eb-lesson-detail-link"
+        onClick={(event) => {
+          if (openWithLiffExternal(safeUrl)) event.preventDefault();
+        }}
+      >
+        <span className="eb-lesson-detail-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <path d="M4 5.25c2.75-.55 5.08.03 7 1.74v11.02c-1.92-1.7-4.25-2.28-7-1.73V5.25Z" />
+            <path d="M20 5.25c-2.75-.55-5.08.03-7 1.74v11.02c1.92-1.7 4.25-2.28 7-1.73V5.25Z" />
+            <path d="M12 6.99v11.02" />
+          </svg>
+        </span>
+        <span className="eb-lesson-detail-copy">
+          <strong>レッスン内容を詳しく見る</strong>
+          <small>写真や当日の流れを外部ブラウザで確認できます</small>
+        </span>
+        <span className="eb-lesson-detail-arrow" aria-hidden="true">↗</span>
+      </a>
+    </div>
+  );
+}
+
 // ─── Screens ──────────────────────────────────────────────
 
 function EventDetailScreen({
@@ -422,6 +456,7 @@ function EventDetailScreen({
               予約履歴を見る
             </button>
           </div>
+          <LessonDetailLink url={event.detail_url} className="mt-3" />
         </div>
       </div>
     );
@@ -491,6 +526,8 @@ function EventDetailScreen({
             </div>
           </div>
         )}
+
+        <LessonDetailLink url={event.detail_url} className="mt-3" />
 
         {formFields.length > 0 && (
           <div className="mt-5">
