@@ -21,6 +21,7 @@ import {
 } from '@line-crm/db';
 import { buildIntroMessage } from '../services/intro-message.js';
 import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
 
@@ -133,7 +134,7 @@ async function applyRefAttribution(
 
   if (effectiveTagId) {
     try {
-      await addTagToFriend(db, friend.id, effectiveTagId);
+      await attachTagAndFireSideEffects(db, friend.id, effectiveTagId);
     } catch (err) {
       console.error(`[ref-attribution] tag attach failed ref=${ref} tag=${effectiveTagId}:`, err);
     }

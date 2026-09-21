@@ -48,6 +48,18 @@ body {
   backdrop-filter: blur(18px) saturate(1.14);
 }
 
+/*
+ * RootLayout gives <body> the bg-gray-50 utility.  Applying a backdrop filter
+ * to that root element makes it the containing block for every fixed dialog,
+ * so long pages position their modal near the middle of the document instead
+ * of the visible viewport.  Keep the glass effect on cards, but never on the
+ * page root.
+ */
+body.bg-gray-50 {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .bg-gray-100 {
   background-color: rgba(255, 229, 240, 0.68) !important;
 }

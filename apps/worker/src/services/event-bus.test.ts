@@ -6,8 +6,16 @@ interface CapturedInsert {
   binds: unknown[];
 }
 
+const lineSdkMocks = vi.hoisted(() => ({
+  tokens: [] as string[],
+  replyMessage: vi.fn().mockResolvedValue(undefined),
+  pushMessage: vi.fn().mockResolvedValue(undefined),
+  linkRichMenuToUser: vi.fn().mockResolvedValue(undefined),
+}));
+
 function fakeDb(opts: {
-  friend?: { line_user_id: string };
+  friend?: { line_user_id: string; line_account_id?: string | null };
+  account?: { channel_access_token: string };
   capturedInserts: CapturedInsert[];
 }): D1Database {
   return {
@@ -25,6 +33,9 @@ function fakeDb(opts: {
         async first<T>(): Promise<T | null> {
           if (sql.includes('FROM friends WHERE id')) {
             return (opts.friend ?? null) as T | null;
+          }
+          if (sql.includes('FROM line_accounts WHERE id')) {
+            return (opts.account ?? null) as T | null;
           }
           return null;
         },
@@ -57,10 +68,14 @@ vi.mock('@line-crm/db', async () => {
 
 vi.mock('@line-crm/line-sdk', () => {
   return {
-    LineClient: vi.fn().mockImplementation(() => ({
-      replyMessage: vi.fn().mockResolvedValue(undefined),
-      pushMessage: vi.fn().mockResolvedValue(undefined),
-    })),
+    LineClient: vi.fn().mockImplementation((token: string) => {
+      lineSdkMocks.tokens.push(token);
+      return {
+        replyMessage: lineSdkMocks.replyMessage,
+        pushMessage: lineSdkMocks.pushMessage,
+        linkRichMenuToUser: lineSdkMocks.linkRichMenuToUser,
+      };
+    }),
   };
 });
 
@@ -223,5 +238,146 @@ describe('fireEvent — send_message action logging', () => {
     // log には template から取得した messageType / content が記録される
     expect(captured[0].binds[2]).toBe('flex');
     expect(String(captured[0].binds[3])).toContain('from-template');
+  });
+});
+
+describe('fireEvent — tag_change rich-menu automation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    lineSdkMocks.tokens.length = 0;
+  });
+
+  it('resolves the friend account/token and runs only the matching account rule on add', async () => {
+    const db = await import('@line-crm/db');
+    (db.getActiveAutomationsByEvent as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue([
+      {
+        id: 'auto-target',
+        line_account_id: 'acc-1',
+        conditions: JSON.stringify({ tag_id: 'tag-1', action: 'add' }),
+        actions: JSON.stringify([
+          { type: 'switch_rich_menu', params: { richMenuId: 'richmenu-target' } },
+        ]),
+      },
+      {
+        id: 'auto-other-account',
+        line_account_id: 'acc-2',
+        conditions: JSON.stringify({ tag_id: 'tag-1', action: 'add' }),
+        actions: JSON.stringify([
+          { type: 'switch_rich_menu', params: { richMenuId: 'richmenu-other' } },
+        ]),
+      },
+    ]);
+
+    const dbFake = fakeDb({
+      friend: { line_user_id: 'U_test', line_account_id: 'acc-1' },
+      account: { channel_access_token: 'resolved-token' },
+      capturedInserts: [],
+    });
+
+    await fireEvent(dbFake, 'tag_change', {
+      friendId: 'friend-1',
+      eventData: { tagId: 'tag-1', action: 'add' },
+    });
+
+    expect(lineSdkMocks.tokens).toEqual(['resolved-token']);
+    expect(lineSdkMocks.linkRichMenuToUser).toHaveBeenCalledTimes(1);
+    expect(lineSdkMocks.linkRichMenuToUser).toHaveBeenCalledWith('U_test', 'richmenu-target');
+    expect(db.createAutomationLog).toHaveBeenCalledTimes(1);
+    expect(db.createAutomationLog).toHaveBeenCalledWith(
+      dbFake,
+      expect.objectContaining({ automationId: 'auto-target', status: 'success' }),
+    );
+  });
+
+  it('does not run an add-only rule when the tag is removed', async () => {
+    const db = await import('@line-crm/db');
+    (db.getActiveAutomationsByEvent as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue([
+      {
+        id: 'auto-add-only',
+        line_account_id: 'acc-1',
+        conditions: JSON.stringify({ tag_id: 'tag-1', action: 'add' }),
+        actions: JSON.stringify([
+          { type: 'switch_rich_menu', params: { richMenuId: 'richmenu-target' } },
+        ]),
+      },
+    ]);
+    const dbFake = fakeDb({
+      friend: { line_user_id: 'U_test', line_account_id: 'acc-1' },
+      account: { channel_access_token: 'resolved-token' },
+      capturedInserts: [],
+    });
+
+    await fireEvent(dbFake, 'tag_change', {
+      friendId: 'friend-1',
+      eventData: { tagId: 'tag-1', action: 'remove' },
+    });
+
+    expect(lineSdkMocks.linkRichMenuToUser).not.toHaveBeenCalled();
+    expect(db.createAutomationLog).not.toHaveBeenCalled();
+  });
+
+  it('records a failed action when richMenuId is missing', async () => {
+    const db = await import('@line-crm/db');
+    (db.getActiveAutomationsByEvent as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue([
+      {
+        id: 'auto-missing-menu',
+        line_account_id: 'acc-1',
+        conditions: JSON.stringify({ tag_id: 'tag-1', action: 'add' }),
+        actions: JSON.stringify([{ type: 'switch_rich_menu', params: {} }]),
+      },
+    ]);
+    const dbFake = fakeDb({
+      friend: { line_user_id: 'U_test', line_account_id: 'acc-1' },
+      account: { channel_access_token: 'resolved-token' },
+      capturedInserts: [],
+    });
+
+    await fireEvent(dbFake, 'tag_change', {
+      friendId: 'friend-1',
+      eventData: { tagId: 'tag-1', action: 'add' },
+    });
+
+    expect(lineSdkMocks.linkRichMenuToUser).not.toHaveBeenCalled();
+    expect(db.createAutomationLog).toHaveBeenCalledWith(
+      dbFake,
+      expect.objectContaining({
+        automationId: 'auto-missing-menu',
+        status: 'failed',
+        actionsResult: expect.stringContaining('richMenuId is required'),
+      }),
+    );
+  });
+
+  it('records a failed action when no LINE access token can be resolved', async () => {
+    const db = await import('@line-crm/db');
+    (db.getActiveAutomationsByEvent as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue([
+      {
+        id: 'auto-missing-token',
+        line_account_id: null,
+        conditions: JSON.stringify({ tag_id: 'tag-1', action: 'add' }),
+        actions: JSON.stringify([
+          { type: 'switch_rich_menu', params: { richMenuId: 'richmenu-target' } },
+        ]),
+      },
+    ]);
+    const dbFake = fakeDb({
+      friend: { line_user_id: 'U_test', line_account_id: null },
+      capturedInserts: [],
+    });
+
+    await fireEvent(dbFake, 'tag_change', {
+      friendId: 'friend-1',
+      eventData: { tagId: 'tag-1', action: 'add' },
+    });
+
+    expect(lineSdkMocks.linkRichMenuToUser).not.toHaveBeenCalled();
+    expect(db.createAutomationLog).toHaveBeenCalledWith(
+      dbFake,
+      expect.objectContaining({
+        automationId: 'auto-missing-token',
+        status: 'failed',
+        actionsResult: expect.stringContaining('lineAccessToken is required'),
+      }),
+    );
   });
 });
