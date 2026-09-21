@@ -59,8 +59,8 @@ function reauthenticateLiff(): void {
     window.location.reload();
     return;
   }
-  // In an external browser, clear the expired session first. The next load's
-  // withLoginOnExternalBrowser option performs the supported LINE login flow.
+  // In an external browser, clear the expired session first. The next load
+  // reaches the supported liff.login() flow with the complete current URL.
   liff.logout();
   window.location.reload();
 }
@@ -494,7 +494,7 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
 
 async function main() {
   try {
-    await liff.init({ liffId: LIFF_ID, withLoginOnExternalBrowser: true });
+    await liff.init({ liffId: LIFF_ID });
 
     if (!liff.isLoggedIn()) {
       liff.login({ redirectUri: window.location.href });
