@@ -59,6 +59,9 @@ import {
   isBeforeEventWaitlistCutoff,
   promoteEventWaitlist,
 } from '../services/event-booking-waitlist.js';
+import {
+  shouldSuppressTemporaryUatBookingNotifications,
+} from '../services/temporary-uat-notification-suppression.js';
 
 const events = new Hono<Env>();
 
@@ -1408,6 +1411,7 @@ interface EventBookingNotificationRow {
   reminder_hours_before: number | null;
   cancel_deadline_hours_before: number | null;
   confirmation_message_extra: string | null;
+  form_answers?: string | null;
 }
 
 async function sendGroupedBookingNotifications(
@@ -1516,6 +1520,7 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              b.form_answers,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
               e.cancel_deadline_hours_before,
@@ -1560,14 +1565,17 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
       }
     }
 
+    const notifiableRows = rows.filter(
+      (row) => !shouldSuppressTemporaryUatBookingNotifications(row.event_id, row.form_answers),
+    );
     const notificationGroups: Array<{
       rows: EventBookingNotificationRow[];
       kind: EventNotificationKind;
       adminStatus?: 'requested' | 'confirmed';
     }> = [
-      { rows: rows.filter((row) => row.status === 'requested'), kind: 'received_pending', adminStatus: 'requested' },
-      { rows: rows.filter((row) => row.status === 'waitlisted'), kind: 'waitlisted' },
-      { rows: rows.filter((row) => row.status === 'confirmed'), kind: 'received_confirmed', adminStatus: 'confirmed' },
+      { rows: notifiableRows.filter((row) => row.status === 'requested'), kind: 'received_pending', adminStatus: 'requested' },
+      { rows: notifiableRows.filter((row) => row.status === 'waitlisted'), kind: 'waitlisted' },
+      { rows: notifiableRows.filter((row) => row.status === 'confirmed'), kind: 'received_confirmed', adminStatus: 'confirmed' },
     ];
     for (const group of notificationGroups) {
       if (group.rows.length === 0) continue;
@@ -1707,6 +1715,10 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
   if (!formAnswers.ok) {
     return finalize(422, { error: formAnswers.code });
   }
+  const suppressTemporaryUatNotifications = shouldSuppressTemporaryUatBookingNotifications(
+    event.id,
+    formAnswers.answers,
+  );
 
   const slot = await c.env.DB
     .prepare(
@@ -1947,7 +1959,11 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     .prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`)
     .bind(account_id)
     .first<{ channel_access_token: string }>();
-  if (acc?.channel_access_token && body.suppress_notification !== true) {
+  if (
+    acc?.channel_access_token &&
+    body.suppress_notification !== true &&
+    !suppressTemporaryUatNotifications
+  ) {
     try {
       const kind: EventNotificationKind = status === 'requested'
         ? 'received_pending'
