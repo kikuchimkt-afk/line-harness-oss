@@ -2,6 +2,10 @@ import { Hono } from 'hono';
 import { LineClient } from '@line-crm/line-sdk';
 import { getFriendById, getLineAccountById } from '@line-crm/db';
 import type { Env } from '../index.js';
+import {
+  applyDesiredRichMenu,
+  clearDesiredRichMenuAssignment,
+} from '../services/rich-menu-assignment.js';
 
 const richMenus = new Hono<Env>();
 
@@ -92,8 +96,13 @@ richMenus.post('/api/friends/:friendId/rich-menu', async (c) => {
       const account = await getLineAccountById(db, friendAccountId);
       if (account) accessToken = account.channel_access_token;
     }
-    const lineClient = new LineClient(accessToken);
-    await lineClient.linkRichMenuToUser(friend.line_user_id, body.richMenuId);
+    await applyDesiredRichMenu(db, {
+      friendId,
+      richMenuId: body.richMenuId,
+      lineAccessToken: accessToken,
+      lineAccountId: friendAccountId,
+      source: 'manual',
+    });
 
     return c.json({ success: true, data: null });
   } catch (err) {
@@ -120,6 +129,9 @@ richMenus.delete('/api/friends/:friendId/rich-menu', async (c) => {
       const account = await getLineAccountById(c.env.DB, friendAccId);
       if (account) accessToken = account.channel_access_token;
     }
+    // Remove the desired state before calling LINE so the reconciliation job
+    // cannot re-link a menu that an operator explicitly removed.
+    await clearDesiredRichMenuAssignment(db, friendId);
     const lineClient = new LineClient(accessToken);
     await lineClient.unlinkRichMenuFromUser(friend.line_user_id);
 

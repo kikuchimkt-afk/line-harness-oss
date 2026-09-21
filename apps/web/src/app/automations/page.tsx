@@ -5,6 +5,7 @@ import { api } from '@/lib/api'
 import { useAccount } from '@/contexts/account-context'
 import Header from '@/components/layout/header'
 import CcPromptButton from '@/components/cc-prompt-button'
+import type { RichMenuAssignmentItem, RichMenuAssignmentOverview } from '@line-crm/shared'
 
 type AutomationEventType = "friend_add" | "tag_change" | "score_threshold" | "cv_fire" | "message_received" | "calendar_booked"
 
@@ -99,6 +100,27 @@ export default function AutomationsPage() {
   const [form, setForm] = useState<CreateFormState>({ ...initialForm })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+  const [assignmentOverview, setAssignmentOverview] = useState<RichMenuAssignmentOverview | null>(null)
+  const [assignmentLoading, setAssignmentLoading] = useState(false)
+  const [assignmentNotice, setAssignmentNotice] = useState('')
+  const [retryingKey, setRetryingKey] = useState<string | null>(null)
+
+  const loadAssignments = useCallback(async () => {
+    if (!selectedAccountId) {
+      setAssignmentOverview(null)
+      return
+    }
+    setAssignmentLoading(true)
+    try {
+      const res = await api.automations.richMenuAssignments(selectedAccountId)
+      if (res.success) setAssignmentOverview(res.data)
+      else setAssignmentNotice('自動切替の処理状況を読み込めませんでした。')
+    } catch {
+      setAssignmentNotice('自動切替の処理状況を読み込めませんでした。')
+    } finally {
+      setAssignmentLoading(false)
+    }
+  }, [selectedAccountId])
 
   const loadAutomations = useCallback(async () => {
     setLoading(true)
@@ -149,6 +171,45 @@ export default function AutomationsPage() {
       cancelled = true
     }
   }, [selectedAccountId, accountLoading])
+
+  useEffect(() => {
+    if (accountLoading) return
+    setAssignmentNotice('')
+    loadAssignments()
+  }, [accountLoading, loadAssignments])
+
+  const handleRetryAssignment = async (item: RichMenuAssignmentItem) => {
+    if (!confirm('この対象者のリッチメニュー設定だけを再実行します。メッセージ配信は行いません。よろしいですか？')) return
+    setRetryingKey(item.assignmentKey)
+    setAssignmentNotice('')
+    try {
+      const res = await api.automations.retryRichMenuAssignment(item.assignmentKey)
+      setAssignmentNotice(res.success ? '再試行を予約しました。通常は5分以内に処理されます。' : res.error)
+      await loadAssignments()
+    } catch {
+      setAssignmentNotice('再試行の予約に失敗しました。')
+    } finally {
+      setRetryingKey(null)
+    }
+  }
+
+  const handleRetryAllFailed = async () => {
+    if (!selectedAccountId) return
+    if (!confirm('「要確認」のリッチメニュー設定をまとめて再試行します。メッセージ配信は行いません。よろしいですか？')) return
+    setRetryingKey('all')
+    setAssignmentNotice('')
+    try {
+      const res = await api.automations.retryFailedRichMenuAssignments(selectedAccountId)
+      setAssignmentNotice(
+        res.success ? `${res.data.queued}件を再試行待ちに戻しました。` : res.error,
+      )
+      await loadAssignments()
+    } catch {
+      setAssignmentNotice('一括再試行の予約に失敗しました。')
+    } finally {
+      setRetryingKey(null)
+    }
+  }
 
   const handleCreate = async () => {
     if (!selectedAccountId) {
@@ -329,6 +390,102 @@ export default function AutomationsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Durable rich-menu assignment status */}
+      {selectedAccountId && (
+        <section className="mb-6 rounded-xl border border-emerald-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-gray-900">リッチメニュー自動切替の処理状況</h2>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                流入タグで指定された最新のメニューを1人ずつ保持し、一時的なLINE障害は最大5回まで自動再試行します。
+                適用後も約5日で一巡する定期照合を行います。
+              </p>
+            </div>
+            {(assignmentOverview?.summary.needsAttention ?? 0) > 0 && (
+              <button
+                onClick={handleRetryAllFailed}
+                disabled={retryingKey === 'all'}
+                className="min-h-[44px] rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+              >
+                {retryingKey === 'all' ? '予約中…' : '要確認をまとめて再試行'}
+              </button>
+            )}
+          </div>
+
+          {assignmentNotice && (
+            <div className="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-700">{assignmentNotice}</div>
+          )}
+
+          {assignmentLoading && !assignmentOverview ? (
+            <div className="mt-4 h-20 animate-pulse rounded-lg bg-gray-100" />
+          ) : assignmentOverview ? (
+            <>
+              <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  ['適用済み', assignmentOverview.summary.applied, 'text-emerald-700 bg-emerald-50'],
+                  ['再試行待ち', assignmentOverview.summary.waiting, 'text-blue-700 bg-blue-50'],
+                  ['要確認', assignmentOverview.summary.needsAttention, 'text-amber-800 bg-amber-50'],
+                  ['管理対象', assignmentOverview.summary.total, 'text-gray-700 bg-gray-50'],
+                ].map(([label, value, color]) => (
+                  <div key={String(label)} className={`rounded-lg p-3 ${String(color)}`}>
+                    <div className="text-xs font-medium">{label}</div>
+                    <div className="mt-1 text-xl font-semibold">{value}</div>
+                  </div>
+                ))}
+              </div>
+
+              {assignmentOverview.items.some((item) => item.status !== 'applied') && (
+                <div className="mt-4 overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="min-w-full divide-y divide-gray-200 text-left text-xs">
+                    <thead className="bg-gray-50 text-gray-500">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">ルール</th>
+                        <th className="px-3 py-2 font-medium">状態</th>
+                        <th className="px-3 py-2 font-medium">試行</th>
+                        <th className="px-3 py-2 font-medium">最終処理</th>
+                        <th className="px-3 py-2 font-medium" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {assignmentOverview.items
+                        .filter((item) => item.status !== 'applied')
+                        .slice(0, 20)
+                        .map((item) => (
+                          <tr key={item.assignmentKey}>
+                            <td className="max-w-[220px] px-3 py-3 text-gray-800">
+                              {item.automationName || (item.source === 'manual' ? '手動設定' : '自動切替')}
+                            </td>
+                            <td className="px-3 py-3 text-gray-600">{item.reasonLabel}</td>
+                            <td className="whitespace-nowrap px-3 py-3 text-gray-500">
+                              {item.retryCount}/{item.maxRetries}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-gray-500">
+                              {item.lastAttemptAt
+                                ? new Date(item.lastAttemptAt).toLocaleString('ja-JP', { dateStyle: 'short', timeStyle: 'short' })
+                                : '未実行'}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              {item.canRetry && (
+                                <button
+                                  onClick={() => handleRetryAssignment(item)}
+                                  disabled={retryingKey === item.assignmentKey}
+                                  className="min-h-[40px] whitespace-nowrap rounded-md bg-amber-50 px-3 py-1 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                >
+                                  {retryingKey === item.assignmentKey ? '予約中…' : '再実行'}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          ) : null}
+        </section>
       )}
 
       {/* Loading skeleton */}

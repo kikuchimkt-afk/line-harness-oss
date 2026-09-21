@@ -642,6 +642,27 @@ CREATE TABLE rich_menu_areas (
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE rich_menu_assignments (
+  friend_id            TEXT PRIMARY KEY REFERENCES friends (id) ON DELETE CASCADE,
+  line_account_id      TEXT REFERENCES line_accounts (id) ON DELETE SET NULL,
+  automation_id        TEXT REFERENCES automations (id) ON DELETE SET NULL,
+  desired_rich_menu_id TEXT NOT NULL,
+  source               TEXT NOT NULL DEFAULT 'automation'
+                       CHECK (source IN ('automation', 'manual', 'backfill')),
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'retry_wait', 'processing', 'applied', 'failed_permanent')),
+  retry_count          INTEGER NOT NULL DEFAULT 0,
+  max_retries          INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at      TEXT,
+  last_attempt_at      TEXT,
+  applied_at           TEXT,
+  verified_at          TEXT,
+  last_error           TEXT,
+  generation           INTEGER NOT NULL DEFAULT 1,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
 CREATE TABLE rich_menu_groups (
   id                 TEXT PRIMARY KEY,
   account_id         TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
@@ -1009,6 +1030,18 @@ CREATE INDEX idx_reminder_steps_reminder ON reminder_steps (reminder_id);
 CREATE INDEX idx_reminders_status_scheduled ON booking_reminders (status, scheduled_at);
 
 CREATE INDEX idx_rich_menu_areas_page     ON rich_menu_areas(page_id);
+
+CREATE INDEX idx_rich_menu_assignments_account_status
+  ON rich_menu_assignments (line_account_id, status);
+
+CREATE INDEX idx_rich_menu_assignments_automation
+  ON rich_menu_assignments (automation_id, status);
+
+CREATE INDEX idx_rich_menu_assignments_due
+  ON rich_menu_assignments (status, next_attempt_at);
+
+CREATE INDEX idx_rich_menu_assignments_verify
+  ON rich_menu_assignments (status, verified_at);
 
 CREATE INDEX idx_rich_menu_groups_account ON rich_menu_groups(account_id, status);
 

@@ -45,4 +45,24 @@ describe('automations API', () => {
       lineAccountId: 'acc-aikotoba',
     });
   });
+
+  test('loads account-scoped rich-menu assignment status', async () => {
+    const { api } = await import('./api');
+    await api.automations.richMenuAssignments('acc aikotoba', 50);
+    const fetchMock = vi.mocked(fetch);
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/automations/rich-menu-assignments?');
+    expect(String(url)).toContain('lineAccountId=acc+aikotoba');
+    expect(String(url)).toContain('limit=50');
+  });
+
+  test('queues bulk retry without replaying the automation', async () => {
+    const { api } = await import('./api');
+    await api.automations.retryFailedRichMenuAssignments('acc-aikotoba');
+    const fetchMock = vi.mocked(fetch);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/automations/rich-menu-assignments/retry-failed');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ lineAccountId: 'acc-aikotoba' });
+  });
 });

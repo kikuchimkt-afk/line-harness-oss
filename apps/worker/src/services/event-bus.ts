@@ -25,6 +25,7 @@ import {
 import { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { sendAdConversions } from './ad-conversion.js';
+import { applyDesiredRichMenu } from './rich-menu-assignment.js';
 
 export interface EventPayload {
   friendId?: string;
@@ -191,7 +192,14 @@ async function processAutomations(
 
       for (const action of actions) {
         try {
-          await executeAction(db, action, payload, lineAccessToken, lineAccountId);
+          await executeAction(
+            db,
+            action,
+            payload,
+            lineAccessToken,
+            lineAccountId,
+            automation.id,
+          );
           results.push({ action: action.type, success: true });
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -269,6 +277,7 @@ async function executeAction(
   payload: EventPayload,
   lineAccessToken?: string,
   lineAccountId?: string | null,
+  automationId?: string | null,
 ): Promise<void> {
   const friendId = payload.friendId;
   if (!friendId && action.type !== 'send_webhook') {
@@ -383,22 +392,18 @@ async function executeAction(
     }
 
     case 'switch_rich_menu': {
-      if (!lineAccessToken) {
-        throw new Error('lineAccessToken is required for switch_rich_menu');
-      }
       const richMenuId = action.params?.richMenuId;
       if (!richMenuId) {
         throw new Error('richMenuId is required for switch_rich_menu');
       }
-      const friend = await db
-        .prepare('SELECT line_user_id FROM friends WHERE id = ?')
-        .bind(friendId)
-        .first<{ line_user_id: string }>();
-      if (!friend?.line_user_id) {
-        throw new Error('LINE user not found for switch_rich_menu');
-      }
-      const lineClient = new LineClient(lineAccessToken);
-      await lineClient.linkRichMenuToUser(friend.line_user_id, richMenuId);
+      await applyDesiredRichMenu(db, {
+        friendId: friendId!,
+        richMenuId,
+        lineAccessToken,
+        lineAccountId,
+        automationId,
+        source: 'automation',
+      });
       break;
     }
 

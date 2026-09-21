@@ -25,6 +25,10 @@ import { sendEventBookingNotification } from './services/event-booking-notifier.
 import { sendBookingNotification } from './services/booking-notifier.js';
 import { DEFAULT_ACCOUNT_SETTINGS } from './services/booking-types.js';
 import { createIndividualNotificationBudget } from './services/individual-notification-budget.js';
+import {
+  processDueRichMenuAssignments,
+  reconcileRichMenuAssignments,
+} from './services/rich-menu-assignment.js';
 import { authMiddleware } from './middleware/auth.js';
 import { rateLimitMiddleware } from './middleware/rate-limit.js';
 import { webhook } from './routes/webhook.js';
@@ -600,6 +604,19 @@ async function runSixHourMaintenance(env: Env['Bindings']): Promise<void> {
   } catch (e) {
     console.error('account-health-cleanup error:', e);
   }
+
+  // Rotate through the durable desired-state table. With 25 checks every six
+  // hours, 500 friends are verified in about five days without a request spike.
+  try {
+    const result = await reconcileRichMenuAssignments(env.DB, { now });
+    if (result.verified + result.requeued + result.unavailable > 0) {
+      console.log(
+        `[rich-menu-reconcile] verified=${result.verified} requeued=${result.requeued} unavailable=${result.unavailable}`,
+      );
+    }
+  } catch (e) {
+    console.error('rich-menu-reconcile error:', e);
+  }
 }
 
 // Scheduled handler for cron triggers — runs for all active LINE accounts
@@ -649,6 +666,20 @@ async function scheduled(
   jobs.push(refreshLineAccessTokens(env.DB));
 
   await Promise.allSettled(jobs);
+
+  // Rich-menu switching is idempotent and has its own durable desired-state
+  // queue. Process it before message deliveries so a temporary LINE failure
+  // cannot strand LP entrants after their source tag has already been saved.
+  try {
+    const result = await processDueRichMenuAssignments(env.DB, { now });
+    if (result.applied + result.deferred + result.failedPermanent > 0) {
+      console.log(
+        `[rich-menu-retry] applied=${result.applied} deferred=${result.deferred} failed_permanent=${result.failedPermanent}`,
+      );
+    }
+  } catch (e) {
+    console.error('rich-menu-retry error:', e);
+  }
 
   // Fetch broadcast insights (runs daily, self-throttled)
   try {

@@ -12,6 +12,7 @@ import type {
   Template,
   Automation,
   AutomationLog,
+  RichMenuAssignmentOverview,
   Chat,
   Reminder,
   ReminderStep,
@@ -751,6 +752,21 @@ export const api = {
     logs: (id: string, limit?: number) =>
       fetchApi<ApiResponse<AutomationLog[]>>(
         `/api/automations/${id}/logs` + (limit ? `?limit=${limit}` : ''),
+      ),
+    richMenuAssignments: (lineAccountId: string, limit = 100) =>
+      fetchApi<ApiResponse<RichMenuAssignmentOverview>>(
+        '/api/automations/rich-menu-assignments?' +
+          new URLSearchParams({ lineAccountId, limit: String(limit) }),
+      ),
+    retryRichMenuAssignment: (assignmentKey: string) =>
+      fetchApi<ApiResponse<{ queued: boolean }>>(
+        `/api/automations/rich-menu-assignments/${encodeURIComponent(assignmentKey)}/retry`,
+        { method: 'POST' },
+      ),
+    retryFailedRichMenuAssignments: (lineAccountId: string) =>
+      fetchApi<ApiResponse<{ queued: number }>>(
+        '/api/automations/rich-menu-assignments/retry-failed',
+        { method: 'POST', body: JSON.stringify({ lineAccountId }) },
       ),
   },
   chats: {

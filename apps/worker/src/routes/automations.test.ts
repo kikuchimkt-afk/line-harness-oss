@@ -10,8 +10,16 @@ const dbMocks = {
   updateAutomation: vi.fn(),
   deleteAutomation: vi.fn(),
   getAutomationLogs: vi.fn(),
+  staffCanAccessLineAccount: vi.fn(),
+  getStaffAccountIds: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
+
+const retryMocks = {
+  retryFailedRichMenuAssignments: vi.fn(),
+  retryRichMenuAssignment: vi.fn(),
+};
+vi.mock('../services/rich-menu-assignment.js', () => retryMocks);
 
 const { automations } = await import('./automations.js');
 
@@ -60,9 +68,13 @@ function makeAutomationDb(rows: AutomationRow[]) {
 }
 
 function setupApp(db: D1Database) {
-  const app = new Hono<{ Bindings: { DB: D1Database } }>();
+  const app = new Hono<{
+    Bindings: { DB: D1Database };
+    Variables: { staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' } };
+  }>();
   app.use('*', async (c, next) => {
     c.env = { DB: db };
+    c.set('staff', { id: 'owner-test', name: 'Owner', role: 'owner' });
     await next();
   });
   app.route('/', automations);
@@ -82,6 +94,8 @@ const rowBase = {
 
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
+  for (const fn of Object.values(retryMocks)) fn.mockReset();
+  dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
 });
 
 describe('GET /api/automations?lineAccountId=X', () => {
@@ -214,5 +228,85 @@ describe('automation account scope mutations', () => {
     });
     const body = (await res.json()) as { data: { lineAccountId: string | null } };
     expect(body.data.lineAccountId).toBe('acc-after');
+  });
+});
+
+describe('rich-menu assignment operations', () => {
+  test('returns sanitized status counts and never exposes raw LINE errors', async () => {
+    const db = {
+      prepare(sql: string) {
+        let bound: unknown[] = [];
+        const stmt = {
+          bind(...args: unknown[]) { bound = args; return stmt; },
+          async all() {
+            if (sql.includes('COUNT(*)')) {
+              return { results: [
+                { status: 'applied', count: 12 },
+                { status: 'retry_wait', count: 2 },
+                { status: 'failed_permanent', count: 1 },
+              ] };
+            }
+            return { results: [{
+              friend_id: 'friend-secret', automation_id: 'auto-1', automation_name: 'LP流入',
+              source: 'automation', status: 'failed_permanent', retry_count: 5,
+              max_retries: 5, next_attempt_at: null, last_attempt_at: '2026-09-22T10:00:00+09:00',
+              applied_at: null, verified_at: null,
+              last_error: 'LINE API error: 401 raw-provider-body', updated_at: '2026-09-22T10:00:00+09:00',
+            }] };
+          },
+          async first() { return null; },
+          async run() { return { success: true, meta: { changes: 1 } }; },
+        };
+        void bound;
+        return stmt;
+      },
+    } as unknown as D1Database;
+
+    const res = await setupApp(db).request(
+      '/api/automations/rich-menu-assignments?lineAccountId=acc-1',
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { summary: { applied: number; waiting: number; needsAttention: number; total: number }; items: Array<Record<string, unknown>> };
+    };
+    expect(body.data.summary).toEqual({ applied: 12, waiting: 2, needsAttention: 1, total: 15 });
+    expect(body.data.items[0]).toMatchObject({
+      assignmentKey: 'friend-secret', reasonLabel: '設定またはLINE接続の確認が必要です', canRetry: true,
+    });
+    expect(JSON.stringify(body)).not.toContain('raw-provider-body');
+    expect(dbMocks.staffCanAccessLineAccount).toHaveBeenCalled();
+  });
+
+  test('queues one failed assignment for manual retry', async () => {
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async first() { return { line_account_id: 'acc-1' }; },
+        };
+      },
+    } as unknown as D1Database;
+    retryMocks.retryRichMenuAssignment.mockResolvedValue(true);
+    const res = await setupApp(db).request(
+      '/api/automations/rich-menu-assignments/friend-1/retry',
+      { method: 'POST' },
+    );
+    expect(res.status).toBe(202);
+    expect(retryMocks.retryRichMenuAssignment).toHaveBeenCalledWith(db, 'friend-1');
+  });
+
+  test('queues up to 500 failed assignments for an accessible account', async () => {
+    const { db } = makeAutomationDb([]);
+    retryMocks.retryFailedRichMenuAssignments.mockResolvedValue(37);
+    const res = await setupApp(db).request(
+      '/api/automations/rich-menu-assignments/retry-failed',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lineAccountId: 'acc-1' }),
+      },
+    );
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ success: true, data: { queued: 37 } });
   });
 });

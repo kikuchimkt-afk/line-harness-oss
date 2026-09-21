@@ -60,7 +60,8 @@
     "052_event_booking_decision_notifications.sql",
     "053_scheduled_chat_messages.sql",
     "054_event_booking_waitlist.sql",
-    "055_event_detail_url.sql"
+    "055_event_detail_url.sql",
+    "056_rich_menu_assignments.sql"
   ],
-  "migrationCount": 61
+  "migrationCount": 62
 }

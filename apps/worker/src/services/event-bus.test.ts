@@ -376,7 +376,7 @@ describe('fireEvent — tag_change rich-menu automation', () => {
       expect.objectContaining({
         automationId: 'auto-missing-token',
         status: 'failed',
-        actionsResult: expect.stringContaining('lineAccessToken is required'),
+        actionsResult: expect.stringContaining('LINE account token is unavailable'),
       }),
     );
   });

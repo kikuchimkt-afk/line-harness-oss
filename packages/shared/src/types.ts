@@ -840,6 +840,40 @@ export interface AutomationLog {
   createdAt: string;
 }
 
+export type RichMenuAssignmentStatus =
+  | 'pending'
+  | 'retry_wait'
+  | 'processing'
+  | 'applied'
+  | 'failed_permanent';
+
+export interface RichMenuAssignmentItem {
+  assignmentKey: string;
+  automationId: string | null;
+  automationName: string | null;
+  source: 'automation' | 'manual' | 'backfill';
+  status: RichMenuAssignmentStatus;
+  retryCount: number;
+  maxRetries: number;
+  nextAttemptAt: string | null;
+  lastAttemptAt: string | null;
+  appliedAt: string | null;
+  verifiedAt: string | null;
+  updatedAt: string;
+  reasonLabel: string;
+  canRetry: boolean;
+}
+
+export interface RichMenuAssignmentOverview {
+  summary: {
+    applied: number;
+    waiting: number;
+    needsAttention: number;
+    total: number;
+  };
+  items: RichMenuAssignmentItem[];
+}
+
 // -----------------------------------------------------------------------------
 // スタッフ (StaffMember)
 // -----------------------------------------------------------------------------
