@@ -2122,6 +2122,7 @@ interface BookingActionRow {
   status: string;
   decided_at: string | null;
   confirmation_message_extra: string | null;
+  form_answers: string | null;
 }
 
 async function loadBookingForAction(
@@ -2138,6 +2139,7 @@ async function loadBookingForAction(
   const row = await db
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              b.form_answers,
               e.confirmation_message_extra
          FROM event_bookings b
          JOIN events e ON e.id = b.event_id
@@ -2308,6 +2310,7 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT b.id, b.line_account_id, b.event_id, b.slot_id, b.friend_id, b.status, b.decided_at,
+              b.form_answers,
               e.name AS event_name, e.venue_name, e.venue_url,
               e.reminder_day_before_enabled, e.reminder_hours_before,
               e.cancel_deadline_hours_before,
@@ -2393,11 +2396,14 @@ events.post('/api/events/admin/events/:id/bookings/bulk-decide', async (c) => {
       await fillEventSlotFromWaitlist(c.env.DB, slotId, nowIso);
     }
   }
-  if (updatedRows.length > 0) {
+  const notifiableUpdatedRows = updatedRows.filter(
+    (row) => !shouldSuppressTemporaryUatBookingNotifications(row.event_id, row.form_answers),
+  );
+  if (notifiableUpdatedRows.length > 0) {
     try {
       await sendGroupedBookingNotifications(
         c.env.DB,
-        updatedRows,
+        notifiableUpdatedRows,
         action === 'confirm' ? 'confirmed' : 'rejected',
         approvalComment,
         normalizedNotification.value,
@@ -2512,13 +2518,15 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/decide', async (c)
     }
   }
 
-  await notifyBookingFriend(
-    c.env.DB,
-    booking.id,
-    action === 'confirm' ? 'confirmed' : 'rejected',
-    approvalComment,
-    normalizedNotification.value,
-  );
+  if (!shouldSuppressTemporaryUatBookingNotifications(booking.event_id, booking.form_answers)) {
+    await notifyBookingFriend(
+      c.env.DB,
+      booking.id,
+      action === 'confirm' ? 'confirmed' : 'rejected',
+      approvalComment,
+      normalizedNotification.value,
+    );
+  }
   if (action === 'reject') {
     await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
   }
@@ -2551,7 +2559,9 @@ events.post('/api/events/admin/events/:id/bookings/:bookingId/cancel', async (c)
     .run();
   if ((upd.meta?.changes ?? 0) === 0) return bad(c, 'invalid_state', 409);
   await cancelPendingRemindersFor(c.env.DB, booking.id);
-  await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
+  if (!shouldSuppressTemporaryUatBookingNotifications(booking.event_id, booking.form_answers)) {
+    await notifyBookingFriend(c.env.DB, booking.id, 'cancelled_by_admin');
+  }
   if (booking.status === 'requested' || booking.status === 'confirmed') {
     await fillEventSlotFromWaitlist(c.env.DB, booking.slot_id, nowIso);
   }

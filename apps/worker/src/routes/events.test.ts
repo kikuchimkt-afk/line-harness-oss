@@ -257,6 +257,7 @@ function makeEventDb(state: {
               status: b.status,
               decided_at: ((b as Record<string, unknown>).decided_at as string | null) ?? null,
               confirmation_message_extra: e?.confirmation_message_extra ?? null,
+              form_answers: b.form_answers ?? null,
             } as T;
           }
           // SELECT * FROM event_bookings WHERE id = ?
@@ -2981,6 +2982,50 @@ describe('admin bookings management', () => {
     );
   });
 
+  test('temporary UAT bulk confirmation updates bookings without sending a decision notice', async () => {
+    const eventId = '0ee01c75-3647-40a3-b40b-0d66edf2359f';
+    const state = {
+      events: [baseEvent({ id: eventId, line_account_id: 'la1' })],
+      slots: [
+        { id: 's1', event_id: eventId, starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null },
+      ],
+      bookings: [
+        {
+          id: 'b1',
+          event_id: eventId,
+          slot_id: 's1',
+          friend_id: 'f1',
+          line_account_id: 'la1',
+          status: 'requested',
+          form_answers: JSON.stringify({ message: TEMPORARY_UAT_NOTIFICATION_RUN_ID }),
+        } as BookingRow & Record<string, unknown>,
+        {
+          id: 'b2',
+          event_id: eventId,
+          slot_id: 's1',
+          friend_id: 'f1',
+          line_account_id: 'la1',
+          status: 'requested',
+          form_answers: JSON.stringify({ student_name: TEMPORARY_UAT_NOTIFICATION_RUN_ID }),
+        } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+
+    const res = await app.request(`/api/events/admin/events/${eventId}/bookings/bulk-decide?account_id=la1`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', booking_ids: ['b1', 'b2'], comment: '' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings.map((booking) => booking.status)).toEqual(['confirmed', 'confirmed']);
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(decisionNotificationMocks.enqueueEventBookingDecisionNotification).not.toHaveBeenCalled();
+  });
+
   test('POST decide confirm transitions to confirmed and creates reminders', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', reminder_day_before_enabled: 1, reminder_hours_before: 2 })],
@@ -3013,6 +3058,37 @@ describe('admin bookings management', () => {
         }),
       }),
     );
+  });
+
+  test('temporary UAT single confirmation updates the booking without sending a decision notice', async () => {
+    const eventId = '0b993dea-5d8c-4256-9783-36a33574c2e7';
+    const state = {
+      events: [baseEvent({ id: eventId, line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: eventId, starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{
+        id: 'b1',
+        event_id: eventId,
+        slot_id: 's1',
+        friend_id: 'f1',
+        line_account_id: 'la1',
+        status: 'requested',
+        form_answers: JSON.stringify({ message: TEMPORARY_UAT_NOTIFICATION_RUN_ID }),
+      } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+
+    const res = await app.request(`/api/events/admin/events/${eventId}/bookings/b1/decide?account_id=la1`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', comment: '' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('confirmed');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(decisionNotificationMocks.enqueueEventBookingDecisionNotification).not.toHaveBeenCalled();
   });
 
   test('POST decide can schedule a muted confirmation notification', async () => {
@@ -3213,6 +3289,58 @@ describe('admin bookings management', () => {
     expect((state.bookings[0] as Record<string, unknown>).cancelled_by).toBe('admin');
     expect(reminderMocks.cancelPendingRemindersFor).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'cancelled_by_admin' }),
+    );
+  });
+
+  test('temporary UAT admin cancel suppresses only cancellation notice and keeps FIFO promotion notice', async () => {
+    const eventId = '0ee01c75-3647-40a3-b40b-0d66edf2359f';
+    const state = {
+      events: [baseEvent({ id: eventId, line_account_id: 'la1', waitlist_enabled: 1 })],
+      slots: [{ id: 's1', event_id: eventId, starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [
+        {
+          id: 'b-confirmed',
+          event_id: eventId,
+          slot_id: 's1',
+          friend_id: 'f1',
+          line_account_id: 'la1',
+          status: 'confirmed',
+          form_answers: JSON.stringify({ message: TEMPORARY_UAT_NOTIFICATION_RUN_ID }),
+        } as BookingRow & Record<string, unknown>,
+        {
+          id: 'b-waitlisted',
+          event_id: eventId,
+          slot_id: 's1',
+          friend_id: 'f2',
+          line_account_id: 'la1',
+          status: 'waitlisted',
+          form_answers: JSON.stringify({ message: TEMPORARY_UAT_NOTIFICATION_RUN_ID }),
+        } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [
+        { id: 'f1', line_account_id: 'la1', line_user_id: 'U1' },
+        { id: 'f2', line_account_id: 'la1', line_user_id: 'U2' },
+      ],
+    };
+    waitlistMocks.promoteEventWaitlist.mockResolvedValue({
+      promotedBookingIds: ['b-waitlisted'],
+      reason: 'filled',
+    });
+    const app = setupApp(state);
+
+    const res = await app.request(`/api/events/admin/events/${eventId}/bookings/b-confirmed/cancel?account_id=la1`, {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('cancelled');
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'waitlist_promoted', toLineUserId: 'U2' }),
+    );
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'cancelled_by_admin' }),
     );
   });
