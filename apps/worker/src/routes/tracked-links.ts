@@ -9,9 +9,10 @@ import {
   getLinkClicks,
   getFriendByLineUserId,
 } from '@line-crm/db';
-import { addTagToFriend, enrollFriendInScenario } from '@line-crm/db';
+import { enrollFriendInScenario } from '@line-crm/db';
 import type { TrackedLink } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 
 const trackedLinks = new Hono<Env>();
 
@@ -271,7 +272,7 @@ trackedLinks.get('/t/:linkId', async (c) => {
           const actions: Promise<unknown>[] = [];
 
           if (link.tag_id) {
-            actions.push(addTagToFriend(c.env.DB, friendId, link.tag_id));
+            actions.push(attachTagAndFireSideEffects(c.env.DB, friendId, link.tag_id));
           }
 
           if (link.scenario_id) {

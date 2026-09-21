@@ -19,6 +19,8 @@ import {
   enrollFriendInScenario,
   jstNow,
   getFriendScore,
+  getFriendById,
+  getLineAccountById,
 } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
@@ -60,6 +62,29 @@ export async function fireEvent(
   }
   await Promise.allSettled(phase1);
 
+  // Some internal event sources (for example tracked-link / LP tag attribution)
+  // only know the Harness friend ID. Resolve the authoritative LINE account and
+  // access token here so account-scoped automations cannot leak across accounts
+  // and LINE actions do not silently run without credentials.
+  let resolvedLineAccessToken = lineAccessToken;
+  let resolvedLineAccountId = lineAccountId;
+  if (payload.friendId && (!resolvedLineAccessToken || !resolvedLineAccountId)) {
+    try {
+      const friend = await getFriendById(db, payload.friendId);
+      if (!resolvedLineAccountId) {
+        resolvedLineAccountId = friend?.line_account_id ?? null;
+      }
+      if (!resolvedLineAccessToken && resolvedLineAccountId) {
+        const account = await getLineAccountById(db, resolvedLineAccountId);
+        resolvedLineAccessToken = account?.channel_access_token;
+      }
+    } catch (err) {
+      // Continue so global, non-LINE automations can still run. LINE actions
+      // validate their requirements and will be recorded as failed below.
+      console.error('resolve automation LINE context error:', err);
+    }
+  }
+
   // Build an enriched payload with the freshly-updated score.
   const enrichedPayload: EventPayload = payload.friendId
     ? {
@@ -72,7 +97,13 @@ export async function fireEvent(
     : payload;
 
   // Phase 2: evaluate automations.
-  await processAutomations(db, eventType, enrichedPayload, lineAccessToken, lineAccountId);
+  await processAutomations(
+    db,
+    eventType,
+    enrichedPayload,
+    resolvedLineAccessToken,
+    resolvedLineAccountId,
+  );
 }
 
 /** 送信Webhookへの通知 */
@@ -146,7 +177,7 @@ async function processAutomations(
     const allAutomations = await getActiveAutomationsByEvent(db, eventType);
     // Filter by account: match this account's automations + unassigned (backward compat)
     const automations = allAutomations.filter(
-      (a) => !a.line_account_id || !lineAccountId || a.line_account_id === lineAccountId,
+      (a) => !a.line_account_id || (!!lineAccountId && a.line_account_id === lineAccountId),
     );
 
     for (const automation of automations) {
@@ -201,8 +232,14 @@ function matchConditions(
   }
 
   // tag_id チェック
-  if (conditions.tag_id !== undefined && payload.eventData) {
-    if (payload.eventData.tagId !== conditions.tag_id) return false;
+  if (conditions.tag_id !== undefined) {
+    if (payload.eventData?.tagId !== conditions.tag_id) return false;
+  }
+
+  // tag_change の add/remove を区別する。LP 流入用ルールは action='add'
+  // を必須にして、タグ解除時の意図しない再リンクを防ぐ。
+  if (conditions.action !== undefined) {
+    if (payload.eventData?.action !== conditions.action) return false;
   }
 
   // 合言葉は、大文字・小文字と全角・半角の違いを無視して比べる
@@ -346,14 +383,22 @@ async function executeAction(
     }
 
     case 'switch_rich_menu': {
-      if (!lineAccessToken || !friendId) break;
+      if (!lineAccessToken) {
+        throw new Error('lineAccessToken is required for switch_rich_menu');
+      }
+      const richMenuId = action.params?.richMenuId;
+      if (!richMenuId) {
+        throw new Error('richMenuId is required for switch_rich_menu');
+      }
       const friend = await db
         .prepare('SELECT line_user_id FROM friends WHERE id = ?')
         .bind(friendId)
         .first<{ line_user_id: string }>();
-      if (!friend) break;
+      if (!friend?.line_user_id) {
+        throw new Error('LINE user not found for switch_rich_menu');
+      }
       const lineClient = new LineClient(lineAccessToken);
-      await lineClient.linkRichMenuToUser(friend.line_user_id, action.params.richMenuId);
+      await lineClient.linkRichMenuToUser(friend.line_user_id, richMenuId);
       break;
     }
 
