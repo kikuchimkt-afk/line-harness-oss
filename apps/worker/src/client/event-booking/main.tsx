@@ -15,6 +15,7 @@ export interface EventBookingContext {
   lineUserId: string;
   idToken: string;
   displayName: string;
+  reauthenticate?: () => void;
 }
 
 interface EventDetail {
@@ -100,6 +101,7 @@ function apiGet<T>(path: string, ctx: EventBookingContext): Promise<T> {
   url.searchParams.set('liffId', ctx.liffId);
   return fetch(url.toString(), { headers: buildAuthHeaders(ctx) }).then(async (r) => {
     if (!r.ok) {
+      if (r.status === 401) ctx.reauthenticate?.();
       const text = await r.text();
       let parsed: unknown = null;
       try { parsed = JSON.parse(text); } catch { /* ignore */ }
@@ -126,6 +128,7 @@ async function apiPost<T>(
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    if (res.status === 401) ctx.reauthenticate?.();
     const text = await res.text();
     let parsed: unknown = null;
     try { parsed = JSON.parse(text); } catch { /* ignore */ }
