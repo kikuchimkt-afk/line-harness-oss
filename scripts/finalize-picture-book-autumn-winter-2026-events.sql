@@ -18,9 +18,14 @@ SET is_published = 0,
     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE id IN (
   '887d5545-7b60-425d-9c24-91d36e84d1ed',
-  '43b6af40-0884-4a2f-a3ca-b6e7632af4d1',
   'dec4cc02-3d28-41d0-a725-642a1364dafd'
 )
+  AND line_account_id = '0797696f-e377-4132-bb17-77bc1db29b0a';
+
+-- 旧イベントは一覧の「最終編集順」を押し上げないよう、公開状態だけを変更する。
+UPDATE events
+SET is_published = 0
+WHERE id = '43b6af40-0884-4a2f-a3ca-b6e7632af4d1'
   AND line_account_id = '0797696f-e377-4132-bb17-77bc1db29b0a';
 
 -- ---------------------------------------------------------------------------
@@ -276,8 +281,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 -- 旧4〜5歳・午後の仮イベントは履歴を残して受付終了
 UPDATE events
-SET is_published = 0,
-    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+SET is_published = 0
 WHERE id = '43b6af40-0884-4a2f-a3ca-b6e7632af4d1'
   AND line_account_id = '0797696f-e377-4132-bb17-77bc1db29b0a';
 
