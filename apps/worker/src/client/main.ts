@@ -459,7 +459,12 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
     return;
   }
   const { mountEventBooking } = await import('./event-booking/main.js');
-  const ctx = { liffId: LIFF_ID, lineUserId: profile.userId, idToken };
+  const ctx = {
+    liffId: LIFF_ID,
+    lineUserId: profile.userId,
+    idToken,
+    displayName: profile.displayName,
+  };
   const initial = initialKind === 'detail'
     ? { kind: 'detail' as const, eventId }
     : { kind: 'history' as const };
