@@ -34,6 +34,13 @@ export async function verifyCallerLineUserId(
     if (res.ok) {
       const verified = (await res.json()) as { sub?: string };
       if (verified.sub) return verified.sub;
+    } else {
+      // Never log the bearer token. LINE's status and short response body are
+      // enough to distinguish an expired token from a channel-id mismatch.
+      const detail = (await res.text()).slice(0, 300);
+      console.warn(
+        `[liff-auth] id token verification failed channel=${channelId} status=${res.status} detail=${detail}`,
+      );
     }
   }
   return null;
