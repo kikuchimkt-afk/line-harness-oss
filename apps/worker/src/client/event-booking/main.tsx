@@ -13,6 +13,7 @@ export interface EventBookingContext {
   liffId: string;
   lineUserId: string;
   idToken: string;
+  displayName: string;
 }
 
 interface EventDetail {
@@ -685,7 +686,7 @@ function EventDetailScreen({
   );
 }
 
-function ConfirmScreen({
+export function ConfirmScreen({
   ctx,
   event,
   slots,
@@ -824,6 +825,7 @@ function ConfirmScreen({
 
       <div className="eb-card">
         <dl className="space-y-3 text-sm">
+          <Row label="LINE表示名" value={ctx.displayName} />
           <Row label="イベント" value={event.name} />
           <Row label="日時" value={slots.length === 1 ? formatJp(slots[0].starts_at) : `${slots.length}件選択`} />
           {event.venue_name && <Row label="会場" value={event.venue_name} />}
