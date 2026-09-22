@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { EventBookingFormField, EventBookingItem, EventDetail } from './api'
 import {
+  buildEventBookingsSyncPayload,
   buildEikenManagerSyncPayload,
+  buildManagerSyncPayload,
   EIKEN_MANAGER_MESSAGE_TYPE,
+  EVENT_BOOKINGS_MESSAGE_TYPE,
   friendAnswerText,
   resolveEikenManagerOrigin,
 } from './eiken-course-manager-sync'
@@ -50,7 +53,90 @@ describe('Eiken course manager sync', () => {
       .toBe('https://eiken-study-meeting-manager-2026-ro.vercel.app')
     expect(resolveEikenManagerOrigin('https://tokushima-elementary-english-presentation-2026.vercel.app/admin'))
       .toBe('https://tokushima-elementary-english-presentation-2026.vercel.app')
+    expect(resolveEikenManagerOrigin('https://ecc-preschool-autumn-events.vercel.app/admin'))
+      .toBe('https://ecc-preschool-autumn-events.vercel.app')
     expect(resolveEikenManagerOrigin('https://example.com')).toBeNull()
+  })
+
+  it('creates a detailed generic payload for the picture-book event manager', () => {
+    const pictureBookEvent = {
+      ...event,
+      id: '887d5545-7b60-425d-9c24-91d36e84d1ed',
+      name: '【幼児】土曜・英語絵本イベント｜2026秋冬',
+      venue_name: null,
+    } as EventDetail
+    const pictureBookFields: EventBookingFormField[] = [
+      { id: 'venue', label: '受講希望教室', type: 'select', required: true },
+      { id: 'guardian', label: '保護者さまのお名前', type: 'text', required: true },
+      { id: 'child', label: 'お子さまのお名前（ひらがな）', type: 'text', required: true },
+      { id: 'age', label: 'お子さまの年齢', type: 'select', required: true },
+      { id: 'phone', label: '当日連絡のつく電話番号', type: 'text', required: true },
+      { id: 'care', label: 'アレルギー・配慮事項', type: 'textarea', required: false },
+    ]
+    const pictureBookBooking: EventBookingItem = {
+      ...booking,
+      id: 'booking-preschool-1',
+      event_id: pictureBookEvent.id,
+      slot_id: 'slot-preschool-1',
+      form_answers: {
+        venue: '藍住教室（藍住町）',
+        guardian: '山田 花子',
+        child: 'やまだ はな',
+        age: '3歳児',
+        phone: '090-1234-5678',
+        care: '卵アレルギー',
+      },
+      friend_display_name: 'はなママ',
+    }
+
+    const payload = buildEventBookingsSyncPayload(
+      pictureBookEvent,
+      [pictureBookBooking],
+      pictureBookFields,
+      '2026-09-22T03:00:00.000Z',
+    )
+
+    expect(payload.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
+    expect(payload.rows[0]).toEqual(expect.arrayContaining([
+      '予約ID',
+      '枠ID',
+      '子どもの名前',
+      '保護者名',
+      '年齢・学年',
+      '電話番号',
+      '受講会場',
+      '連絡事項',
+    ]))
+    expect(payload.rows[1]).toEqual(expect.arrayContaining([
+      'booking-preschool-1',
+      'slot-preschool-1',
+      'やまだ はな',
+      '山田 花子',
+      '3歳児',
+      '090-1234-5678',
+      '藍住教室（藍住町）',
+      '卵アレルギー',
+      'はなママ',
+    ]))
+    expect(JSON.stringify(payload)).not.toContain('U1')
+  })
+
+  it('selects the generic format only for the two picture-book events', () => {
+    const preschool = buildManagerSyncPayload(
+      { ...event, id: '887d5545-7b60-425d-9c24-91d36e84d1ed' } as EventDetail,
+      [booking],
+      fields,
+    )
+    const elementary = buildManagerSyncPayload(
+      { ...event, id: 'dec4cc02-3d28-41d0-a725-642a1364dafd' } as EventDetail,
+      [booking],
+      fields,
+    )
+    const eiken = buildManagerSyncPayload(event, [booking], fields)
+
+    expect(preschool.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
+    expect(elementary.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
+    expect(eiken.type).toBe(EIKEN_MANAGER_MESSAGE_TYPE)
   })
 
   it('creates Excel-compatible rows without sending credentials', () => {

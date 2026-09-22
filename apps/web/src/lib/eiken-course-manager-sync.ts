@@ -1,7 +1,13 @@
 import type { EventBookingFormField, EventBookingItem, EventDetail } from './api'
 
 export const EIKEN_MANAGER_MESSAGE_TYPE = 'l-harness:eiken-course-reservations:v1'
+export const EVENT_BOOKINGS_MESSAGE_TYPE = 'l-harness:event-bookings:v1'
 export const EIKEN_MANAGER_READY_MESSAGE = 'eiken-course-manager:ready:v1'
+
+export const PICTURE_BOOK_EVENT_IDS = new Set([
+  '887d5545-7b60-425d-9c24-91d36e84d1ed',
+  'dec4cc02-3d28-41d0-a725-642a1364dafd',
+])
 
 const configuredEikenManagerOrigin =
   process.env.NEXT_PUBLIC_EIKEN_MANAGER_URL ??
@@ -16,6 +22,7 @@ const EIKEN_MANAGER_ALLOWED_ORIGINS = new Set([
   'https://eiken-study-meeting-manager-2026-ro.vercel.app',
   'https://eiken-study-meeting-manager-2026-round2.vercel.app',
   'https://tokushima-elementary-english-presentation-2026.vercel.app',
+  'https://ecc-preschool-autumn-events.vercel.app',
   'https://eiken-intensive-course-manager-2026.makoto-keitai-list.chatgpt.site',
   'http://localhost:3000',
 ])
@@ -64,6 +71,17 @@ export type EikenManagerSyncPayload = {
   rows: unknown[][]
 }
 
+export type EventBookingsSyncPayload = {
+  type: typeof EVENT_BOOKINGS_MESSAGE_TYPE
+  version: 1
+  eventId: string
+  eventName: string
+  exportedAt: string
+  rows: unknown[][]
+}
+
+export type ManagerSyncPayload = EikenManagerSyncPayload | EventBookingsSyncPayload
+
 function parseAnswers(raw: EventBookingItem['form_answers']): Record<string, string | string[]> {
   if (raw == null) return {}
   if (typeof raw === 'object' && !Array.isArray(raw)) return raw
@@ -81,6 +99,19 @@ function parseAnswers(raw: EventBookingItem['form_answers']): Record<string, str
 function answerValue(booking: EventBookingItem, field: EventBookingFormField): string {
   const raw = parseAnswers(booking.form_answers)[field.id]
   return Array.isArray(raw) ? raw.join('、') : typeof raw === 'string' ? raw : ''
+}
+
+function fieldByLabels(fields: EventBookingFormField[], labels: string[]): EventBookingFormField | undefined {
+  return fields.find((field) => labels.includes(field.label.trim()))
+}
+
+function answerByLabels(
+  booking: EventBookingItem,
+  fields: EventBookingFormField[],
+  labels: string[],
+): string {
+  const field = fieldByLabels(fields, labels)
+  return field ? answerValue(booking, field) : ''
 }
 
 /**
@@ -185,4 +216,120 @@ export function buildEikenManagerSyncPayload(
     exportedAt,
     rows: [headers, ...rows],
   }
+}
+
+/**
+ * 幼児・小学生低学年イベントの予約を、共有管理画面へ渡すための形式に整える。
+ * LINE user id や認証情報は含めず、教室運営に必要な回答だけを渡す。
+ */
+export function buildEventBookingsSyncPayload(
+  event: EventDetail,
+  bookings: EventBookingItem[],
+  fields: EventBookingFormField[],
+  exportedAt = new Date().toISOString(),
+): EventBookingsSyncPayload {
+  const headers = [
+    'イベント名',
+    '予約ID',
+    '枠ID',
+    '予約日',
+    '開始時刻',
+    '終了時刻',
+    '状態',
+    '子どもの名前',
+    '保護者名',
+    '年齢・学年',
+    '電話番号',
+    '受講会場',
+    '連絡事項',
+    'LINE表示名',
+    '備考',
+    '受付日時',
+  ]
+
+  const rows = bookings
+    .slice()
+    .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime())
+    .map((booking) => {
+      const childName = answerByLabels(booking, fields, [
+        'お子さまのお名前（ひらがな）',
+        'お子さまのお名前',
+        '子どもの名前',
+        '児童名',
+        '参加者名',
+      ]) || friendAnswerText(booking.friend_student_name) || ''
+      const guardianName = answerByLabels(booking, fields, [
+        '保護者さまのお名前',
+        '保護者のお名前',
+        '保護者氏名',
+        '保護者名',
+      ]) || friendAnswerText(booking.friend_guardian_name) || ''
+      const ageOrGrade = answerByLabels(booking, fields, [
+        'お子さまの年齢',
+        'お子さまの学年',
+        '年齢・学年',
+        '年齢',
+        '学年',
+      ]) || friendAnswerText(booking.friend_school_grade) || ''
+      const phone = answerByLabels(booking, fields, [
+        '当日連絡のつく電話番号',
+        '電話番号',
+        '電話',
+      ])
+      const venue = answerByLabels(booking, fields, [
+        '受講希望教室',
+        '希望教室',
+        '受講会場',
+        '会場',
+      ]) || event.venue_name || ''
+      const considerations = answerByLabels(booking, fields, [
+        'アレルギー・配慮事項',
+        '食物アレルギー・配慮事項',
+        '配慮事項',
+        '連絡事項',
+      ]) || friendAnswerText(booking.friend_request_note)
+
+      return [
+        event.name,
+        booking.id,
+        booking.slot_id,
+        dateFormatter.format(new Date(booking.slot_starts_at)),
+        timeFormatter.format(new Date(booking.slot_starts_at)),
+        timeFormatter.format(new Date(booking.slot_ends_at)),
+        STATUS_LABELS[booking.status] ?? booking.status,
+        childName,
+        guardianName,
+        ageOrGrade,
+        phone,
+        venue,
+        considerations,
+        booking.friend_display_name ?? '',
+        booking.customer_note ?? '',
+        dateTimeFormatter.format(new Date(booking.requested_at)),
+      ]
+    })
+
+  return {
+    type: EVENT_BOOKINGS_MESSAGE_TYPE,
+    version: 1,
+    eventId: event.id,
+    eventName: event.name,
+    exportedAt,
+    rows: [headers, ...rows],
+  }
+}
+
+/**
+ * 既存の英検管理画面は従来形式のまま維持し、指定した絵本イベントだけ
+ * 汎用予約形式へ切り替える。
+ */
+export function buildManagerSyncPayload(
+  event: EventDetail,
+  bookings: EventBookingItem[],
+  fields: EventBookingFormField[],
+  exportedAt = new Date().toISOString(),
+): ManagerSyncPayload {
+  return PICTURE_BOOK_EVENT_IDS.has(event.id)
+    ? buildEventBookingsSyncPayload(event, bookings, fields, exportedAt)
+    : buildEikenManagerSyncPayload(event, bookings, fields, exportedAt)
 }

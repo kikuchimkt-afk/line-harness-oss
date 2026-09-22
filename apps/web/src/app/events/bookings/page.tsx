@@ -8,7 +8,7 @@ import Header from '@/components/layout/header'
 import { useAccount } from '@/contexts/account-context'
 import { eventsApi, type EventBookingFormField, type EventBookingItem, type EventDetail } from '@/lib/api'
 import {
-  buildEikenManagerSyncPayload,
+  buildManagerSyncPayload,
   friendAnswerText,
   EIKEN_MANAGER_PRIMARY_ORIGIN,
   EIKEN_MANAGER_READY_MESSAGE,
@@ -293,7 +293,7 @@ function BookingsInner() {
 
   const managerSyncPayload = useMemo(
     () => event
-      ? buildEikenManagerSyncPayload(
+      ? buildManagerSyncPayload(
           event,
           allItems,
           formFields,
