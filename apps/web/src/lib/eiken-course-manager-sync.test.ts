@@ -50,6 +50,8 @@ describe('Eiken course manager sync', () => {
       .toBe('https://eiken-study-meeting-manager-2026-ro.vercel.app')
     expect(resolveEikenManagerOrigin('https://tokushima-elementary-english-presentation-2026.vercel.app/admin'))
       .toBe('https://tokushima-elementary-english-presentation-2026.vercel.app')
+    expect(resolveEikenManagerOrigin('https://ecc-preschool-autumn-events.vercel.app/admin'))
+      .toBe('https://ecc-preschool-autumn-events.vercel.app')
     expect(resolveEikenManagerOrigin('https://example.com')).toBeNull()
   })
 
@@ -71,6 +73,7 @@ describe('Eiken course manager sync', () => {
     ]))
     expect(JSON.stringify(payload)).not.toContain('U1')
     expect(JSON.stringify(payload)).not.toContain('保護者')
+    expect(payload.rows[0]).toHaveLength(12)
   })
 
   it('uses the LINE display name when an event has no booking form fields', () => {
