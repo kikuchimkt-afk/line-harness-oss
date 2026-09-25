@@ -114,7 +114,7 @@ describe('Eiken course manager sync', () => {
       '山田 花子',
       '3歳児',
       '090-1234-5678',
-      '藍住教室（藍住町）',
+      '藍住教室',
       '卵アレルギー',
       'はなママ',
     ]))
@@ -137,6 +137,70 @@ describe('Eiken course manager sync', () => {
     expect(preschool.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
     expect(elementary.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
     expect(eiken.type).toBe(EIKEN_MANAGER_MESSAGE_TYPE)
+    expect(eiken.rows[0]).toHaveLength(12)
+  })
+
+  it('uses stable booking field ids even when display labels change', () => {
+    const pictureBookEvent = {
+      ...event,
+      id: '887d5545-7b60-425d-9c24-91d36e84d1ed',
+      venue_name: '藍住・大学前・北島中央教室',
+    } as EventDetail
+    const renamedFields: EventBookingFormField[] = [
+      { id: 'field_5637a98b', label: '会場（変更後）', type: 'select', required: true },
+      { id: 'guardian_name', label: '保護者（変更後）', type: 'text', required: true },
+      { id: 'child_name', label: '参加者（変更後）', type: 'text', required: true },
+      { id: 'child_age', label: '区分（変更後）', type: 'select', required: true },
+      { id: 'field_3fcbb927', label: '連絡先（変更後）', type: 'text', required: true },
+      { id: 'considerations', label: '備考（変更後）', type: 'textarea', required: false },
+    ]
+    const renamedBooking: EventBookingItem = {
+      ...booking,
+      id: 'booking-kitajima-1',
+      event_id: pictureBookEvent.id,
+      form_answers: {
+        field_5637a98b: '北島中央教室（北島町）',
+        guardian_name: '保護者A',
+        child_name: 'こどもA',
+        child_age: '5歳児',
+        field_3fcbb927: '090-0000-0000',
+        considerations: '特になし',
+      },
+    }
+
+    const payload = buildManagerSyncPayload(pictureBookEvent, [renamedBooking], renamedFields)
+
+    expect(payload.type).toBe(EVENT_BOOKINGS_MESSAGE_TYPE)
+    expect(payload.rows[1]).toEqual(expect.arrayContaining([
+      'こどもA',
+      '保護者A',
+      '5歳児',
+      '090-0000-0000',
+      '北島中央教室',
+      '特になし',
+    ]))
+    expect(payload.rows[1]).not.toContain('藍住・大学前・北島中央教室')
+  })
+
+  it('does not replace an empty explicit classroom answer with a combined event venue', () => {
+    const pictureBookEvent = {
+      ...event,
+      id: '887d5545-7b60-425d-9c24-91d36e84d1ed',
+      venue_name: '藍住・大学前・北島中央教室',
+    } as EventDetail
+    const venueField: EventBookingFormField = {
+      id: 'field_5637a98b',
+      label: '受講希望教室',
+      type: 'select',
+      required: true,
+    }
+    const payload = buildEventBookingsSyncPayload(
+      pictureBookEvent,
+      [{ ...booking, form_answers: { field_5637a98b: '' } }],
+      [venueField],
+    )
+
+    expect(payload.rows[1][11]).toBe('')
   })
 
   it('creates Excel-compatible rows without sending credentials', () => {

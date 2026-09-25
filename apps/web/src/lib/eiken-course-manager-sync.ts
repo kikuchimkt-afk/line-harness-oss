@@ -114,6 +114,30 @@ function answerByLabels(
   return field ? answerValue(booking, field) : ''
 }
 
+function answerByIdsOrLabels(
+  booking: EventBookingItem,
+  fields: EventBookingFormField[],
+  ids: string[],
+  labels: string[],
+): string {
+  const field = fields.find((candidate) => ids.includes(candidate.id)) ?? fieldByLabels(fields, labels)
+  return field ? answerValue(booking, field) : ''
+}
+
+function pictureBookVenueAnswer(
+  booking: EventBookingItem,
+  fields: EventBookingFormField[],
+  fallbackVenue: string | null | undefined,
+): string {
+  const venueField = fields.find((candidate) => candidate.id === 'field_5637a98b')
+    ?? fieldByLabels(fields, ['受講希望教室', '希望教室', '受講会場', '会場'])
+  const raw = venueField ? answerValue(booking, venueField) : (fallbackVenue ?? '')
+  if (raw.includes('北島')) return '北島中央教室'
+  if (raw.includes('藍住')) return '藍住教室'
+  if (raw.includes('大学前')) return '大学前教室'
+  return raw.trim()
+}
+
 /**
  * 参加申込フォームの回答を、表示できる文字列にそろえる。
  *
@@ -251,38 +275,33 @@ export function buildEventBookingsSyncPayload(
     .slice()
     .sort((a, b) => new Date(a.slot_starts_at).getTime() - new Date(b.slot_starts_at).getTime())
     .map((booking) => {
-      const childName = answerByLabels(booking, fields, [
+      const childName = answerByIdsOrLabels(booking, fields, ['child_name'], [
         'お子さまのお名前（ひらがな）',
         'お子さまのお名前',
         '子どもの名前',
         '児童名',
         '参加者名',
       ]) || friendAnswerText(booking.friend_student_name) || ''
-      const guardianName = answerByLabels(booking, fields, [
+      const guardianName = answerByIdsOrLabels(booking, fields, ['guardian_name'], [
         '保護者さまのお名前',
         '保護者のお名前',
         '保護者氏名',
         '保護者名',
       ]) || friendAnswerText(booking.friend_guardian_name) || ''
-      const ageOrGrade = answerByLabels(booking, fields, [
+      const ageOrGrade = answerByIdsOrLabels(booking, fields, ['child_age'], [
         'お子さまの年齢',
         'お子さまの学年',
         '年齢・学年',
         '年齢',
         '学年',
       ]) || friendAnswerText(booking.friend_school_grade) || ''
-      const phone = answerByLabels(booking, fields, [
+      const phone = answerByIdsOrLabels(booking, fields, ['field_3fcbb927'], [
         '当日連絡のつく電話番号',
         '電話番号',
         '電話',
       ])
-      const venue = answerByLabels(booking, fields, [
-        '受講希望教室',
-        '希望教室',
-        '受講会場',
-        '会場',
-      ]) || event.venue_name || ''
-      const considerations = answerByLabels(booking, fields, [
+      const venue = pictureBookVenueAnswer(booking, fields, event.venue_name)
+      const considerations = answerByIdsOrLabels(booking, fields, ['considerations'], [
         'アレルギー・配慮事項',
         '食物アレルギー・配慮事項',
         '配慮事項',
