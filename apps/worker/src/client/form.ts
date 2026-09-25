@@ -23,6 +23,7 @@ declare const liff: {
 };
 
 const UUID_STORAGE_KEY = 'lh_uuid';
+const SUBMISSION_ID_STORAGE_PREFIX = 'lh_form_submission:';
 const FORM_VERSION = '2.0.0'; // cache buster
 
 interface FormField {
@@ -103,6 +104,12 @@ function apiCall(path: string, options?: RequestInit): Promise<Response> {
 }
 
 async function submissionErrorMessage(response: Response): Promise<string> {
+  const text = await response.text().catch(() => '');
+  try {
+    const data = JSON.parse(text) as { error?: string; retryable?: boolean };
+    if (data.retryable && data.error) return data.error;
+  } catch { /* use status-based fallback below */ }
+
   if (response.status === 429) {
     return 'ただいまアクセスが集中しています。入力内容は保持されています。少し待ってからもう一度送信してください。';
   }
@@ -110,13 +117,34 @@ async function submissionErrorMessage(response: Response): Promise<string> {
     return '一時的に送信できませんでした。入力内容は保持されています。少し待ってからもう一度送信してください。';
   }
 
-  const text = await response.text().catch(() => '');
   try {
     const data = JSON.parse(text) as { error?: string };
     return data.error || '送信内容を確認してください。';
   } catch {
     return text || '送信内容を確認してください。';
   }
+}
+
+function submissionStorageKey(formId: string): string {
+  return `${SUBMISSION_ID_STORAGE_PREFIX}${formId}`;
+}
+
+function restoreSubmissionRequestId(formId: string): string | null {
+  try {
+    const value = localStorage.getItem(submissionStorageKey(formId));
+    return value && /^[A-Za-z0-9._:-]{8,128}$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberSubmissionRequestId(formId: string, requestId: string): void {
+  try { localStorage.setItem(submissionStorageKey(formId), requestId); } catch { /* best effort */ }
+}
+
+function clearSubmissionRequestId(formId: string): void {
+  state.submissionRequestId = null;
+  try { localStorage.removeItem(submissionStorageKey(formId)); } catch { /* best effort */ }
 }
 
 function getApp(): HTMLElement {
@@ -761,8 +789,11 @@ async function submitForm(): Promise<void> {
 
   try {
     const data = collectFormData();
-    const submissionRequestId = state.submissionRequestId ?? crypto.randomUUID();
+    const submissionRequestId = state.submissionRequestId
+      ?? restoreSubmissionRequestId(state.formDef.id)
+      ?? crypto.randomUUID();
     state.submissionRequestId = submissionRequestId;
+    rememberSubmissionRequestId(state.formDef.id, submissionRequestId);
     console.log('Form data collected:', JSON.stringify(data));
 
     // Webhook gate — pre-verified by /repliers endpoint
@@ -818,7 +849,7 @@ async function submitForm(): Promise<void> {
       if (submitResult?.data?.webhookPassed === false) {
         throw new Error(state.formDef.onSubmitWebhookFailMessage || '条件を満たしていません');
       }
-      state.submissionRequestId = null;
+      clearSubmissionRequestId(state.formDef.id);
       renderWebhookSuccess(successMsg);
       return;
     }
@@ -840,7 +871,7 @@ async function submitForm(): Promise<void> {
       throw new Error(await submissionErrorMessage(res));
     }
 
-    state.submissionRequestId = null;
+    clearSubmissionRequestId(state.formDef.id);
     renderSuccess();
   } catch (err) {
     state.submitting = false;

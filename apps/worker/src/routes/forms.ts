@@ -549,7 +549,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
           console.error('Failed to send webhook fail message:', error);
           return c.json({
             success: false,
-            error: '回答は保存されましたが、確認メッセージを送信できませんでした。自動で再試行します。',
+            error: '回答は保存されています。確認メッセージを送信できなかったため、時間をおいてもう一度「送信」を押してください。',
             retryable: true,
           }, 503);
         }
@@ -895,7 +895,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
         console.error('Form confirmation delivery failed:', error);
         return c.json({
           success: false,
-          error: '回答は保存されましたが、クーポンの送信を完了できませんでした。自動で再試行します。',
+          error: '回答は保存されています。クーポン送信を完了できなかったため、時間をおいてもう一度「送信」を押してください。',
           retryable: true,
         }, 503);
       }
