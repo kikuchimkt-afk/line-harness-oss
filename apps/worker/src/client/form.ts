@@ -10,6 +10,8 @@
  * URL format: https://liff.line.me/{LIFF_ID}?page=form&id={FORM_ID}
  */
 
+import { submitWithRetry } from './form-submit-retry.js';
+
 declare const liff: {
   init(config: { liffId: string }): Promise<void>;
   isLoggedIn(): boolean;
@@ -58,6 +60,7 @@ interface FormState {
   userId: string | null;
   friendId: string | null;
   submitting: boolean;
+  submissionRequestId: string | null;
   verifiedXUsername: string;
   /**
    * Tracked link id that brought the user to this form (`?ref=` query param,
@@ -75,6 +78,7 @@ const state: FormState = {
   userId: null,
   friendId: null,
   submitting: false,
+  submissionRequestId: null,
   verifiedXUsername: '',
   refTrackedLinkId: null,
 };
@@ -96,6 +100,23 @@ function apiCall(path: string, options?: RequestInit): Promise<Response> {
       ...options?.headers,
     },
   });
+}
+
+async function submissionErrorMessage(response: Response): Promise<string> {
+  if (response.status === 429) {
+    return 'ただいまアクセスが集中しています。入力内容は保持されています。少し待ってからもう一度送信してください。';
+  }
+  if ([408, 425, 500, 502, 503, 504].includes(response.status)) {
+    return '一時的に送信できませんでした。入力内容は保持されています。少し待ってからもう一度送信してください。';
+  }
+
+  const text = await response.text().catch(() => '');
+  try {
+    const data = JSON.parse(text) as { error?: string };
+    return data.error || '送信内容を確認してください。';
+  } catch {
+    return text || '送信内容を確認してください。';
+  }
 }
 
 function getApp(): HTMLElement {
@@ -740,6 +761,8 @@ async function submitForm(): Promise<void> {
 
   try {
     const data = collectFormData();
+    const submissionRequestId = state.submissionRequestId ?? crypto.randomUUID();
+    state.submissionRequestId = submissionRequestId;
     console.log('Form data collected:', JSON.stringify(data));
 
     // Webhook gate — pre-verified by /repliers endpoint
@@ -782,21 +805,20 @@ async function submitForm(): Promise<void> {
       if (state.friendId) webhookBody.friendId = state.friendId;
       if (state.refTrackedLinkId) webhookBody.trackedLinkId = state.refTrackedLinkId;
 
-      const webhookSubmitRes = await apiCall(`/api/forms/${state.formDef.id}/submit`, {
-        method: 'POST',
-        body: JSON.stringify(webhookBody),
-      });
+      const webhookSubmitRes = await submitWithRetry(
+        `/api/forms/${state.formDef.id}/submit`,
+        webhookBody,
+        submissionRequestId,
+      );
       if (!webhookSubmitRes.ok) {
-        const errText = await webhookSubmitRes.text().catch(() => '');
-        let errMsg = '送信に失敗しました';
-        try { const errData = JSON.parse(errText); errMsg = errData.error || errMsg; } catch { errMsg = errText || errMsg; }
-        throw new Error(`${webhookSubmitRes.status}: ${errMsg}`);
+        throw new Error(await submissionErrorMessage(webhookSubmitRes));
       }
       // Check server-side webhook recheck result
       const submitResult = await webhookSubmitRes.clone().json().catch(() => null) as { data?: { webhookPassed?: boolean } } | null;
       if (submitResult?.data?.webhookPassed === false) {
         throw new Error(state.formDef.onSubmitWebhookFailMessage || '条件を満たしていません');
       }
+      state.submissionRequestId = null;
       renderWebhookSuccess(successMsg);
       return;
     }
@@ -807,19 +829,18 @@ async function submitForm(): Promise<void> {
     if (state.refTrackedLinkId) body.trackedLinkId = state.refTrackedLinkId;
     console.log('Submitting to:', `/api/forms/${state.formDef.id}/submit`);
 
-    const res = await apiCall(`/api/forms/${state.formDef.id}/submit`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
+    const res = await submitWithRetry(
+      `/api/forms/${state.formDef.id}/submit`,
+      body,
+      submissionRequestId,
+    );
     console.log('Response status:', res.status);
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      let errMsg = '送信に失敗しました';
-      try { const errData = JSON.parse(errText); errMsg = errData.error || errMsg; } catch { errMsg = errText || errMsg; }
-      throw new Error(`${res.status}: ${errMsg}`);
+      throw new Error(await submissionErrorMessage(res));
     }
 
+    state.submissionRequestId = null;
     renderSuccess();
   } catch (err) {
     state.submitting = false;

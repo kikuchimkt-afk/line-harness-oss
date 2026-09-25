@@ -73,6 +73,12 @@ function isUnauthenticatedPath(path: string): boolean {
   );
 }
 
+function unauthenticatedBucket(path: string): string {
+  if (path === '/webhook') return 'line-webhook';
+  if (/^\/api\/forms\/[^/]+\/submit$/.test(path)) return 'form-submit';
+  return 'public';
+}
+
 function getClientIp(c: Context): string {
   return (
     c.req.header('cf-connecting-ip') ||
@@ -134,7 +140,7 @@ export async function rateLimitMiddleware(c: Context<Env>, next: Next): Promise<
 
   if (isUnauthenticatedPath(path)) {
     // Key by IP for unauthenticated endpoints
-    key = `ip:${getClientIp(c)}`;
+    key = `ip:${getClientIp(c)}:${unauthenticatedBucket(path)}`;
     max = UNAUTHENTICATED_MAX;
     windowMs = UNAUTHENTICATED_WINDOW;
   } else {

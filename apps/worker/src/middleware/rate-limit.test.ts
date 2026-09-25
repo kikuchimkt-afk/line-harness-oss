@@ -7,6 +7,8 @@ function app() {
   const a = new Hono<Env>();
   a.use('*', rateLimitMiddleware);
   a.get('/api/protected', (c) => c.json({ success: true }));
+  a.post('/api/forms/:id/submit', (c) => c.json({ success: true }));
+  a.post('/webhook', (c) => c.json({ success: true }));
   return a;
 }
 
@@ -47,5 +49,29 @@ describe('rate-limit IP ceiling (pre-auth token rotation)', () => {
       }, env);
       expect(res.status).toBe(200);
     }
+  });
+
+  test('form submissions do not share a burst bucket with other public traffic', async () => {
+    const ip = '192.0.2.88';
+    const a = app();
+
+    for (let i = 0; i < 100; i++) {
+      const res = await a.request('/api/protected', {
+        headers: { 'cf-connecting-ip': ip },
+      }, env);
+      expect(res.status).toBe(200);
+    }
+    expect((await a.request('/api/protected', {
+      headers: { 'cf-connecting-ip': ip },
+    }, env)).status).toBe(429);
+
+    expect((await a.request('/api/forms/form-1/submit', {
+      method: 'POST',
+      headers: { 'cf-connecting-ip': ip },
+    }, env)).status).toBe(200);
+    expect((await a.request('/webhook', {
+      method: 'POST',
+      headers: { 'cf-connecting-ip': ip },
+    }, env)).status).toBe(200);
   });
 });

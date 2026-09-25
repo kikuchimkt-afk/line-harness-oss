@@ -27,6 +27,12 @@ export interface FormSubmission {
   form_id: string;
   friend_id: string | null;
   data: string; // JSON string
+  idempotency_key: string | null;
+  tracked_link_id: string | null;
+  delivery_status: 'pending' | 'sent' | 'failed' | 'not_required';
+  delivery_retry_key: string | null;
+  delivery_error: string | null;
+  delivery_attempts: number;
   created_at: string;
 }
 
@@ -277,33 +283,98 @@ export interface CreateFormSubmissionInput {
   formId: string;
   friendId?: string | null;
   data: string; // JSON string
+  idempotencyKey?: string | null;
+  trackedLinkId?: string | null;
+}
+
+export interface CreateFormSubmissionResult {
+  submission: FormSubmission;
+  created: boolean;
 }
 
 export async function createFormSubmission(
   db: D1Database,
   input: CreateFormSubmissionInput,
-): Promise<FormSubmission> {
+): Promise<CreateFormSubmissionResult> {
   const id = crypto.randomUUID();
   const now = jstNow();
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  const trackedLinkId = input.trackedLinkId?.trim() || null;
+  const deliveryStatus = input.friendId ? 'pending' : 'not_required';
+  const deliveryRetryKey = input.friendId ? crypto.randomUUID() : null;
+  const insertSql = idempotencyKey
+    ? `INSERT INTO form_submissions
+         (id, form_id, friend_id, data, idempotency_key, tracked_link_id, delivery_status, delivery_retry_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(form_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`
+    : `INSERT INTO form_submissions
+         (id, form_id, friend_id, data, idempotency_key, tracked_link_id, delivery_status, delivery_retry_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-  await db
-    .prepare(
-      `INSERT INTO form_submissions (id, form_id, friend_id, data, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    )
-    .bind(id, input.formId, input.friendId ?? null, input.data, now)
-    .run();
+  // D1 batch is transactional. Recomputing submit_count from stored rows keeps
+  // the counter correct even when a client safely replays the same request.
+  const [insertResult] = await db.batch([
+    db.prepare(insertSql).bind(
+      id,
+      input.formId,
+      input.friendId ?? null,
+      input.data,
+      idempotencyKey,
+      trackedLinkId,
+      deliveryStatus,
+      deliveryRetryKey,
+      now,
+    ),
+    db.prepare(
+      `UPDATE forms
+       SET submit_count = (SELECT COUNT(*) FROM form_submissions WHERE form_id = ?),
+           updated_at = ?
+       WHERE id = ?`,
+    ).bind(input.formId, now, input.formId),
+  ]);
 
-  // Increment submit_count
-  await db
-    .prepare(`UPDATE forms SET submit_count = submit_count + 1, updated_at = ? WHERE id = ?`)
-    .bind(now, input.formId)
-    .run();
+  const created = Number(insertResult.meta?.changes ?? 0) > 0;
+  const submission = idempotencyKey
+    ? await db
+        .prepare(`SELECT * FROM form_submissions WHERE form_id = ? AND idempotency_key = ?`)
+        .bind(input.formId, idempotencyKey)
+        .first<FormSubmission>()
+    : await db
+        .prepare(`SELECT * FROM form_submissions WHERE id = ?`)
+        .bind(id)
+        .first<FormSubmission>();
 
-  return (await db
-    .prepare(`SELECT * FROM form_submissions WHERE id = ?`)
-    .bind(id)
-    .first<FormSubmission>())!;
+  if (!submission) {
+    throw new Error('Form submission could not be read after insert');
+  }
+
+  return { submission, created };
+}
+
+export async function getFormSubmissionByIdempotencyKey(
+  db: D1Database,
+  formId: string,
+  idempotencyKey: string,
+): Promise<FormSubmission | null> {
+  return db
+    .prepare(`SELECT * FROM form_submissions WHERE form_id = ? AND idempotency_key = ?`)
+    .bind(formId, idempotencyKey)
+    .first<FormSubmission>();
+}
+
+export async function markFormSubmissionDelivery(
+  db: D1Database,
+  submissionId: string,
+  status: 'sent' | 'failed',
+  error: string | null = null,
+): Promise<void> {
+  await db.prepare(
+    `UPDATE form_submissions
+     SET delivery_status = ?,
+         delivery_error = ?,
+         delivery_attempts = delivery_attempts + 1
+     WHERE id = ?`,
+  ).bind(status, error?.slice(0, 1000) ?? null, submissionId).run();
 }
 
 export async function deleteFormSubmission(

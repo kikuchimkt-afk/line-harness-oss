@@ -58,7 +58,9 @@
     "050_event_booking_form_fields.sql",
     "051_event_slot_visibility_conditions.sql",
     "052_event_booking_decision_notifications.sql",
-    "053_scheduled_chat_messages.sql"
+    "053_scheduled_chat_messages.sql",
+    "054_event_booking_waitlist.sql",
+    "055_form_submission_idempotency.sql"
   ],
-  "migrationCount": 59
+  "migrationCount": 61
 }

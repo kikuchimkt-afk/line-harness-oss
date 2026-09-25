@@ -8,6 +8,8 @@ import {
   deleteForm,
   getFormSubmissions,
   createFormSubmission,
+  getFormSubmissionByIdempotencyKey,
+  markFormSubmissionDelivery,
   deleteFormSubmission,
   jstNow,
 } from '@line-crm/db';
@@ -19,11 +21,13 @@ import type {
   FormUsedByAccount,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { pushMessageWithRetry } from '../services/line-push-retry.js';
 
 const forms = new Hono<Env>();
 const FORM_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
 const FORM_NOTICE_MAX_ANSWERS = 8;
 const FORM_NOTICE_VALUE_MAX_LENGTH = 160;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 
 function serializeForm(
   row: DbForm,
@@ -165,7 +169,12 @@ async function notifyFormSubmissionRecipients(
 
     for (const recipient of recipients.results) {
       try {
-        await lineClient.pushTextMessage(recipient.line_user_id, text);
+        await pushMessageWithRetry(
+          lineClient,
+          recipient.line_user_id,
+          [{ type: 'text', text }],
+          crypto.randomUUID(),
+        );
       } catch (err) {
         console.error(`[forms] submit notice failed recipient=${recipient.id}`, err);
       }
@@ -436,7 +445,32 @@ forms.post('/api/forms/:id/submit', async (c) => {
       trackedLinkId?: string;
     }>();
 
-    const submissionData = body.data ?? {};
+    const rawIdempotencyKey = c.req.header('Idempotency-Key')?.trim() ?? '';
+    if (rawIdempotencyKey && !IDEMPOTENCY_KEY_PATTERN.test(rawIdempotencyKey)) {
+      return c.json({ success: false, error: 'Invalid Idempotency-Key' }, 400);
+    }
+    const idempotencyKey = rawIdempotencyKey || null;
+
+    let existingSubmission = idempotencyKey
+      ? await getFormSubmissionByIdempotencyKey(c.env.DB, formId, idempotencyKey)
+      : null;
+    let submissionData = body.data ?? {};
+    let friendId: string | null = body.friendId ?? null;
+    let effectiveTrackedLinkId: string | null = body.trackedLinkId?.trim() || null;
+
+    const restorePersistedRequest = (submission: DbFormSubmission) => {
+      const parsed = JSON.parse(submission.data || '{}') as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Persisted form submission data is invalid');
+      }
+      submissionData = parsed as Record<string, unknown>;
+      friendId = submission.friend_id;
+      effectiveTrackedLinkId = submission.tracked_link_id;
+    };
+
+    // Once an idempotency key has been stored, its recipient, answers and
+    // campaign attribution are immutable. Never trust a changed replay body.
+    if (existingSubmission) restorePersistedRequest(existingSubmission);
 
     // Validate required fields
     const fields = JSON.parse(form.fields || '[]') as Array<{
@@ -458,66 +492,150 @@ forms.post('/api/forms/:id/submit', async (c) => {
       }
     }
 
-    // Resolve friend by lineUserId or friendId
-    let friendId: string | null = body.friendId ?? null;
-    if (!friendId && body.lineUserId) {
+    // Resolve friend by lineUserId or friendId only for a new request.
+    if (!existingSubmission && !friendId && body.lineUserId) {
       const friend = await getFriendByLineUserId(c.env.DB, body.lineUserId);
       if (friend) {
         friendId = friend.id;
       }
     }
 
-    // Webhook gate — skip if client pre-verified via repliers endpoint
+    // Webhook gate — a stored replay reuses the first persisted outcome and
+    // never invokes the external webhook again.
     delete submissionData._webhookVerified;
     const skipWebhook = Boolean(body._skipWebhook);
     delete submissionData._skipWebhook;
     let webhookData: Record<string, unknown> | null = null;
-    if (form.on_submit_webhook_url && !skipWebhook) {
+
+    const respondToWebhookRejection = async (
+      submission: DbFormSubmission,
+      created: boolean,
+      resultData: unknown,
+    ): Promise<Response> => {
+      if (
+        form.on_submit_webhook_fail_message
+        && friendId
+        && submission.delivery_status !== 'sent'
+        && submission.delivery_status !== 'not_required'
+      ) {
+        try {
+          const friend = await getFriendById(c.env.DB, friendId);
+          if (!friend?.line_user_id) throw new Error('Recipient LINE account is unavailable');
+          const { LineClient } = await import('@line-crm/line-sdk');
+          let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+          if ((friend as unknown as Record<string, unknown>).line_account_id) {
+            const { getLineAccountById } = await import('@line-crm/db');
+            const account = await getLineAccountById(c.env.DB, (friend as unknown as Record<string, unknown>).line_account_id as string);
+            if (account) accessToken = account.channel_access_token;
+          }
+          const lineClient = new LineClient(accessToken);
+          await pushMessageWithRetry(
+            lineClient,
+            friend.line_user_id,
+            [{ type: 'text', text: form.on_submit_webhook_fail_message }],
+            submission.delivery_retry_key ?? crypto.randomUUID(),
+          );
+          await c.env.DB
+            .prepare(
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
+               VALUES (?, ?, 'outgoing', 'text', ?, NULL, NULL, 'auto_reply', ?)`,
+            )
+            .bind(crypto.randomUUID(), friend.id, form.on_submit_webhook_fail_message, jstNow())
+            .run();
+          await markFormSubmissionDelivery(c.env.DB, submission.id, 'sent');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await markFormSubmissionDelivery(c.env.DB, submission.id, 'failed', message);
+          console.error('Failed to send webhook fail message:', error);
+          return c.json({
+            success: false,
+            error: '回答は保存されましたが、確認メッセージを送信できませんでした。自動で再試行します。',
+            retryable: true,
+          }, 503);
+        }
+      }
+      return c.json({
+        success: true,
+        data: {
+          ...serializeSubmission(submission),
+          webhookPassed: false,
+          webhookData: resultData,
+          idempotentReplay: !created,
+        },
+      }, created ? 201 : 200);
+    };
+
+    if (
+      existingSubmission
+      && Object.prototype.hasOwnProperty.call(submissionData, '_webhookResult')
+    ) {
+      return respondToWebhookRejection(
+        existingSubmission,
+        false,
+        submissionData._webhookResult,
+      );
+    }
+
+    if (!existingSubmission && form.on_submit_webhook_url && !skipWebhook) {
       const webhookResult = await callFormWebhook(form, submissionData);
       webhookData = webhookResult.data as Record<string, unknown> | null;
       if (!webhookResult.passed) {
-        // Webhook rejected — send fail message and stop
-        if (form.on_submit_webhook_fail_message && friendId) {
-          const friend = await getFriendById(c.env.DB, friendId);
-          if (friend?.line_user_id) {
-            try {
-              const { LineClient } = await import('@line-crm/line-sdk');
-              let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
-              if ((friend as unknown as Record<string, unknown>).line_account_id) {
-                const { getLineAccountById } = await import('@line-crm/db');
-                const account = await getLineAccountById(c.env.DB, (friend as unknown as Record<string, unknown>).line_account_id as string);
-                if (account) accessToken = account.channel_access_token;
-              }
-              const lineClient = new LineClient(accessToken);
-              await lineClient.pushMessage(friend.line_user_id, [{ type: 'text', text: form.on_submit_webhook_fail_message }]);
-              await c.env.DB
-                .prepare(
-                  `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-                   VALUES (?, ?, 'outgoing', 'text', ?, NULL, NULL, 'auto_reply', ?)`,
-                )
-                .bind(crypto.randomUUID(), friend.id, form.on_submit_webhook_fail_message, jstNow())
-                .run();
-            } catch (e) {
-              console.error('Failed to send webhook fail message:', e);
-            }
-          }
-        }
-        // Still save the submission for records
-        const submission = await createFormSubmission(c.env.DB, {
+        const saved = await createFormSubmission(c.env.DB, {
           formId,
           friendId: friendId || null,
           data: JSON.stringify({ ...submissionData, _webhookResult: webhookResult.data }),
+          idempotencyKey,
+          trackedLinkId: effectiveTrackedLinkId,
         });
-        return c.json({ success: true, data: { ...serializeSubmission(submission), webhookPassed: false, webhookData: webhookResult.data } }, 201);
+        restorePersistedRequest(saved.submission);
+        if (Object.prototype.hasOwnProperty.call(submissionData, '_webhookResult')) {
+          return respondToWebhookRejection(
+            saved.submission,
+            saved.created,
+            submissionData._webhookResult,
+          );
+        }
+        // A concurrent request with the same key persisted an accepted outcome
+        // first. That stored outcome wins over this later webhook response.
+        existingSubmission = saved.submission;
+        webhookData = null;
       }
     }
 
     // Save submission (friendId null if not resolved — avoids FK constraint)
-    const submission = await createFormSubmission(c.env.DB, {
-      formId,
-      friendId: friendId || null,
-      data: JSON.stringify(submissionData),
-    });
+    const saved = existingSubmission
+      ? { submission: existingSubmission, created: false }
+      : await createFormSubmission(c.env.DB, {
+          formId,
+          friendId: friendId || null,
+          data: JSON.stringify(submissionData),
+          idempotencyKey,
+          trackedLinkId: effectiveTrackedLinkId,
+        });
+    const { submission, created } = saved;
+    if (!created) {
+      restorePersistedRequest(submission);
+      if (Object.prototype.hasOwnProperty.call(submissionData, '_webhookResult')) {
+        return respondToWebhookRejection(submission, false, submissionData._webhookResult);
+      }
+      webhookData = null;
+    }
+
+    // A replay normally returns the first persisted result without repeating
+    // side effects. If the durable confirmation/coupon delivery did not finish,
+    // the replay resumes only that delivery with the same LINE retry key.
+    const shouldResumeDelivery = Boolean(
+      !created
+      && friendId
+      && submission.delivery_status !== 'sent'
+      && submission.delivery_status !== 'not_required',
+    );
+    if (!created && !shouldResumeDelivery) {
+      return c.json({
+        success: true,
+        data: { ...serializeSubmission(submission), idempotentReplay: true },
+      }, 200);
+    }
 
     // Side effects (best-effort, don't fail the request)
     if (friendId) {
@@ -527,7 +645,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
       // Resolve reward template per-campaign.
       //
       // Priority:
-      //   1. body.trackedLinkId (= ?ref= from /r/:ref → LIFF → form). This lets
+      //   1. persisted trackedLinkId (= ?ref= from /r/:ref → LIFF → form). This lets
       //      X Harness campaign settings drive the reward, even for friends who
       //      were originally added via a different campaign.
       //   2. Fallback to friends.first_tracked_link_id (first-touch attribution)
@@ -547,7 +665,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
           db,
           {
             friendId,
-            requestedTrackedLinkId: body.trackedLinkId ?? null,
+            requestedTrackedLinkId: effectiveTrackedLinkId,
           },
           { getFriendById, getTrackedLinkById, getMessageTemplateById },
         );
@@ -555,103 +673,113 @@ forms.post('/api/forms/:id/submit', async (c) => {
 
       const sideEffects: Promise<unknown>[] = [];
 
-      sideEffects.push(
-        notifyFormSubmissionRecipients(db, c.env.LINE_CHANNEL_ACCESS_TOKEN, {
-          formName: form.name,
-          formFields: fields,
-          friendId,
-          submissionData,
-        }),
-      );
-
-      // Save response data to friend's metadata
-      if (form.save_to_metadata) {
+      // These side effects run only for the winning insert. A network replay
+      // must not notify staff or re-enrol/re-tag the same person.
+      if (created) {
         sideEffects.push(
-          (async () => {
-            const friend = await getFriendById(db, friendId!);
-            if (!friend) return;
-            const existing = JSON.parse(friend.metadata || '{}') as Record<string, unknown>;
-            const merged = { ...existing, ...submissionData };
-            await db
-              .prepare(`UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?`)
-              .bind(JSON.stringify(merged), now, friendId)
-              .run();
-          })(),
+          notifyFormSubmissionRecipients(db, c.env.LINE_CHANNEL_ACCESS_TOKEN, {
+            formName: form.name,
+            formFields: fields,
+            friendId,
+            submissionData,
+          }),
         );
-      }
 
-      // Add tag
-      if (form.on_submit_tag_id) {
-        sideEffects.push(addTagToFriend(db, friendId, form.on_submit_tag_id));
-      }
+        // Save response data to friend's metadata
+        if (form.save_to_metadata) {
+          sideEffects.push(
+            (async () => {
+              const friend = await getFriendById(db, friendId!);
+              if (!friend) return;
+              const existing = JSON.parse(friend.metadata || '{}') as Record<string, unknown>;
+              const merged = { ...existing, ...submissionData };
+              await db
+                .prepare(`UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?`)
+                .bind(JSON.stringify(merged), now, friendId)
+                .run();
+            })(),
+          );
+        }
 
-      // Enroll in scenario
-      if (form.on_submit_scenario_id) {
-        sideEffects.push(enrollFriendInScenario(db, friendId, form.on_submit_scenario_id));
-      }
+        // Add tag
+        if (form.on_submit_tag_id) {
+          sideEffects.push(addTagToFriend(db, friendId, form.on_submit_tag_id));
+        }
 
-      // If webhook returned a join_url (e.g. Meet Harness), send a Flex button to the user
-      if (webhookData?.join_url) {
-        sideEffects.push(
-          (async () => {
-            const friend = await getFriendById(db, friendId!);
-            if (!friend?.line_user_id) return;
-            const { LineClient } = await import('@line-crm/line-sdk');
-            let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
-            if ((friend as unknown as Record<string, unknown>).line_account_id) {
-              const { getLineAccountById } = await import('@line-crm/db');
-              const account = await getLineAccountById(db, (friend as unknown as Record<string, unknown>).line_account_id as string);
-              if (account) accessToken = account.channel_access_token;
-            }
-            const lineClient = new LineClient(accessToken);
-            const joinUrl = String(webhookData!.join_url);
-            const meetFlex = {
-              type: 'bubble',
-              header: {
-                type: 'box', layout: 'vertical',
-                contents: [
-                  { type: 'text', text: 'ヒアリングの準備ができました', size: 'md', weight: 'bold', color: '#1e293b' },
+        // Enroll in scenario
+        if (form.on_submit_scenario_id) {
+          sideEffects.push(enrollFriendInScenario(db, friendId, form.on_submit_scenario_id));
+        }
+
+        // If webhook returned a join_url (e.g. Meet Harness), send a Flex button to the user
+        if (webhookData?.join_url) {
+          sideEffects.push(
+            (async () => {
+              const friend = await getFriendById(db, friendId!);
+              if (!friend?.line_user_id) return;
+              const { LineClient } = await import('@line-crm/line-sdk');
+              let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+              if ((friend as unknown as Record<string, unknown>).line_account_id) {
+                const { getLineAccountById } = await import('@line-crm/db');
+                const account = await getLineAccountById(db, (friend as unknown as Record<string, unknown>).line_account_id as string);
+                if (account) accessToken = account.channel_access_token;
+              }
+              const lineClient = new LineClient(accessToken);
+              const joinUrl = String(webhookData!.join_url);
+              const meetFlex = {
+                type: 'bubble',
+                header: {
+                  type: 'box', layout: 'vertical',
+                  contents: [
+                    { type: 'text', text: 'ヒアリングの準備ができました', size: 'md', weight: 'bold', color: '#1e293b' },
+                  ],
+                  paddingAll: '20px', backgroundColor: '#f0f9ff',
+                },
+                body: {
+                  type: 'box', layout: 'vertical',
+                  contents: [
+                    { type: 'text', text: 'アンケートありがとうございます。続けて短いヒアリングにご協力ください。', size: 'sm', color: '#475569', wrap: true },
+                  ],
+                  paddingAll: '20px',
+                },
+                footer: {
+                  type: 'box', layout: 'vertical',
+                  contents: [
+                    {
+                      type: 'button', style: 'primary', color: '#4CAF50',
+                      action: { type: 'uri', label: 'ヒアリングを始める', uri: joinUrl },
+                    },
+                  ],
+                  paddingAll: '16px',
+                },
+              };
+              await pushMessageWithRetry(
+                lineClient,
+                friend.line_user_id,
+                [
+                  { type: 'flex', altText: 'ヒアリングの準備ができました', contents: meetFlex },
                 ],
-                paddingAll: '20px', backgroundColor: '#f0f9ff',
-              },
-              body: {
-                type: 'box', layout: 'vertical',
-                contents: [
-                  { type: 'text', text: 'アンケートありがとうございます。続けて短いヒアリングにご協力ください。', size: 'sm', color: '#475569', wrap: true },
-                ],
-                paddingAll: '20px',
-              },
-              footer: {
-                type: 'box', layout: 'vertical',
-                contents: [
-                  {
-                    type: 'button', style: 'primary', color: '#4CAF50',
-                    action: { type: 'uri', label: 'ヒアリングを始める', uri: joinUrl },
-                  },
-                ],
-                paddingAll: '16px',
-              },
-            };
-            await lineClient.pushMessage(friend.line_user_id, [
-              { type: 'flex', altText: 'ヒアリングの準備ができました', contents: meetFlex },
-            ]);
-            await db
-              .prepare(
-                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-                 VALUES (?, ?, 'outgoing', 'flex', ?, NULL, NULL, 'auto_reply', ?)`,
-              )
-              .bind(crypto.randomUUID(), friend.id, JSON.stringify(meetFlex), jstNow())
-              .run();
-          })(),
-        );
+                crypto.randomUUID(),
+              );
+              await db
+                .prepare(
+                  `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
+                   VALUES (?, ?, 'outgoing', 'flex', ?, NULL, NULL, 'auto_reply', ?)`,
+                )
+                .bind(crypto.randomUUID(), friend.id, JSON.stringify(meetFlex), jstNow())
+                .run();
+            })(),
+          );
+        }
       }
 
-      // Send confirmation message with submitted data back to user
-      sideEffects.push(
-        (async () => {
+      // Confirmation/coupon delivery is durable. It runs for a new response or
+      // resumes a previous failed/pending response, always with the same LINE
+      // retry key so LINE cannot deliver the same reward twice.
+      const deliveryPromise = (async () => {
           console.log('Form reply: starting for friendId', friendId);
           const friend = await getFriendById(db, friendId!);
-          if (!friend?.line_user_id) { console.log('Form reply: no line_user_id'); return; }
+          if (!friend?.line_user_id) throw new Error('Recipient LINE account is unavailable');
           console.log('Form reply: sending to', friend.line_user_id);
           const { LineClient } = await import('@line-crm/line-sdk');
           // Resolve access token from friend's account (multi-account support)
@@ -727,7 +855,12 @@ forms.post('/api/forms/:id/submit', async (c) => {
             messages.push(buildMessage('flex', JSON.stringify(resultFlex)));
           }
 
-          await lineClient.pushMessage(friend.line_user_id, messages);
+          await pushMessageWithRetry(
+            lineClient,
+            friend.line_user_id,
+            messages,
+            submission.delivery_retry_key ?? crypto.randomUUID(),
+          );
 
           // Mirror every pushed message into messages_log so the dashboard chat
           // view stays consistent with what the user actually receives in LINE.
@@ -744,8 +877,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
               .bind(crypto.randomUUID(), friend.id, payload.messageType, payload.content, sentAt)
               .run();
           }
-        })(),
-      );
+        })();
 
       if (sideEffects.length > 0) {
         const results = await Promise.allSettled(sideEffects);
@@ -753,9 +885,26 @@ forms.post('/api/forms/:id/submit', async (c) => {
           if (r.status === 'rejected') console.error('Form side-effect failed:', r.reason);
         }
       }
+
+      try {
+        await deliveryPromise;
+        await markFormSubmissionDelivery(db, submission.id, 'sent');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await markFormSubmissionDelivery(db, submission.id, 'failed', message);
+        console.error('Form confirmation delivery failed:', error);
+        return c.json({
+          success: false,
+          error: '回答は保存されましたが、クーポンの送信を完了できませんでした。自動で再試行します。',
+          retryable: true,
+        }, 503);
+      }
     }
 
-    return c.json({ success: true, data: serializeSubmission(submission) }, 201);
+    return c.json({
+      success: true,
+      data: { ...serializeSubmission(submission), idempotentReplay: !created },
+    }, created ? 201 : 200);
   } catch (err) {
     console.error('POST /api/forms/:id/submit error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

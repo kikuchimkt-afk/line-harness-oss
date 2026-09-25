@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import Database from 'better-sqlite3';
-import { deleteForm, deleteFormSubmission, getFormsWithStats } from './forms.js';
+import { createFormSubmission, deleteForm, deleteFormSubmission, getFormsWithStats } from './forms.js';
 
 class SqliteD1Statement {
   private params: unknown[] = [];
@@ -30,13 +30,18 @@ class SqliteD1Statement {
 }
 
 function makeD1(db: Database.Database): D1Database {
+  let batchTail = Promise.resolve();
   return {
     prepare(sql: string) {
       return new SqliteD1Statement(db, sql);
     },
     async batch(statements: SqliteD1Statement[]) {
-      db.exec('BEGIN');
+      let release!: () => void;
+      const previous = batchTail;
+      batchTail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
       try {
+        db.exec('BEGIN');
         const results = [];
         for (const statement of statements) results.push(await statement.run());
         db.exec('COMMIT');
@@ -44,6 +49,8 @@ function makeD1(db: Database.Database): D1Database {
       } catch (error) {
         db.exec('ROLLBACK');
         throw error;
+      } finally {
+        release();
       }
     },
   } as unknown as D1Database;
@@ -64,8 +71,19 @@ function setupDb() {
       form_id TEXT NOT NULL,
       friend_id TEXT,
       data TEXT NOT NULL DEFAULT '{}',
+      idempotency_key TEXT,
+      tracked_link_id TEXT,
+      delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_status IN ('pending', 'sent', 'failed', 'not_required')),
+      delivery_retry_key TEXT,
+      delivery_error TEXT,
+      delivery_attempts INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
+
+    CREATE UNIQUE INDEX idx_form_submissions_idempotency
+      ON form_submissions (form_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
 
     CREATE TABLE form_opens (
       id TEXT PRIMARY KEY,
@@ -224,6 +242,34 @@ describe('deleteFormSubmission', () => {
     });
     expect(sqlite.prepare(`SELECT submit_count FROM forms WHERE id = ?`).get('form-1')).toEqual({
       submit_count: 2,
+    });
+  });
+});
+
+describe('createFormSubmission', () => {
+  test('accepts 20 concurrent unique requests and stores one row for a replay burst', async () => {
+    const { sqlite, d1 } = setupDb();
+
+    const unique = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      createFormSubmission(d1, {
+        formId: 'form-1',
+        data: JSON.stringify({ index }),
+        idempotencyKey: `event-request-${String(index).padStart(2, '0')}`,
+      })));
+    expect(unique.every((result) => result.created)).toBe(true);
+
+    const replayBurst = await Promise.all(Array.from({ length: 20 }, () =>
+      createFormSubmission(d1, {
+        formId: 'form-1',
+        data: JSON.stringify({ replay: true }),
+        idempotencyKey: 'same-request-12345678',
+      })));
+
+    expect(replayBurst.filter((result) => result.created)).toHaveLength(1);
+    expect(new Set(replayBurst.map((result) => result.submission.id)).size).toBe(1);
+    expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM form_submissions`).get()).toEqual({ count: 23 });
+    expect(sqlite.prepare(`SELECT submit_count FROM forms WHERE id = ?`).get('form-1')).toEqual({
+      submit_count: 23,
     });
   });
 });

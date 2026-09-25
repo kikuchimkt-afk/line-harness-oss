@@ -82,4 +82,23 @@ describe('bootstrap.sql', () => {
 
     expect(readSchemaObjects(bootstrapDb)).toEqual(readSchemaObjects(replayDb));
   });
+
+  it('deduplicates replayed form submissions by form and idempotency key', () => {
+    const db = new Database(':memory:');
+    db.exec(readFileSync(BOOTSTRAP_PATH, 'utf8'));
+    db.prepare(`INSERT INTO forms (id, name) VALUES (?, ?)`).run('form-1', 'Event survey');
+    const insert = db.prepare(`
+      INSERT INTO form_submissions
+        (id, form_id, friend_id, data, idempotency_key, created_at)
+      VALUES (?, ?, NULL, '{}', ?, datetime('now'))
+      ON CONFLICT(form_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+    `);
+
+    const first = insert.run('submission-1', 'form-1', 'request-12345678');
+    const replay = insert.run('submission-2', 'form-1', 'request-12345678');
+
+    expect(first.changes).toBe(1);
+    expect(replay.changes).toBe(0);
+    expect(db.prepare(`SELECT COUNT(*) AS count FROM form_submissions`).get()).toEqual({ count: 1 });
+  });
 });

@@ -23,6 +23,7 @@ import {
 import type { EntryRoute, Friend } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage, expandVariables, messageToLogPayload } from '../services/step-delivery.js';
+import { runWebhookEvents } from '../services/webhook-event-runner.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
@@ -416,15 +417,13 @@ webhook.post('/webhook', async (c) => {
   const lineClient = new LineClient(channelAccessToken);
 
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
-  const processingPromise = (async () => {
-    for (const event of body.events) {
-      try {
-        await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env.LIFF_URL, c.env.IMAGES);
-      } catch (err) {
-        console.error('Error handling webhook event:', err);
-      }
+  const processingPromise = runWebhookEvents(body.events, async (event) => {
+    try {
+      await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env.LIFF_URL, c.env.IMAGES);
+    } catch (err) {
+      console.error('Error handling webhook event:', err);
     }
-  })();
+  });
 
   c.executionCtx.waitUntil(processingPromise);
 

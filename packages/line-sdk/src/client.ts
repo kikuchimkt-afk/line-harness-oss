@@ -31,6 +31,11 @@ export class LineClient {
     method: string,
     path: string,
     body?: unknown,
+    requestOptions?: {
+      headers?: Record<string, string>;
+      acceptRetryConflict?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<{ data: unknown; headers: Headers }> {
     const url = `${LINE_API_BASE}${path}`;
 
@@ -39,7 +44,9 @@ export class LineClient {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.channelAccessToken}`,
+        ...requestOptions?.headers,
       },
+      signal: requestOptions?.signal,
     };
 
     if (method !== 'GET' && method !== 'DELETE' && body !== undefined) {
@@ -48,7 +55,8 @@ export class LineClient {
 
     const res = await fetch(url, options);
 
-    if (!res.ok) {
+    const acceptedRetryConflict = res.status === 409 && requestOptions?.acceptRetryConflict;
+    if (!res.ok && !acceptedRetryConflict) {
       const text = await res.text().catch(() => '');
       throw new Error(
         `LINE API error: ${res.status} ${res.statusText} — ${text}`,
@@ -82,13 +90,20 @@ export class LineClient {
   async pushMessage(
     to: string,
     messages: Message[],
-    options?: { notificationDisabled?: boolean },
+    options?: { notificationDisabled?: boolean; retryKey?: string; signal?: AbortSignal },
   ): Promise<unknown> {
     const body: PushMessageRequest = { to, messages: prepareMessagesForLine(messages) };
     if (options?.notificationDisabled !== undefined) {
       body.notificationDisabled = options.notificationDisabled;
     }
-    const { data } = await this.request('POST', '/v2/bot/message/push', body);
+    const retryKey = options?.retryKey?.trim();
+    const { data } = await this.request('POST', '/v2/bot/message/push', body, retryKey ? {
+      headers: { 'X-Line-Retry-Key': retryKey },
+      // LINE returns 409 when this retry key was already accepted. That is a
+      // successful idempotent replay, not a delivery failure.
+      acceptRetryConflict: true,
+      signal: options?.signal,
+    } : options?.signal ? { signal: options.signal } : undefined);
     return data;
   }
 
