@@ -651,6 +651,12 @@ function OverviewTab({
           <option value="2">2 回まで</option>
           <option value="3">3 回まで</option>
           <option value="5">5 回まで</option>
+          {draft.max_bookings_per_friend != null &&
+            ![1, 2, 3, 5].includes(draft.max_bookings_per_friend) && (
+              <option value={draft.max_bookings_per_friend}>
+                {draft.max_bookings_per_friend} 回まで
+              </option>
+            )}
         </select>
       </div>
 
