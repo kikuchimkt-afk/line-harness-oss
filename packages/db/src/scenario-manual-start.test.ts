@@ -1,8 +1,10 @@
 import Database from 'better-sqlite3';
 import { describe, expect, test } from 'vitest';
 import {
+  claimFriendScenarioForDelivery,
   getManualScenarioStartState,
   startFriendScenarioFromStep,
+  updateFriendScenarioSchedule,
 } from './scenarios.js';
 
 class SqliteD1Statement {
@@ -283,6 +285,180 @@ describe('startFriendScenarioFromStep', () => {
     });
     expect(result).toEqual({ ok: false, reason: 'step_not_found' });
     expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM friend_scenarios`).get()).toEqual({ count: 0 });
+    sqlite.close();
+  });
+});
+
+describe('updateFriendScenarioSchedule', () => {
+  test('requires confirmation for a sent step, then updates sparse position with a single-use CAS token', async () => {
+    const { sqlite, d1 } = setupDb();
+    insertScenario(sqlite);
+    sqlite.prepare(
+      `INSERT INTO friend_scenarios VALUES
+       ('run-1', 'friend-1', 'scenario-1', 10, 'active', ?, ?, ?)`,
+    ).run(
+      '2026-09-28T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+    );
+    sqlite.prepare(`INSERT INTO messages_log VALUES ('log-30', 'friend-1', 'outgoing', 'step-30')`).run();
+    const before = await getManualScenarioStartState(d1, 'scenario-1', 'friend-1');
+    const baseInput = {
+      enrollmentId: 'run-1',
+      friendId: 'friend-1',
+      scenarioId: 'scenario-1',
+      stepId: 'step-30',
+      nextDeliveryAt: '2026-10-10T15:45:00.000+09:00',
+      expectedStateVersion: before.state_version,
+      now: new Date('2026-09-29T00:00:00.000Z'),
+    };
+
+    await expect(updateFriendScenarioSchedule(d1, {
+      ...baseInput,
+      confirmPreviouslySent: false,
+    })).resolves.toEqual({ ok: false, reason: 'previously_sent_confirmation_required' });
+
+    const result = await updateFriendScenarioSchedule(d1, {
+      ...baseInput,
+      confirmPreviouslySent: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.enrollment.current_step_order).toBe(10);
+    expect(result.enrollment.next_delivery_at).toBe('2026-10-10T15:45:00.000+09:00');
+    expect(result.enrollment.updated_at).toBe('2026-09-29T09:00:00.001+09:00');
+    expect(result.next_step.id).toBe('step-30');
+    expect(result.state_version).not.toBe(before.state_version);
+    expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM messages_log`).get()).toEqual({ count: 1 });
+
+    const repeated = await updateFriendScenarioSchedule(d1, {
+      ...baseInput,
+      expectedStateVersion: result.state_version,
+      confirmPreviouslySent: true,
+    });
+    expect(repeated.ok).toBe(true);
+    if (!repeated.ok) throw new Error(repeated.reason);
+    expect(repeated.enrollment.updated_at).toBe('2026-09-29T09:00:00.002+09:00');
+    expect(repeated.state_version).not.toBe(result.state_version);
+    expect(repeated.state_version).not.toBe(before.state_version);
+
+    await expect(updateFriendScenarioSchedule(d1, {
+      ...baseInput,
+      stepId: 'step-50',
+      confirmPreviouslySent: false,
+    })).resolves.toEqual({ ok: false, reason: 'state_changed' });
+    await expect(updateFriendScenarioSchedule(d1, {
+      ...baseInput,
+      stepId: 'step-50',
+      expectedStateVersion: result.state_version,
+      confirmPreviouslySent: false,
+    })).resolves.toEqual({ ok: false, reason: 'state_changed' });
+    sqlite.close();
+  });
+
+  test.each([
+    ['paused', 'enrollment_not_active'],
+    ['completed', 'enrollment_mismatch'],
+    ['delivering', 'delivery_in_progress'],
+  ] as const)('rejects a %s run without mutation', async (status, reason) => {
+    const { sqlite, d1 } = setupDb();
+    insertScenario(sqlite);
+    sqlite.prepare(
+      `INSERT INTO friend_scenarios VALUES
+       ('run-1', 'friend-1', 'scenario-1', 10, ?, ?, ?, ?)`,
+    ).run(
+      status,
+      '2026-09-28T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+    );
+    const state = await getManualScenarioStartState(d1, 'scenario-1', 'friend-1');
+    const result = await updateFriendScenarioSchedule(d1, {
+      enrollmentId: 'run-1',
+      friendId: 'friend-1',
+      scenarioId: 'scenario-1',
+      stepId: 'step-30',
+      nextDeliveryAt: '2026-10-10T15:45:00.000+09:00',
+      expectedStateVersion: state.state_version,
+      confirmPreviouslySent: false,
+      now: new Date('2026-09-29T00:00:00.000Z'),
+    });
+    expect(result).toEqual({ ok: false, reason });
+    expect(sqlite.prepare(`SELECT status, next_delivery_at FROM friend_scenarios`).get())
+      .toEqual({ status, next_delivery_at: '2026-09-29T09:00:00.000+09:00' });
+    sqlite.close();
+  });
+
+  test('rejects an enrollment id from a different run without mutation', async () => {
+    const { sqlite, d1 } = setupDb();
+    insertScenario(sqlite);
+    sqlite.prepare(
+      `INSERT INTO friend_scenarios VALUES
+       ('run-1', 'friend-1', 'scenario-1', 10, 'active', ?, ?, ?)`,
+    ).run(
+      '2026-09-28T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+      '2026-09-29T08:59:00.000+09:00',
+    );
+    const state = await getManualScenarioStartState(d1, 'scenario-1', 'friend-1');
+
+    await expect(updateFriendScenarioSchedule(d1, {
+      enrollmentId: 'another-run',
+      friendId: 'friend-1',
+      scenarioId: 'scenario-1',
+      stepId: 'step-30',
+      nextDeliveryAt: '2026-10-10T15:45:00.000+09:00',
+      expectedStateVersion: state.state_version,
+      confirmPreviouslySent: false,
+      now: new Date('2026-09-29T00:00:00.000Z'),
+    })).resolves.toEqual({ ok: false, reason: 'enrollment_mismatch' });
+    expect(sqlite.prepare(`SELECT current_step_order, next_delivery_at, updated_at FROM friend_scenarios`).get())
+      .toEqual({
+        current_step_order: 10,
+        next_delivery_at: '2026-09-29T09:00:00.000+09:00',
+        updated_at: '2026-09-29T08:59:00.000+09:00',
+      });
+    sqlite.close();
+  });
+});
+
+describe('claimFriendScenarioForDelivery schedule CAS', () => {
+  test('a Cron snapshot cannot claim after an operator changed only the delivery time', async () => {
+    const { sqlite, d1 } = setupDb();
+    insertScenario(sqlite);
+    sqlite.prepare(
+      `INSERT INTO friend_scenarios VALUES
+       ('run-1', 'friend-1', 'scenario-1', 10, 'active', ?, ?, ?)`,
+    ).run(
+      '2026-09-28T09:00:00.000+09:00',
+      '2026-09-29T09:00:00.000+09:00',
+      '2026-09-29T08:59:00.000+09:00',
+    );
+    const staleNext = '2026-09-29T09:00:00.000+09:00';
+    const staleUpdated = '2026-09-29T08:59:00.000+09:00';
+    sqlite.prepare(
+      `UPDATE friend_scenarios SET next_delivery_at = ?, updated_at = ? WHERE id = 'run-1'`,
+    ).run('2026-10-10T15:45:00.000+09:00', '2026-09-29T09:01:00.000+09:00');
+
+    await expect(claimFriendScenarioForDelivery(
+      d1,
+      'run-1',
+      10,
+      staleNext,
+      staleUpdated,
+    )).resolves.toBe(false);
+    expect(sqlite.prepare(`SELECT status FROM friend_scenarios WHERE id = 'run-1'`).get())
+      .toEqual({ status: 'active' });
+
+    await expect(claimFriendScenarioForDelivery(
+      d1,
+      'run-1',
+      10,
+      '2026-10-10T15:45:00.000+09:00',
+      '2026-09-29T09:01:00.000+09:00',
+    )).resolves.toBe(true);
+    expect(sqlite.prepare(`SELECT status FROM friend_scenarios WHERE id = 'run-1'`).get())
+      .toEqual({ status: 'delivering' });
     sqlite.close();
   });
 });
