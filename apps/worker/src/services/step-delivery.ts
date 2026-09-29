@@ -165,12 +165,20 @@ async function processSingleDelivery(
     status: string;
     next_delivery_at: string | null;
     started_at: string;
+    updated_at: string;
   },
   workerUrl?: string,
   reservation?: IndividualNotificationReservation,
 ): Promise<boolean> {
   // Optimistic lock: claim this delivery (prevents duplicate sends from parallel workers)
-  const claimed = await claimFriendScenarioForDelivery(db, fs.id, fs.current_step_order);
+  if (!fs.next_delivery_at) return false;
+  const claimed = await claimFriendScenarioForDelivery(
+    db,
+    fs.id,
+    fs.current_step_order,
+    fs.next_delivery_at,
+    fs.updated_at,
+  );
   if (!claimed) return false;
 
   const friend = await getFriendById(db, fs.friend_id);

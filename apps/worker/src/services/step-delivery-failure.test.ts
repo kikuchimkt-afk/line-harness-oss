@@ -40,6 +40,7 @@ describe('scenario delivery failure recovery', () => {
         status: 'active',
         next_delivery_at: '2026-09-16T17:59:00.000+09:00',
         started_at: '2026-09-16T17:50:00.000+09:00',
+        updated_at: '2026-09-16T17:58:00.000+09:00',
       },
     ]);
     dbFns.claimFriendScenarioForDelivery.mockResolvedValue(true);
@@ -89,6 +90,13 @@ describe('scenario delivery failure recovery', () => {
 
     await processStepDeliveries(db, lineClient as never);
 
+    expect(dbFns.claimFriendScenarioForDelivery).toHaveBeenCalledWith(
+      db,
+      'fs-1',
+      -1,
+      '2026-09-16T17:59:00.000+09:00',
+      '2026-09-16T17:58:00.000+09:00',
+    );
     expect(lineClient.pushMessage).toHaveBeenCalledTimes(1);
     const requeue = updates.find(({ sql }) => sql.includes("SET status = 'active'"));
     expect(requeue).toBeDefined();
@@ -102,5 +110,35 @@ describe('scenario delivery failure recovery', () => {
     ]);
     expect(dbFns.advanceFriendScenario).not.toHaveBeenCalled();
     expect(dbFns.completeFriendScenario).not.toHaveBeenCalled();
+  });
+
+  it('does not send when a stale Cron snapshot loses the schedule claim', async () => {
+    dbFns.getFriendScenariosDueForDelivery.mockResolvedValue([
+      {
+        id: 'fs-1',
+        friend_id: 'friend-1',
+        scenario_id: 'scenario-1',
+        current_step_order: 10,
+        status: 'active',
+        next_delivery_at: '2026-09-16T17:59:00.000+09:00',
+        started_at: '2026-09-16T17:50:00.000+09:00',
+        updated_at: '2026-09-16T17:58:00.000+09:00',
+      },
+    ]);
+    dbFns.claimFriendScenarioForDelivery.mockResolvedValue(false);
+    const db = {} as D1Database;
+    const lineClient = { pushMessage: vi.fn() };
+
+    await processStepDeliveries(db, lineClient as never);
+
+    expect(dbFns.claimFriendScenarioForDelivery).toHaveBeenCalledWith(
+      db,
+      'fs-1',
+      10,
+      '2026-09-16T17:59:00.000+09:00',
+      '2026-09-16T17:58:00.000+09:00',
+    );
+    expect(dbFns.getFriendById).not.toHaveBeenCalled();
+    expect(lineClient.pushMessage).not.toHaveBeenCalled();
   });
 });

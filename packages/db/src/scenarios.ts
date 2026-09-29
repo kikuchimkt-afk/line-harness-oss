@@ -79,6 +79,24 @@ export type ManualScenarioStartResult =
     }
   | { ok: false; reason: 'step_not_found' | 'state_changed' | 'delivery_in_progress' };
 
+export type ScenarioScheduleUpdateResult =
+  | {
+      ok: true;
+      enrollment: FriendScenario;
+      next_step: ScenarioStep;
+      state_version: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'enrollment_mismatch'
+        | 'enrollment_not_active'
+        | 'delivery_in_progress'
+        | 'step_not_found'
+        | 'previously_sent_confirmation_required'
+        | 'state_changed';
+    };
+
 // ============================================================
 // Scenario CRUD
 // ============================================================
@@ -479,6 +497,20 @@ function manualStartStateVersion(enrollment: FriendScenario | null): string {
   ].map(encodeURIComponent).join('.');
 }
 
+function nextScenarioStateTimestamp(
+  currentUpdatedAt: string | undefined,
+  nowInstant: Date,
+): string {
+  const currentMs = currentUpdatedAt ? new Date(currentUpdatedAt).getTime() : Number.NaN;
+  // A state token must never cycle back to an earlier value. This also keeps a
+  // stale Cron snapshot from becoming claimable again after two edits that
+  // happen inside the same clock millisecond.
+  const nextMs = Number.isNaN(currentMs)
+    ? nowInstant.getTime()
+    : Math.max(nowInstant.getTime(), currentMs + 1);
+  return toJstString(new Date(nextMs));
+}
+
 /**
  * Read the operator-facing state used before manually positioning a friend in
  * a scenario. Message history is deliberately independent from the active run:
@@ -589,12 +621,7 @@ export async function startFriendScenarioFromStep(
 
   const nowInstant = input.now ?? new Date();
   const nowTimestamp = toJstString(nowInstant);
-  // A confirmation token must be single-use even when an operator submits in
-  // the exact millisecond already stored on the run and chooses an identical
-  // position/time. Force a distinct updated_at value for that edge case.
-  const updatedTimestamp = state.enrollment?.updated_at === nowTimestamp
-    ? toJstString(new Date(nowInstant.getTime() + 1))
-    : nowTimestamp;
+  const updatedTimestamp = nextScenarioStateTimestamp(state.enrollment?.updated_at, nowInstant);
   const nowJstClock = new Date(nowInstant.getTime() + 9 * 60 * 60_000);
   const startedAt = state.enrollment?.started_at ?? nowTimestamp;
   const enrolledAtParsed = new Date(startedAt);
@@ -702,6 +729,113 @@ export async function startFriendScenarioFromStep(
   };
 }
 
+export interface UpdateFriendScenarioScheduleInput {
+  enrollmentId: string;
+  friendId: string;
+  scenarioId: string;
+  stepId: string;
+  nextDeliveryAt: string;
+  expectedStateVersion: string;
+  confirmPreviouslySent: boolean;
+  /** Test seam. Production callers omit this. */
+  now?: Date;
+}
+
+/**
+ * Atomically replace the next step and delivery time of one existing active
+ * run. This helper never creates, resumes, pauses, or sends anything.
+ */
+export async function updateFriendScenarioSchedule(
+  db: D1Database,
+  input: UpdateFriendScenarioScheduleInput,
+): Promise<ScenarioScheduleUpdateResult> {
+  const state = await getManualScenarioStartState(db, input.scenarioId, input.friendId);
+  const current = state.enrollment;
+  if (!current || current.id !== input.enrollmentId) {
+    return { ok: false, reason: 'enrollment_mismatch' };
+  }
+  if (current.status === 'delivering') {
+    return { ok: false, reason: 'delivery_in_progress' };
+  }
+  if (current.status !== 'active') {
+    return { ok: false, reason: 'enrollment_not_active' };
+  }
+  if (state.state_version !== input.expectedStateVersion) {
+    return { ok: false, reason: 'state_changed' };
+  }
+
+  const step = await db
+    .prepare(`SELECT * FROM scenario_steps WHERE id = ? AND scenario_id = ?`)
+    .bind(input.stepId, input.scenarioId)
+    .first<ScenarioStep>();
+  if (!step) return { ok: false, reason: 'step_not_found' };
+  if (state.sent_step_orders.includes(step.step_order) && !input.confirmPreviouslySent) {
+    return { ok: false, reason: 'previously_sent_confirmation_required' };
+  }
+
+  const previousRow = await db
+    .prepare(
+      `SELECT MAX(step_order) AS previous_step_order
+       FROM scenario_steps
+       WHERE scenario_id = ? AND step_order < ?`,
+    )
+    .bind(input.scenarioId, step.step_order)
+    .first<{ previous_step_order: number | null }>();
+  const previousStepOrder = previousRow?.previous_step_order ?? step.step_order - 1;
+
+  const nowInstant = input.now ?? new Date();
+  const updatedTimestamp = nextScenarioStateTimestamp(current.updated_at, nowInstant);
+  const update = await db
+    .prepare(
+      `UPDATE friend_scenarios
+       SET current_step_order = ?, next_delivery_at = ?, updated_at = ?
+       WHERE id = ?
+         AND scenario_id = ?
+         AND friend_id = ?
+         AND status = 'active'
+         AND current_step_order = ?
+         AND started_at = ?
+         AND next_delivery_at IS ?
+         AND updated_at = ?`,
+    )
+    .bind(
+      previousStepOrder,
+      input.nextDeliveryAt,
+      updatedTimestamp,
+      current.id,
+      input.scenarioId,
+      input.friendId,
+      current.current_step_order,
+      current.started_at,
+      current.next_delivery_at,
+      current.updated_at,
+    )
+    .run();
+  if (!update.meta.changes) {
+    const latest = await db
+      .prepare(`SELECT status FROM friend_scenarios WHERE id = ?`)
+      .bind(current.id)
+      .first<{ status: FriendScenarioStatus }>();
+    return {
+      ok: false,
+      reason: latest?.status === 'delivering' ? 'delivery_in_progress' : 'state_changed',
+    };
+  }
+
+  const enrollment: FriendScenario = {
+    ...current,
+    current_step_order: previousStepOrder,
+    next_delivery_at: input.nextDeliveryAt,
+    updated_at: updatedTimestamp,
+  };
+  return {
+    ok: true,
+    enrollment,
+    next_step: step,
+    state_version: manualStartStateVersion(enrollment),
+  };
+}
+
 export async function getFriendScenariosDueForDelivery(
   db: D1Database,
   now: string,
@@ -725,22 +859,29 @@ export async function getFriendScenariosDueForDelivery(
 
 /**
  * Optimistic lock: claim a friend_scenario for delivery.
- * Only succeeds if status='active' and current_step_order matches.
+ * Only succeeds if the status, step, scheduled time, and update token still
+ * match the due-row snapshot read by this Cron invocation.
  * Returns true if claimed, false if another worker already processed it.
  */
 export async function claimFriendScenarioForDelivery(
   db: D1Database,
   id: string,
   expectedStepOrder: number,
+  expectedNextDeliveryAt: string,
+  expectedUpdatedAt: string,
 ): Promise<boolean> {
   const now = jstNow();
   const result = await db
     .prepare(
       `UPDATE friend_scenarios
        SET status = 'delivering', updated_at = ?
-       WHERE id = ? AND status = 'active' AND current_step_order = ?`,
+       WHERE id = ?
+         AND status = 'active'
+         AND current_step_order = ?
+         AND next_delivery_at IS ?
+         AND updated_at = ?`,
     )
-    .bind(now, id, expectedStepOrder)
+    .bind(now, id, expectedStepOrder, expectedNextDeliveryAt, expectedUpdatedAt)
     .run();
   return (result.meta.changes ?? 0) > 0;
 }

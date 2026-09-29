@@ -13,8 +13,10 @@ const dbMocks = {
   enrollFriendInScenario: vi.fn(),
   getManualScenarioStartState: vi.fn(),
   startFriendScenarioFromStep: vi.fn(),
+  updateFriendScenarioSchedule: vi.fn(),
   getFriendById: vi.fn(),
   computeNextDeliveryAt: vi.fn(),
+  toJstString: vi.fn(),
   resolveStepContent: vi.fn(),
   getStaffAccountIds: vi.fn(),
   staffCanAccessLineAccount: vi.fn(),
@@ -121,6 +123,10 @@ beforeEach(() => {
   scenarioDeliveryStatusMocks.getScenarioDeliveryStatus.mockReset();
   dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
   dbMocks.getStaffAccountIds.mockResolvedValue([]);
+  dbMocks.toJstString.mockImplementation((date: Date) => {
+    const jst = new Date(date.getTime() + 9 * 60 * 60_000);
+    return jst.toISOString().slice(0, -1) + '+09:00';
+  });
 });
 
 describe('GET /api/scenarios/:id/delivery-status', () => {
@@ -586,5 +592,114 @@ describe('legacy manual enroll eligibility', () => {
     expect(res.status).toBe(409);
     expect((await res.json() as { code: string }).code).toBe('SCENARIO_INACTIVE');
     expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /api/scenarios/:id/enrollments/:enrollmentId/schedule', () => {
+  const requestBody = {
+    friendId: 'friend-1',
+    stepId: 'step-30',
+    nextDeliveryAt: '2099-10-10T15:45:00+09:00',
+    expectedStateVersion: 'snapshot-1',
+    confirmPreviouslySent: false,
+  };
+
+  test('atomically updates an active run and returns camelCase state', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.updateFriendScenarioSchedule.mockResolvedValue({
+      ok: true,
+      enrollment: {
+        id: 'run-1',
+        friend_id: 'friend-1',
+        scenario_id: 'scenario-1',
+        current_step_order: 10,
+        status: 'active',
+        started_at: '2026-09-28T09:00:00.000+09:00',
+        next_delivery_at: '2099-10-10T15:45:00.000+09:00',
+        updated_at: '2026-09-29T09:00:00.000+09:00',
+      },
+      next_step: manualSteps[1],
+      state_version: 'snapshot-2',
+    });
+
+    const res = await setupApp(db).request(
+      '/api/scenarios/scenario-1/enrollments/run-1/schedule',
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(dbMocks.updateFriendScenarioSchedule).toHaveBeenCalledWith(db, {
+      enrollmentId: 'run-1',
+      scenarioId: 'scenario-1',
+      friendId: 'friend-1',
+      stepId: 'step-30',
+      nextDeliveryAt: '2099-10-10T15:45:00.000+09:00',
+      expectedStateVersion: 'snapshot-1',
+      confirmPreviouslySent: false,
+    });
+    const body = await res.json() as { data: Record<string, unknown> };
+    expect(body.data).toMatchObject({
+      stateVersion: 'snapshot-2',
+      enrollment: {
+        id: 'run-1',
+        currentStepOrder: 10,
+        nextDeliveryAt: '2099-10-10T15:45:00.000+09:00',
+      },
+      nextStep: { id: 'step-30', stepOrder: 30 },
+    });
+  });
+
+  test.each([
+    ['2026-09-29T15:45:00Z', 'UTC is not accepted'],
+    ['2020-01-01T15:45:00+09:00', 'past time is not accepted'],
+    ['2099-02-31T15:45:00+09:00', 'impossible date is not accepted'],
+  ])('rejects an invalid JST delivery time: %s (%s)', async (nextDeliveryAt) => {
+    const { db } = makeScenarioDb([]);
+    const res = await setupApp(db).request(
+      '/api/scenarios/scenario-1/enrollments/run-1/schedule',
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...requestBody, nextDeliveryAt }),
+      },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json() as { code: string }).code).toBe('INVALID_NEXT_DELIVERY_AT');
+    expect(dbMocks.updateFriendScenarioSchedule).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['previously_sent_confirmation_required', 'STEP_ALREADY_SENT_CONFIRM_REQUIRED'],
+    ['delivery_in_progress', 'DELIVERY_IN_PROGRESS'],
+    ['enrollment_not_active', 'ENROLLMENT_NOT_ACTIVE'],
+    ['enrollment_mismatch', 'ENROLLMENT_MISMATCH'],
+    ['state_changed', 'STATE_CHANGED'],
+  ] as const)('maps %s to a conflict response', async (reason, code) => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.updateFriendScenarioSchedule.mockResolvedValue({ ok: false, reason });
+
+    const res = await setupApp(db).request(
+      '/api/scenarios/scenario-1/enrollments/run-1/schedule',
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      },
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json() as { code: string }).code).toBe(code);
   });
 });
