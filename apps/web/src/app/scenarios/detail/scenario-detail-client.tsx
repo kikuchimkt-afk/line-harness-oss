@@ -608,7 +608,12 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
 
       <ScenarioDeliveryStatusPanel
         scenarioId={id}
+        scenarioName={scenario.name}
         scenarioIsActive={scenario.isActive}
+        lineAccountId={scenario.lineAccountId}
+        deliveryMode={scenario.deliveryMode}
+        steps={sortedSteps}
+        onEnrollmentChanged={reloadStats}
       />
 
       {/* Steps */}

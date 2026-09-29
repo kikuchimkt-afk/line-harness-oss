@@ -52,4 +52,41 @@ describe('scenario API', () => {
     const [url] = fetchMock.mock.calls.at(-1) ?? []
     expect(String(url)).toContain(`/delivery-status?limit=${expected}`)
   })
+
+  test('loads a friend state with encoded ids and no mutation', async () => {
+    const { api } = await import('./api')
+
+    await api.scenarios.manualStartState('scenario / one', 'friend / one')
+
+    const fetchMock = vi.mocked(fetch)
+    const [url, init] = fetchMock.mock.calls.at(-1) ?? []
+    expect(String(url)).toBe(
+      'https://worker.example.com/api/scenarios/scenario%20%2F%20one/manual-start-state/friend%20%2F%20one',
+    )
+    expect(init?.method).toBeUndefined()
+  })
+
+  test('posts the selected friend, step, timing and optimistic state version', async () => {
+    const { api } = await import('./api')
+
+    await api.scenarios.startFromStep('scenario / one', {
+      friendId: 'friend-1',
+      stepId: 'step-2',
+      deliveryTiming: 'next_cron',
+      expectedStateVersion: 'enrollment-1:1:2026-09-29',
+    })
+
+    const fetchMock = vi.mocked(fetch)
+    const [url, init] = fetchMock.mock.calls.at(-1) ?? []
+    expect(String(url)).toBe(
+      'https://worker.example.com/api/scenarios/scenario%20%2F%20one/start-from-step',
+    )
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      friendId: 'friend-1',
+      stepId: 'step-2',
+      deliveryTiming: 'next_cron',
+      expectedStateVersion: 'enrollment-1:1:2026-09-29',
+    })
+  })
 })

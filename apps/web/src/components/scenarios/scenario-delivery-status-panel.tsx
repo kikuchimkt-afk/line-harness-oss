@@ -2,8 +2,10 @@
 
 import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { DeliveryMode, ScenarioStep } from '@line-crm/shared'
 
 import { api } from '@/lib/api'
+import ScenarioManualStartModal from '@/components/scenarios/scenario-manual-start-modal'
 import type {
   ScenarioDeliveryStatus,
   ScenarioSentDelivery,
@@ -149,10 +151,20 @@ function SentRow({ item }: { item: ScenarioSentDelivery }) {
 
 export default function ScenarioDeliveryStatusPanel({
   scenarioId,
+  scenarioName,
   scenarioIsActive,
+  lineAccountId,
+  deliveryMode,
+  steps,
+  onEnrollmentChanged,
 }: {
   scenarioId: string
+  scenarioName: string
   scenarioIsActive: boolean
+  lineAccountId: string | null
+  deliveryMode: DeliveryMode | undefined
+  steps: ScenarioStep[]
+  onEnrollmentChanged?: () => void
 }) {
   const [activeTab, setActiveTab] = useState<DeliveryTab>('upcoming')
   const [query, setQuery] = useState('')
@@ -217,17 +229,31 @@ export default function ScenarioDeliveryStatusPanel({
             <p className="mt-1 text-[11px] text-gray-400">データ取得 {formatJstShort(data.generatedAt)} JST</p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => void load('refresh')}
-          disabled={loading || refreshing}
-          className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-2 self-start rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
-        >
-          <svg aria-hidden="true" viewBox="0 0 24 24" className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5" />
-          </svg>
-          {refreshing ? '更新中...' : '最新情報に更新'}
-        </button>
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <ScenarioManualStartModal
+            scenarioId={scenarioId}
+            scenarioName={scenarioName}
+            scenarioIsActive={scenarioIsActive}
+            lineAccountId={lineAccountId}
+            deliveryMode={deliveryMode}
+            steps={steps}
+            onChanged={() => {
+              void load('refresh')
+              onEnrollmentChanged?.()
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void load('refresh')}
+            disabled={loading || refreshing}
+            className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5" />
+            </svg>
+            {refreshing ? '更新中...' : '最新情報に更新'}
+          </button>
+        </div>
       </div>
 
       {loading ? (

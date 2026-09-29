@@ -35,12 +35,20 @@ import type {
   PoolAccount,
 } from '@line-crm/shared'
 import type { ScenarioDeliveryStatus } from './scenario-delivery-status'
+import type {
+  ScenarioManualStartState,
+  ScenarioStartFromStepResult,
+} from './scenario-manual-start'
 
 export type {
   ScenarioDeliveryStatus,
   ScenarioSentDelivery,
   ScenarioUpcomingDelivery,
 } from './scenario-delivery-status'
+export type {
+  ScenarioManualStartState,
+  ScenarioStartFromStepResult,
+} from './scenario-manual-start'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
@@ -367,6 +375,23 @@ export const api = {
         `/api/scenarios/${encodeURIComponent(id)}/delivery-status?limit=${normalizedLimit}`,
       )
     },
+    manualStartState: (id: string, friendId: string) =>
+      fetchApi<ApiResponse<ScenarioManualStartState>>(
+        `/api/scenarios/${encodeURIComponent(id)}/manual-start-state/${encodeURIComponent(friendId)}`,
+      ),
+    startFromStep: (
+      id: string,
+      data: {
+        friendId: string
+        stepId: string
+        deliveryTiming: 'configured' | 'next_cron'
+        expectedStateVersion: string
+      },
+    ) =>
+      fetchApi<ApiResponse<ScenarioStartFromStepResult>>(
+        `/api/scenarios/${encodeURIComponent(id)}/start-from-step`,
+        { method: 'POST', body: JSON.stringify(data) },
+      ),
   },
   broadcasts: {
     list: (params?: { accountId?: string }) => {
