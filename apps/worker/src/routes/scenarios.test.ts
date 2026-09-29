@@ -23,6 +23,11 @@ vi.mock('../services/scenario-stats.js', () => ({
   computeScenarioStats: vi.fn(),
 }));
 
+const scenarioDeliveryStatusMocks = {
+  getScenarioDeliveryStatus: vi.fn(),
+};
+vi.mock('../services/scenario-delivery-status.js', () => scenarioDeliveryStatusMocks);
+
 const { scenarios: scenariosModule } = await import('./scenarios.js');
 
 interface ScenarioRow {
@@ -68,6 +73,15 @@ function makeScenarioDb(rows: ScenarioRow[]) {
           }
           return { results: [] };
         },
+        async first<_T>() {
+          calls.push({ sql, binds: bound });
+          if (/SELECT line_account_id FROM scenarios WHERE id = \?/i.test(sql)) {
+            const [scenarioId] = bound as [string];
+            const row = rows.find((candidate) => candidate.id === scenarioId);
+            return (row ? { line_account_id: row.line_account_id } : null) as _T | null;
+          }
+          return null;
+        },
       };
       return stmt;
     },
@@ -102,8 +116,76 @@ const rowBase = {
 
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
+  scenarioDeliveryStatusMocks.getScenarioDeliveryStatus.mockReset();
   dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
   dbMocks.getStaffAccountIds.mockResolvedValue([]);
+});
+
+describe('GET /api/scenarios/:id/delivery-status', () => {
+  test('returns private non-cacheable recipient status without exposing raw LINE fields', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    scenarioDeliveryStatusMocks.getScenarioDeliveryStatus.mockResolvedValue({
+      generatedAt: '2026-09-29T09:00:00.000Z',
+      sentMessageTotal: 1,
+      sentDeliveryTotal: 1,
+      sentRecipientTotal: 1,
+      upcomingRecipientTotal: 1,
+      sentHasMore: false,
+      upcomingHasMore: false,
+      sent: [{
+        id: 'friend-1:step-1',
+        friendId: 'friend-1',
+        displayName: '徳島 花子',
+        pictureUrl: null,
+        stepOrder: 1,
+        sentAt: '2026-09-29T18:00:00.000+09:00',
+        messageType: 'text',
+        sendCount: 1,
+      }],
+      upcoming: [{
+        enrollmentId: 'enrollment-1',
+        friendId: 'friend-1',
+        displayName: '徳島 花子',
+        pictureUrl: null,
+        status: 'active',
+        startedAt: '2026-09-29T18:00:00.000+09:00',
+        nextDeliveryAt: '2026-09-30T18:30:00.000+09:00',
+        updatedAt: '2026-09-29T18:00:00.000+09:00',
+        nextStepOrder: 2,
+        messageType: 'text',
+      }],
+    });
+
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/delivery-status?limit=25');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(scenarioDeliveryStatusMocks.getScenarioDeliveryStatus)
+      .toHaveBeenCalledWith(db, 'scenario-1', '25');
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('line_user_id');
+    expect(serialized).not.toContain('metadata');
+    expect(serialized).not.toContain('messageContent');
+  });
+
+  test('keeps the account boundary and does not query recipient data when access is denied', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    dbMocks.staffCanAccessLineAccount.mockResolvedValue(false);
+
+    const res = await setupApp(db, 'staff').request('/api/scenarios/scenario-1/delivery-status');
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(scenarioDeliveryStatusMocks.getScenarioDeliveryStatus).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/scenarios?lineAccountId=X', () => {

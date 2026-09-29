@@ -13,6 +13,7 @@ import {
   computeNextDeliveryAt,
 } from '@line-crm/db';
 import { computeScenarioStats } from '../services/scenario-stats.js';
+import { getScenarioDeliveryStatus } from '../services/scenario-delivery-status.js';
 import { resolveStepContent } from '@line-crm/db';
 import type {
   Scenario as DbScenario,
@@ -792,6 +793,26 @@ scenarios.get('/api/scenarios/:id/stats', async (c) => {
     return c.json({ success: true, data: stats });
   } catch (err) {
     console.error('GET /api/scenarios/:id/stats error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// GET /api/scenarios/:id/delivery-status - successful sends + next scheduled recipients
+scenarios.get('/api/scenarios/:id/delivery-status', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  try {
+    const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
+
+    const status = await getScenarioDeliveryStatus(
+      c.env.DB,
+      scenarioId,
+      c.req.query('limit'),
+    );
+    return c.json({ success: true, data: status });
+  } catch (err) {
+    console.error('GET /api/scenarios/:id/delivery-status error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });

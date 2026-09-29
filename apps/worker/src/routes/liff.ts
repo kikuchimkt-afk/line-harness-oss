@@ -20,6 +20,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import { buildIntroMessage } from '../services/intro-message.js';
+import { finalizeImmediateScenarioDelivery } from '../services/immediate-scenario-progress.js';
 import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
@@ -933,6 +934,19 @@ liffRoutes.get('/auth/callback', async (c) => {
                     nowIso,
                   )
                   .run();
+
+                // The immediate send already succeeded and is now durable in
+                // messages_log. Advance before returning so cron does not see
+                // Step 1 as still due and send it again.
+                const deliveredAtJst = new Date(Date.now() + 9 * 60 * 60_000);
+                await finalizeImmediateScenarioDelivery(db, {
+                  enrollmentId: enrollment.id,
+                  deliveryMode: scenario.delivery_mode ?? 'relative',
+                  deliveredStep: firstStep,
+                  nextStep: steps[1] ?? null,
+                  enrolledAt: enrolledAtJst,
+                  deliveredAt: deliveredAtJst,
+                });
 
                 // 到達タグ付与 (push 後)
                 if (firstStep.on_reach_tag_id) {
