@@ -39,6 +39,7 @@ import type {
   ScenarioManualStartState,
   ScenarioStartFromStepResult,
 } from './scenario-manual-start'
+import type { ScenarioScheduleUpdateResult } from './scenario-schedule-edit'
 
 export type {
   ScenarioDeliveryStatus,
@@ -49,6 +50,7 @@ export type {
   ScenarioManualStartState,
   ScenarioStartFromStepResult,
 } from './scenario-manual-start'
+export type { ScenarioScheduleUpdateResult } from './scenario-schedule-edit'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
@@ -391,6 +393,21 @@ export const api = {
       fetchApi<ApiResponse<ScenarioStartFromStepResult>>(
         `/api/scenarios/${encodeURIComponent(id)}/start-from-step`,
         { method: 'POST', body: JSON.stringify(data) },
+      ),
+    updateDeliverySchedule: (
+      id: string,
+      enrollmentId: string,
+      data: {
+        friendId: string
+        stepId: string
+        nextDeliveryAt: string
+        expectedStateVersion: string
+        confirmPreviouslySent: boolean
+      },
+    ) =>
+      fetchApi<ApiResponse<ScenarioScheduleUpdateResult>>(
+        `/api/scenarios/${encodeURIComponent(id)}/enrollments/${encodeURIComponent(enrollmentId)}/schedule`,
+        { method: 'PATCH', body: JSON.stringify(data) },
       ),
   },
   broadcasts: {

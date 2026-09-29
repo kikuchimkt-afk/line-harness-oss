@@ -89,4 +89,30 @@ describe('scenario API', () => {
       expectedStateVersion: 'enrollment-1:1:2026-09-29',
     })
   })
+
+  test('patches one enrollment schedule with encoded ids and optimistic state', async () => {
+    const { api } = await import('./api')
+
+    await api.scenarios.updateDeliverySchedule('scenario / one', 'run / one', {
+      friendId: 'friend-1',
+      stepId: 'step-2',
+      nextDeliveryAt: '2026-10-01T18:32:00.000+09:00',
+      expectedStateVersion: 'run-1.active.1.snapshot',
+      confirmPreviouslySent: true,
+    })
+
+    const fetchMock = vi.mocked(fetch)
+    const [url, init] = fetchMock.mock.calls.at(-1) ?? []
+    expect(String(url)).toBe(
+      'https://worker.example.com/api/scenarios/scenario%20%2F%20one/enrollments/run%20%2F%20one/schedule',
+    )
+    expect(init?.method).toBe('PATCH')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      friendId: 'friend-1',
+      stepId: 'step-2',
+      nextDeliveryAt: '2026-10-01T18:32:00.000+09:00',
+      expectedStateVersion: 'run-1.active.1.snapshot',
+      confirmPreviouslySent: true,
+    })
+  })
 })

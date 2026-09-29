@@ -6,6 +6,7 @@ import type { DeliveryMode, ScenarioStep } from '@line-crm/shared'
 
 import { api } from '@/lib/api'
 import ScenarioManualStartModal from '@/components/scenarios/scenario-manual-start-modal'
+import ScenarioScheduleEditModal from '@/components/scenarios/scenario-schedule-edit-modal'
 import type {
   ScenarioDeliveryStatus,
   ScenarioSentDelivery,
@@ -70,10 +71,12 @@ function UpcomingRow({
   item,
   scenarioIsActive,
   generatedAt,
+  onEdit,
 }: {
   item: ScenarioUpcomingDelivery
   scenarioIsActive: boolean
   generatedAt: string
+  onEdit: (item: ScenarioUpcomingDelivery, trigger: HTMLButtonElement) => void
 }) {
   const state = upcomingStatePresentation({
     scenarioIsActive,
@@ -106,11 +109,24 @@ function UpcomingRow({
           ステップ {item.nextStepOrder} ・ {messageTypeLabel(item.messageType)}
         </p>
       </div>
-      <div className="sm:text-right">
+      <div className="flex items-center justify-between gap-3 sm:flex-col sm:items-end sm:text-right">
         <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${toneClass[state.tone]}`}>
           {state.label}
         </span>
-        <p className="mt-1 text-[11px] text-gray-400">状態更新 {formatJstShort(item.updatedAt)} JST</p>
+        <div>
+          <button
+            type="button"
+            aria-haspopup="dialog"
+            aria-label={`${displayName(item.displayName)}さんの配信予定を編集`}
+            onClick={(event) => onEdit(item, event.currentTarget)}
+            disabled={item.status === 'delivering' || !scenarioIsActive}
+            title={item.status === 'delivering' ? 'LINEへの配信処理完了後に編集できます' : undefined}
+            className="inline-flex min-h-[44px] items-center justify-center rounded-lg border border-pink-200 bg-white px-3 py-2 text-xs font-semibold text-pink-700 transition hover:bg-pink-50 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
+          >
+            {item.status === 'delivering' ? '処理後に編集' : '予定を編集'}
+          </button>
+          <p className="mt-1 text-[11px] text-gray-400">状態更新 {formatJstShort(item.updatedAt)} JST</p>
+        </div>
       </div>
     </li>
   )
@@ -172,7 +188,9 @@ export default function ScenarioDeliveryStatusPanel({
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
+  const [editingItem, setEditingItem] = useState<ScenarioUpcomingDelivery | null>(null)
   const requestSequence = useRef(0)
+  const editTrigger = useRef<HTMLButtonElement | null>(null)
 
   const load = useCallback(async (kind: 'initial' | 'refresh') => {
     const requestId = ++requestSequence.current
@@ -375,6 +393,10 @@ export default function ScenarioDeliveryStatusPanel({
                     item={item}
                     scenarioIsActive={scenarioIsActive}
                     generatedAt={data.generatedAt}
+                    onEdit={(target, trigger) => {
+                      editTrigger.current = trigger
+                      setEditingItem(target)
+                    }}
                   />
                 ))}
               </ul>
@@ -396,6 +418,21 @@ export default function ScenarioDeliveryStatusPanel({
               </p>
             )}
           </div>
+
+          <ScenarioScheduleEditModal
+            scenarioId={scenarioId}
+            scenarioName={scenarioName}
+            steps={steps}
+            item={editingItem}
+            onClose={() => {
+              setEditingItem(null)
+              window.setTimeout(() => editTrigger.current?.focus(), 0)
+            }}
+            onChanged={() => {
+              void load('refresh')
+              onEnrollmentChanged?.()
+            }}
+          />
         </>
       )}
     </section>
