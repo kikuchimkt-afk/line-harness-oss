@@ -11,6 +11,8 @@ const dbMocks = {
   updateScenarioStep: vi.fn(),
   deleteScenarioStep: vi.fn(),
   enrollFriendInScenario: vi.fn(),
+  getManualScenarioStartState: vi.fn(),
+  startFriendScenarioFromStep: vi.fn(),
   getFriendById: vi.fn(),
   computeNextDeliveryAt: vi.fn(),
   resolveStepContent: vi.fn(),
@@ -271,5 +273,318 @@ describe('GET /api/scenarios?lineAccountId=X', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { success: boolean; data: { id: string }[] };
     expect(body.data.map((d) => d.id)).toEqual(['s-acc1']);
+  });
+});
+
+const manualSteps = [
+  {
+    id: 'step-10',
+    scenario_id: 'scenario-1',
+    step_order: 10,
+    delay_minutes: 0,
+    offset_days: null,
+    offset_minutes: null,
+    delivery_time: null,
+    message_type: 'text',
+    message_content: 'first',
+    condition_type: null,
+    condition_value: null,
+    next_step_on_false: null,
+    template_id: null,
+    on_reach_tag_id: null,
+    created_at: '2026-09-01T00:00:00.000+09:00',
+  },
+  {
+    id: 'step-30',
+    scenario_id: 'scenario-1',
+    step_order: 30,
+    delay_minutes: 60,
+    offset_days: null,
+    offset_minutes: null,
+    delivery_time: null,
+    message_type: 'text',
+    message_content: 'second',
+    condition_type: null,
+    condition_value: null,
+    next_step_on_false: null,
+    template_id: null,
+    on_reach_tag_id: null,
+    created_at: '2026-09-01T00:00:00.000+09:00',
+  },
+] as const;
+
+function mockManualContext(overrides?: {
+  scenarioAccountId?: string | null;
+  friendAccountId?: string | null;
+  scenarioActive?: number;
+  friendFollowing?: number;
+}) {
+  dbMocks.getScenarioById.mockResolvedValue({
+    id: 'scenario-1',
+    name: 'Scenario',
+    description: null,
+    trigger_type: 'manual',
+    trigger_tag_id: null,
+    line_account_id: overrides?.scenarioAccountId === undefined ? 'acc-1' : overrides.scenarioAccountId,
+    is_active: overrides?.scenarioActive ?? 1,
+    delivery_mode: 'relative',
+    created_at: '2026-09-01T00:00:00.000+09:00',
+    updated_at: '2026-09-01T00:00:00.000+09:00',
+    steps: manualSteps,
+  });
+  dbMocks.getFriendById.mockResolvedValue({
+    id: 'friend-1',
+    line_user_id: 'U-secret',
+    display_name: 'Test Friend',
+    picture_url: 'https://example.com/picture.jpg',
+    status_message: 'secret status',
+    is_following: overrides?.friendFollowing ?? 1,
+    user_id: 'user-secret',
+    line_account_id: overrides?.friendAccountId === undefined ? 'acc-1' : overrides.friendAccountId,
+    metadata: '{"private":"value"}',
+    first_tracked_link_id: null,
+    created_at: '2026-09-01T00:00:00.000+09:00',
+    updated_at: '2026-09-01T00:00:00.000+09:00',
+  });
+}
+
+describe('manual scenario start endpoints', () => {
+  test('GET returns a no-store sanitized confirmation snapshot', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.getManualScenarioStartState.mockResolvedValue({
+      enrollment: {
+        id: 'run-1',
+        friend_id: 'friend-1',
+        scenario_id: 'scenario-1',
+        current_step_order: 10,
+        status: 'active',
+        started_at: '2026-09-28T09:00:00.000+09:00',
+        next_delivery_at: '2026-09-29T10:00:00.000+09:00',
+        updated_at: '2026-09-28T09:00:00.000+09:00',
+      },
+      current_next_step: manualSteps[1],
+      sent_step_orders: [10],
+      state_version: 'snapshot-1',
+    });
+
+    const res = await setupApp(db, 'staff').request(
+      '/api/scenarios/scenario-1/manual-start-state/friend-1',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+    const body = await res.json() as { success: boolean; data: Record<string, unknown> };
+    expect(body.success).toBe(true);
+    expect(body.data.stateVersion).toBe('snapshot-1');
+    expect(body.data.sentStepOrders).toEqual([10]);
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('U-secret');
+    expect(serialized).not.toContain('user-secret');
+    expect(serialized).not.toContain('private');
+    expect(serialized).not.toContain('messageContent');
+  });
+
+  test('GET allows a global scenario after checking the friend account scope and normalizes a blank name', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'global scenario', line_account_id: null, ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext({ scenarioAccountId: null, friendAccountId: 'acc-1' });
+    dbMocks.getFriendById.mockResolvedValue({
+      id: 'friend-1',
+      line_user_id: 'U-secret',
+      display_name: '   ',
+      picture_url: null,
+      status_message: null,
+      is_following: 1,
+      user_id: null,
+      line_account_id: 'acc-1',
+      metadata: '{}',
+      first_tracked_link_id: null,
+      created_at: '2026-09-01T00:00:00.000+09:00',
+      updated_at: '2026-09-01T00:00:00.000+09:00',
+    });
+    dbMocks.getManualScenarioStartState.mockResolvedValue({
+      enrollment: null,
+      current_next_step: null,
+      sent_step_orders: [],
+      state_version: 'none',
+    });
+
+    const res = await setupApp(db, 'staff').request(
+      '/api/scenarios/scenario-1/manual-start-state/friend-1',
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { data: { friend: { displayName: string } } };
+    expect(body.data.friend.displayName).toBe('名前未設定');
+    expect(dbMocks.staffCanAccessLineAccount).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ role: 'staff' }),
+      'acc-1',
+    );
+  });
+
+  test('POST repositions a run through the queue without invoking any LINE push', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.startFriendScenarioFromStep.mockResolvedValue({
+      ok: true,
+      action: 'repositioned',
+      enrollment: {
+        id: 'run-1',
+        friend_id: 'friend-1',
+        scenario_id: 'scenario-1',
+        current_step_order: 10,
+        status: 'active',
+        started_at: '2026-09-28T09:00:00.000+09:00',
+        next_delivery_at: '2026-09-29T09:00:00.000+09:00',
+        updated_at: '2026-09-29T09:00:00.000+09:00',
+      },
+      start_step: manualSteps[1],
+      previous_step_order: 10,
+      sent_step_orders: [10],
+      state_version: 'snapshot-2',
+    });
+
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/start-from-step', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        friendId: 'friend-1',
+        stepId: 'step-30',
+        deliveryTiming: 'next_cron',
+        expectedStateVersion: 'snapshot-1',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dbMocks.startFriendScenarioFromStep).toHaveBeenCalledWith(db, {
+      scenarioId: 'scenario-1',
+      friendId: 'friend-1',
+      stepId: 'step-30',
+      deliveryTiming: 'next_cron',
+      expectedStateVersion: 'snapshot-1',
+    });
+    const body = await res.json() as { data: Record<string, unknown> };
+    expect(body.data.action).toBe('repositioned');
+    expect(body.data.sentStepOrders).toEqual([10]);
+    expect(body.data.skippedStepOrders).toEqual([]);
+  });
+
+  test.each([
+    ['delivery_in_progress', 'DELIVERY_IN_PROGRESS', '配信処理中'],
+    ['state_changed', 'STATE_CHANGED', '状態が変わりました'],
+  ] as const)('POST maps %s races to a retryable 409', async (reason, code, message) => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.startFriendScenarioFromStep.mockResolvedValue({ ok: false, reason });
+
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/start-from-step', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        friendId: 'friend-1',
+        stepId: 'step-30',
+        deliveryTiming: 'configured',
+        expectedStateVersion: 'snapshot-1',
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json() as { code: string; error: string };
+    expect(body.code).toBe(code);
+    expect(body.error).toContain(message);
+  });
+
+  test('POST rejects a step that belongs to another scenario before changing state', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/start-from-step', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        friendId: 'friend-1',
+        stepId: 'foreign-step',
+        deliveryTiming: 'configured',
+        expectedStateVersion: 'none',
+      }),
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json() as { code: string }).code).toBe('STEP_NOT_FOUND');
+    expect(dbMocks.startFriendScenarioFromStep).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ scenarioActive: 0 }, 'SCENARIO_INACTIVE', '無効'],
+    [{ friendFollowing: 0 }, 'FRIEND_NOT_FOLLOWING', '解除済み'],
+    [{ friendAccountId: 'acc-2' }, 'LINE_ACCOUNT_MISMATCH', '別のLINEアカウント'],
+  ])('POST protects eligibility: %j', async (overrides, code, message) => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext(overrides);
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/start-from-step', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        friendId: 'friend-1',
+        stepId: 'step-30',
+        deliveryTiming: 'configured',
+        expectedStateVersion: 'none',
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json() as { code: string; error: string };
+    expect(body.code).toBe(code);
+    expect(body.error).toContain(message);
+    expect(dbMocks.startFriendScenarioFromStep).not.toHaveBeenCalled();
+  });
+
+  test('friend account staff scope is checked independently of scenario scope', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext();
+    dbMocks.staffCanAccessLineAccount
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const res = await setupApp(db, 'staff').request(
+      '/api/scenarios/scenario-1/manual-start-state/friend-1',
+    );
+    expect(res.status).toBe(403);
+    expect(dbMocks.getManualScenarioStartState).not.toHaveBeenCalled();
+  });
+});
+
+describe('legacy manual enroll eligibility', () => {
+  test('does not enroll an inactive scenario', async () => {
+    const rows: ScenarioRow[] = [
+      { id: 'scenario-1', name: 'scenario', line_account_id: 'acc-1', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+    mockManualContext({ scenarioActive: 0 });
+
+    const res = await setupApp(db).request('/api/scenarios/scenario-1/enroll/friend-1', {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json() as { code: string }).code).toBe('SCENARIO_INACTIVE');
+    expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
   });
 });

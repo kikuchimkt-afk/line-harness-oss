@@ -9,6 +9,8 @@ import {
   updateScenarioStep,
   deleteScenarioStep,
   enrollFriendInScenario,
+  getManualScenarioStartState,
+  startFriendScenarioFromStep,
   getFriendById,
   computeNextDeliveryAt,
 } from '@line-crm/db';
@@ -23,6 +25,8 @@ import type {
   ScenarioTriggerType,
   MessageType,
   DeliveryMode,
+  ScenarioWithSteps as DbScenarioWithSteps,
+  Friend as DbFriend,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
 import {
@@ -161,6 +165,79 @@ function serializeFriendScenario(row: DbFriendScenario) {
     nextDeliveryAt: row.next_delivery_at,
     updatedAt: row.updated_at,
   };
+}
+
+function serializeManualStartStep(row: DbScenarioStep) {
+  return {
+    id: row.id,
+    stepOrder: row.step_order,
+    messageType: row.message_type,
+    delayMinutes: row.delay_minutes,
+    offsetDays: row.offset_days ?? null,
+    offsetMinutes: row.offset_minutes ?? null,
+    deliveryTime: row.delivery_time ?? null,
+  };
+}
+
+function serializeManualStartFriend(row: DbFriend) {
+  return {
+    id: row.id,
+    displayName: row.display_name?.trim() || '名前未設定',
+    pictureUrl: row.picture_url,
+    isFollowing: Boolean(row.is_following),
+  };
+}
+
+type ScenarioFriendContext = { scenario: DbScenarioWithSteps; friend: DbFriend };
+
+async function getEligibleScenarioFriend(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  scenarioId: string,
+  friendId: string,
+): Promise<ScenarioFriendContext | Response> {
+  const [scenario, friend] = await Promise.all([
+    getScenarioById(c.env.DB, scenarioId),
+    getFriendById(c.env.DB, friendId),
+  ]);
+  if (!scenario) {
+    return c.json({ success: false, error: 'シナリオが見つかりません。', code: 'SCENARIO_NOT_FOUND' }, 404);
+  }
+  if (!friend) {
+    return c.json({ success: false, error: '友だちが見つかりません。', code: 'FRIEND_NOT_FOUND' }, 404);
+  }
+
+  // Account-bound scenarios require access to that account. Global scenarios
+  // deliberately defer authorization to the selected friend's account below.
+  if (scenario.line_account_id != null) {
+    const scenarioDenied = await denyIfCannotAccessLineAccount(c, scenario.line_account_id);
+    if (scenarioDenied) return scenarioDenied;
+  }
+  // Scenario access alone is insufficient: the selected friend's account must
+  // independently be inside the current staff member's scope.
+  const friendDenied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+  if (friendDenied) return friendDenied;
+  if (scenario.line_account_id != null && scenario.line_account_id !== friend.line_account_id) {
+    return c.json({
+      success: false,
+      error: '別のLINEアカウントのお友だちは指定できません。',
+      code: 'LINE_ACCOUNT_MISMATCH',
+    }, 409);
+  }
+  if (!scenario.is_active) {
+    return c.json({
+      success: false,
+      error: 'このシナリオは無効です。有効にしてから操作してください。',
+      code: 'SCENARIO_INACTIVE',
+    }, 409);
+  }
+  if (!friend.is_following) {
+    return c.json({
+      success: false,
+      error: 'このお友だちはLINEの友だち登録を解除済みのため、配信できません。',
+      code: 'FRIEND_NOT_FOLLOWING',
+    }, 409);
+  }
+  return { scenario, friend };
 }
 
 // GET /api/scenarios - list all
@@ -823,21 +900,8 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     const scenarioId = c.req.param('id');
     const friendId = c.req.param('friendId');
     const db = c.env.DB;
-    const denied = await denyIfCannotAccessScenario(c, scenarioId);
-    if (denied) return denied;
-
-    // Verify both exist
-    const [scenario, friend] = await Promise.all([
-      getScenarioById(db, scenarioId),
-      getFriendById(db, friendId),
-    ]);
-
-    if (!scenario) {
-      return c.json({ success: false, error: 'Scenario not found' }, 404);
-    }
-    if (!friend) {
-      return c.json({ success: false, error: 'Friend not found' }, 404);
-    }
+    const context = await getEligibleScenarioFriend(c, scenarioId, friendId);
+    if (context instanceof Response) return context;
 
     const enrollment = await enrollFriendInScenario(db, friendId, scenarioId);
     if (!enrollment) {
@@ -847,6 +911,123 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
   } catch (err) {
     console.error('POST /api/scenarios/:id/enroll/:friendId error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// GET /api/scenarios/:id/manual-start-state/:friendId
+// Confirmation snapshot for the manual "start from this step" operation.
+scenarios.get('/api/scenarios/:id/manual-start-state/:friendId', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  try {
+    const scenarioId = c.req.param('id');
+    const friendId = c.req.param('friendId');
+    const context = await getEligibleScenarioFriend(c, scenarioId, friendId);
+    if (context instanceof Response) return context;
+
+    const state = await getManualScenarioStartState(c.env.DB, scenarioId, friendId);
+    return c.json({
+      success: true,
+      data: {
+        friend: serializeManualStartFriend(context.friend),
+        enrollment: state.enrollment ? serializeFriendScenario(state.enrollment) : null,
+        currentNextStep: state.current_next_step
+          ? serializeManualStartStep(state.current_next_step)
+          : null,
+        sentStepOrders: state.sent_step_orders,
+        stateVersion: state.state_version,
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/scenarios/:id/manual-start-state/:friendId error:', err);
+    return c.json({ success: false, error: '状態の取得中にエラーが発生しました。' }, 500);
+  }
+});
+
+// POST /api/scenarios/:id/start-from-step
+// This only changes queue state. LINE delivery remains owned by the Cron worker
+// and therefore retains its claim/retry/duplicate-prevention guarantees.
+scenarios.post('/api/scenarios/:id/start-from-step', async (c) => {
+  c.header('Cache-Control', 'private, no-store');
+  try {
+    const scenarioId = c.req.param('id');
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ success: false, error: '入力内容を読み取れませんでした。', code: 'INVALID_REQUEST' }, 400);
+    }
+    if (!body || typeof body !== 'object') {
+      return c.json({ success: false, error: '入力内容がありません。', code: 'INVALID_REQUEST' }, 400);
+    }
+    const input = body as Record<string, unknown>;
+    if (
+      typeof input.friendId !== 'string' || !input.friendId.trim()
+      || typeof input.stepId !== 'string' || !input.stepId.trim()
+      || (input.deliveryTiming !== 'configured' && input.deliveryTiming !== 'next_cron')
+      || typeof input.expectedStateVersion !== 'string'
+    ) {
+      return c.json({
+        success: false,
+        error: 'お友だち、開始ステップ、配信タイミング、確認状態を指定してください。',
+        code: 'INVALID_REQUEST',
+      }, 400);
+    }
+
+    const friendId = input.friendId.trim();
+    const stepId = input.stepId.trim();
+    const context = await getEligibleScenarioFriend(c, scenarioId, friendId);
+    if (context instanceof Response) return context;
+    const selectedStep = context.scenario.steps.find((step) => step.id === stepId);
+    if (!selectedStep) {
+      return c.json({ success: false, error: '指定したステップがこのシナリオに見つかりません。', code: 'STEP_NOT_FOUND' }, 404);
+    }
+
+    const result = await startFriendScenarioFromStep(c.env.DB, {
+      scenarioId,
+      friendId,
+      stepId,
+      deliveryTiming: input.deliveryTiming,
+      expectedStateVersion: input.expectedStateVersion,
+    });
+    if (!result.ok) {
+      if (result.reason === 'step_not_found') {
+        return c.json({ success: false, error: '指定したステップがこのシナリオに見つかりません。', code: 'STEP_NOT_FOUND' }, 404);
+      }
+      if (result.reason === 'delivery_in_progress') {
+        return c.json({
+          success: false,
+          error: '現在、このお友だちへのシナリオ配信処理中です。処理完了後にもう一度お試しください。',
+          code: 'DELIVERY_IN_PROGRESS',
+        }, 409);
+      }
+      return c.json({
+        success: false,
+        error: '確認後に配信状態が変わりました。最新状態を読み込み、もう一度確認してください。',
+        code: 'STATE_CHANGED',
+      }, 409);
+    }
+
+    const sent = new Set(result.sent_step_orders);
+    const skippedStepOrders = context.scenario.steps
+      .filter((step) => step.step_order < result.start_step.step_order && !sent.has(step.step_order))
+      .map((step) => step.step_order);
+    return c.json({
+      success: true,
+      data: {
+        action: result.action,
+        friend: serializeManualStartFriend(context.friend),
+        enrollment: serializeFriendScenario(result.enrollment),
+        startStep: serializeManualStartStep(result.start_step),
+        sentStepOrders: result.sent_step_orders,
+        skippedStepOrders,
+        nextDeliveryAt: result.enrollment.next_delivery_at,
+        deliveryTiming: input.deliveryTiming,
+        stateVersion: result.state_version,
+      },
+    }, result.action === 'created' ? 201 : 200);
+  } catch (err) {
+    console.error('POST /api/scenarios/:id/start-from-step error:', err);
+    return c.json({ success: false, error: '開始位置の変更中にエラーが発生しました。' }, 500);
   }
 });
 
