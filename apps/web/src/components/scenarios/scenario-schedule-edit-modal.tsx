@@ -17,6 +17,7 @@ import {
 import {
   jstScheduleInputFromStored,
   scenarioScheduleHasChanges,
+  scenarioScheduleNeedsAcknowledgement,
   validateJstScheduleInput,
   type ScenarioScheduleUpdateResult,
 } from '@/lib/scenario-schedule-edit'
@@ -51,20 +52,34 @@ export default function ScenarioScheduleEditModal({
   const [scheduleTime, setScheduleTime] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [acknowledgedRisks, setAcknowledgedRisks] = useState(false)
   const [result, setResult] = useState<ScenarioScheduleUpdateResult | null>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLElement>(null)
   const requestSequence = useRef(0)
+  const stepsRef = useRef<ScenarioStep[]>([])
+  const itemRef = useRef(item)
+  const onCloseRef = useRef(onClose)
 
   const sortedSteps = useMemo(
     () => [...steps].sort((a, b) => a.stepOrder - b.stepOrder),
     [steps],
   )
+  stepsRef.current = sortedSteps
+  itemRef.current = item
+  onCloseRef.current = onClose
   const selectedStep = sortedSteps.find((step) => step.id === selectedStepId) ?? null
   const sentOrders = useMemo(() => new Set(startState?.sentStepOrders ?? []), [startState?.sentStepOrders])
   const skippedOrders = useMemo(
     () => stepsSkippedByManualStart(sortedSteps, selectedStepId, startState?.sentStepOrders ?? []),
     [selectedStepId, sortedSteps, startState?.sentStepOrders],
   )
+  const needsAcknowledgement = scenarioScheduleNeedsAcknowledgement({
+    selectedStepOrder: selectedStep?.stepOrder ?? null,
+    sentStepOrders: sentOrders,
+    skippedStepOrders: skippedOrders,
+  })
   const scheduleValidation = validateJstScheduleInput(scheduleDate, scheduleTime)
   const currentInput = jstScheduleInputFromStored(startState?.enrollment?.nextDeliveryAt ?? item?.nextDeliveryAt)
   const currentStepOrder = startState?.currentNextStep?.stepOrder ?? item?.nextStepOrder
@@ -79,8 +94,8 @@ export default function ScenarioScheduleEditModal({
   useEffect(() => setMounted(true), [])
 
   const close = useCallback(() => {
-    if (!submitting) onClose()
-  }, [onClose, submitting])
+    if (!submitting) onCloseRef.current()
+  }, [submitting])
 
   const loadState = useCallback(async (target: ScenarioUpcomingDelivery) => {
     const requestId = ++requestSequence.current
@@ -89,6 +104,7 @@ export default function ScenarioScheduleEditModal({
     setStartState(null)
     setSelectedStepId('')
     setError('')
+    setAcknowledgedRisks(false)
     setResult(null)
     const input = jstScheduleInputFromStored(target.nextDeliveryAt)
     setScheduleDate(input.date)
@@ -111,7 +127,7 @@ export default function ScenarioScheduleEditModal({
       }
       setStartState(response.data)
       const currentStepId = response.data.currentNextStep?.id
-        ?? sortedSteps.find((step) => step.stepOrder === target.nextStepOrder)?.id
+        ?? stepsRef.current.find((step) => step.stepOrder === target.nextStepOrder)?.id
         ?? ''
       setSelectedStepId(currentStepId)
       const latestInput = jstScheduleInputFromStored(response.data.enrollment.nextDeliveryAt)
@@ -124,25 +140,72 @@ export default function ScenarioScheduleEditModal({
     } finally {
       if (requestId === requestSequence.current) setStateLoading(false)
     }
-  }, [scenarioId, sortedSteps])
+  }, [scenarioId])
 
   useEffect(() => {
-    if (!item) return
-    void loadState(item)
+    const target = itemRef.current
+    if (!target) return
+    void loadState(target)
     return () => {
       requestSequence.current += 1
     }
-  }, [item, loadState])
+  }, [item?.enrollmentId, item?.friendId, loadState])
 
   useEffect(() => {
     if (!item) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape') {
+        close()
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const dialog = dialogRef.current
+      if (!dialog) return
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => element.getClientRects().length > 0)
+      if (focusable.length === 0) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault()
+        first.focus()
+      }
     }
+
+    const overlay = overlayRef.current
+    const background = Array.from(document.body.children)
+      .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== overlay)
+      .map((element) => ({
+        element,
+        wasInert: element.inert,
+        ariaHidden: element.getAttribute('aria-hidden'),
+      }))
+    for (const { element } of background) {
+      element.inert = true
+      element.setAttribute('aria-hidden', 'true')
+    }
+
     window.addEventListener('keydown', onKeyDown)
     closeButtonRef.current?.focus()
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [close, item])
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      for (const { element, wasInert, ariaHidden } of background) {
+        element.inert = wasInert
+        if (ariaHidden === null) element.removeAttribute('aria-hidden')
+        else element.setAttribute('aria-hidden', ariaHidden)
+      }
+    }
+  }, [close, item?.enrollmentId])
 
   const review = () => {
     setError('')
@@ -166,6 +229,10 @@ export default function ScenarioScheduleEditModal({
       setPhase('edit')
       return
     }
+    if (needsAcknowledgement && !acknowledgedRisks) {
+      setError('再送またはステップのスキップに関する確認欄を選択してください。')
+      return
+    }
 
     setSubmitting(true)
     setError('')
@@ -175,7 +242,7 @@ export default function ScenarioScheduleEditModal({
         stepId: selectedStep.id,
         nextDeliveryAt: validation.iso,
         expectedStateVersion: startState.stateVersion,
-        confirmPreviouslySent: sentOrders.has(selectedStep.stepOrder),
+        confirmPreviouslySent: sentOrders.has(selectedStep.stepOrder) && acknowledgedRisks,
       })
       if (!response.success) {
         setError(response.error || '配信予定を変更できませんでした。')
@@ -201,15 +268,19 @@ export default function ScenarioScheduleEditModal({
 
   const modal = (
     <div
+      ref={overlayRef}
       className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-950/45 p-3 sm:p-6"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !dirty) close()
       }}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="scenario-schedule-edit-title"
+        aria-describedby="scenario-schedule-edit-description"
+        tabIndex={-1}
         className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
       >
         <header className="flex items-start justify-between gap-4 border-b border-pink-100 bg-pink-50/60 px-5 py-4 sm:px-6">
@@ -217,6 +288,7 @@ export default function ScenarioScheduleEditModal({
             <p className="text-[11px] font-semibold tracking-[0.16em] text-pink-700">DELIVERY SCHEDULE</p>
             <h2 id="scenario-schedule-edit-title" className="mt-1 text-lg font-semibold text-gray-900">次回の配信予定を編集</h2>
             <p className="mt-1 text-xs text-gray-600">{scenarioName}</p>
+            <p id="scenario-schedule-edit-description" className="sr-only">対象者の次に送るステップと配信日時を変更します。</p>
           </div>
           <button
             ref={closeButtonRef}
@@ -252,7 +324,10 @@ export default function ScenarioScheduleEditModal({
                     <select
                       id="scenario-schedule-step"
                       value={selectedStepId}
-                      onChange={(event) => setSelectedStepId(event.target.value)}
+                      onChange={(event) => {
+                        setSelectedStepId(event.target.value)
+                        setAcknowledgedRisks(false)
+                      }}
                       className="mt-2 min-h-[44px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-100"
                     >
                       {sortedSteps.map((step) => (
@@ -355,11 +430,22 @@ export default function ScenarioScheduleEditModal({
                   未送信のまま飛ばすステップ: {skippedOrders.join('、')}
                 </div>
               )}
+              {needsAcknowledgement && (
+                <label className="flex min-h-[44px] cursor-pointer items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-950">
+                  <input
+                    type="checkbox"
+                    checked={acknowledgedRisks}
+                    onChange={(event) => setAcknowledgedRisks(event.target.checked)}
+                    className="mt-1 h-4 w-4 shrink-0 accent-pink-600"
+                  />
+                  <span>送信済み内容が再送される、または未送信ステップがスキップされる可能性を確認しました。</span>
+                </label>
+              )}
               {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">{error}</div>}
 
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <button type="button" onClick={() => setPhase('edit')} disabled={submitting} className="min-h-[44px] rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40">戻って修正</button>
-                <button type="button" onClick={() => void submit()} disabled={submitting} className="min-h-[44px] rounded-lg bg-pink-600 px-5 py-2 text-sm font-semibold text-white hover:bg-pink-700 disabled:cursor-wait disabled:opacity-50">
+                <button type="button" onClick={() => void submit()} disabled={submitting || (needsAcknowledgement && !acknowledgedRisks)} className="min-h-[44px] rounded-lg bg-pink-600 px-5 py-2 text-sm font-semibold text-white hover:bg-pink-700 disabled:cursor-not-allowed disabled:opacity-50">
                   {submitting ? '変更中...' : 'この予定に変更'}
                 </button>
               </div>

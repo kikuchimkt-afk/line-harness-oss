@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import {
   jstScheduleInputFromStored,
   scenarioScheduleHasChanges,
+  scenarioScheduleNeedsAcknowledgement,
   validateJstScheduleInput,
 } from './scenario-schedule-edit'
 
@@ -46,6 +47,24 @@ describe('scenario schedule edit helpers', () => {
       current,
       next: { ...current, time: '19:00' },
     })).toBe(true)
+  })
+
+  test('requires explicit acknowledgement for resends and skipped unsent steps', () => {
+    expect(scenarioScheduleNeedsAcknowledgement({
+      selectedStepOrder: 2,
+      sentStepOrders: [1, 2],
+      skippedStepOrders: [],
+    })).toBe(true)
+    expect(scenarioScheduleNeedsAcknowledgement({
+      selectedStepOrder: 3,
+      sentStepOrders: [1],
+      skippedStepOrders: [2],
+    })).toBe(true)
+    expect(scenarioScheduleNeedsAcknowledgement({
+      selectedStepOrder: 2,
+      sentStepOrders: [1],
+      skippedStepOrders: [],
+    })).toBe(false)
   })
 
   test.each([

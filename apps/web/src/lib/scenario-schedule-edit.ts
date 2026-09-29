@@ -30,6 +30,16 @@ export function scenarioScheduleHasChanges(input: {
     || input.current.time !== input.next.time
 }
 
+export function scenarioScheduleNeedsAcknowledgement(input: {
+  selectedStepOrder: number | null
+  sentStepOrders: Iterable<number>
+  skippedStepOrders: readonly number[]
+}): boolean {
+  if (input.selectedStepOrder === null) return false
+  return new Set(input.sentStepOrders).has(input.selectedStepOrder)
+    || input.skippedStepOrders.length > 0
+}
+
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
