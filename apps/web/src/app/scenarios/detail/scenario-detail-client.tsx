@@ -14,6 +14,7 @@ import ScheduleInput, {
   type ScheduleValue,
 } from '@/components/scenarios/schedule-input'
 import BulkPreviewModal from '@/components/scenarios/bulk-preview-modal'
+import ScenarioDeliveryStatusPanel from '@/components/scenarios/scenario-delivery-status-panel'
 
 const WORKER_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
 
@@ -604,6 +605,11 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
           </div>
         )}
       </div>
+
+      <ScenarioDeliveryStatusPanel
+        scenarioId={id}
+        scenarioIsActive={scenario.isActive}
+      />
 
       {/* Steps */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">

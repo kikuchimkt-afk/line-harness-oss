@@ -34,6 +34,13 @@ import type {
   TrafficPool,
   PoolAccount,
 } from '@line-crm/shared'
+import type { ScenarioDeliveryStatus } from './scenario-delivery-status'
+
+export type {
+  ScenarioDeliveryStatus,
+  ScenarioSentDelivery,
+  ScenarioUpcomingDelivery,
+} from './scenario-delivery-status'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
@@ -352,6 +359,14 @@ export const api = {
         paused: number
         steps: Array<{ stepOrder: number; reachedCount: number; reachRate: number }>
       }>>(`/api/scenarios/${id}/stats`),
+    deliveryStatus: (id: string, limit = 200) => {
+      const normalizedLimit = Number.isFinite(limit)
+        ? Math.min(500, Math.max(1, Math.trunc(limit)))
+        : 200
+      return fetchApi<ApiResponse<ScenarioDeliveryStatus>>(
+        `/api/scenarios/${encodeURIComponent(id)}/delivery-status?limit=${normalizedLimit}`,
+      )
+    },
   },
   broadcasts: {
     list: (params?: { accountId?: string }) => {
