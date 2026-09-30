@@ -52,6 +52,9 @@ function app() {
   a.route('/', adminAuth);
   a.get('/api/protected', (c) => c.json({ success: true, data: c.get('staff') }));
   a.post('/api/protected', (c) => c.json({ success: true, data: c.get('staff') }));
+  a.get('/api/forms/:id', (c) => c.json({ success: true, id: c.req.param('id') }));
+  a.put('/api/forms/:id', (c) => c.json({ success: true, id: c.req.param('id') }));
+  a.delete('/api/forms/:id', (c) => c.json({ success: true, id: c.req.param('id') }));
   return a;
 }
 
@@ -184,6 +187,31 @@ describe('protected API access', () => {
       headers: { Cookie: 'lh_admin_session=%; other=%E0%A4%A' },
     }, crossSiteEnv());
     expect(res.status).toBe(401);
+  });
+});
+
+describe('public form definition access', () => {
+  test('allows unauthenticated GET but protects mutation methods on the same path', async () => {
+    const publicGet = await app().request('/api/forms/form-1', {}, crossSiteEnv());
+    expect(publicGet.status).toBe(200);
+
+    const unauthenticatedPut = await app().request('/api/forms/form-1', {
+      method: 'PUT',
+    }, crossSiteEnv());
+    expect(unauthenticatedPut.status).toBe(401);
+
+    const unauthenticatedDelete = await app().request('/api/forms/form-1', {
+      method: 'DELETE',
+    }, crossSiteEnv());
+    expect(unauthenticatedDelete.status).toBe(401);
+  });
+
+  test('allows an authenticated Bearer caller to update a form definition', async () => {
+    const res = await app().request('/api/forms/form-1', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer env-key' },
+    }, crossSiteEnv());
+    expect(res.status).toBe(200);
   });
 });
 

@@ -153,7 +153,7 @@ async function applyRefAttribution(
         addTagToFriend,
       } = await import('@line-crm/db');
       const { LineClient } = await import('@line-crm/line-sdk');
-      const { buildMessage, expandVariables, resolveMetadata } = await import('../services/step-delivery.js');
+      const { buildMessage, evaluateCondition, expandVariables, resolveMetadata } = await import('../services/step-delivery.js');
       const scenarioRow = await getScenarioById(db, effectiveScenarioId);
       if (!scenarioRow) return;
       const steps = scenarioRow.steps;
@@ -161,6 +161,10 @@ async function applyRefAttribution(
       // クリックキャンペーンの即時送信は「now 以前にスケジュールされる」場合のみ。
       // elapsed/absolute_time の delay_minutes=0 は即時を意味しない（offset/clock-time 起点）。
       if (!firstStep) return;
+      // Click-driven immediate delivery must honor the same step condition as
+      // cron delivery. This prevents completed form applicants from receiving
+      // the first application reminder again when they revisit the LP link.
+      if (!(await evaluateCondition(db, friend.id, firstStep))) return;
       const enrolledAtJst = new Date(Date.now() + 9 * 60 * 60_000);
       const firstScheduledAt = computeNextDeliveryAt(
         { delivery_mode: scenarioRow.delivery_mode ?? 'relative' },
