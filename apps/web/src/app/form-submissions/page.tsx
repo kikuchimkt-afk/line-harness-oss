@@ -4,6 +4,11 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { fetchApi } from '@/lib/api'
 import { countryFlag } from '@/lib/country-flag'
+import {
+  resolvePresentationSyncRequest,
+  sendPresentationSubmissionsSync,
+  type PresentationSyncRequest,
+} from '@/lib/presentation-submissions-sync'
 import Header from '@/components/layout/header'
 
 interface UsedByAccount {
@@ -84,6 +89,12 @@ export default function FormSubmissionsPage() {
   const [exportError, setExportError] = useState('')
   const [deleteError, setDeleteError] = useState('')
   const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(null)
+  const [presentationSyncRequest, setPresentationSyncRequest] = useState<PresentationSyncRequest | null>(null)
+  const [presentationSyncNotice, setPresentationSyncNotice] = useState('')
+  const [presentationSyncError, setPresentationSyncError] = useState('')
+  const [presentationSyncing, setPresentationSyncing] = useState(false)
+  const [loadedFormId, setLoadedFormId] = useState<string | null>(null)
+  const [subLoadError, setSubLoadError] = useState('')
 
   const loadForms = useCallback(async () => {
     setLoading(true)
@@ -96,8 +107,14 @@ export default function FormSubmissionsPage() {
 
   useEffect(() => { loadForms() }, [loadForms])
 
+  useEffect(() => {
+    const request = resolvePresentationSyncRequest(window.location.search)
+    if (request && window.opener && !window.opener.closed) setPresentationSyncRequest(request)
+  }, [])
+
   const loadSubmissions = useCallback(async (formId: string) => {
     setSubLoading(true)
+    setSubLoadError('')
     setPage(1)
     setDetailSubmission(null)
     try {
@@ -126,9 +143,18 @@ export default function FormSubmissionsPage() {
             })),
           )
         }
+        if (formRes.success && subRes.success) setLoadedFormId(formId)
         return current
       })
-    } catch { /* silent */ }
+    } catch {
+      setSelectedFormId((current) => {
+        if (current === formId) {
+          setLoadedFormId(null)
+          setSubLoadError('回答一覧を取得できませんでした。再読み込みしてから同期してください。')
+        }
+        return current
+      })
+    }
     setSelectedFormId((current) => {
       if (current === formId) setSubLoading(false)
       return current
@@ -138,6 +164,13 @@ export default function FormSubmissionsPage() {
   const handleSelectForm = (formId: string) => {
     setExportError('')
     setDeleteError('')
+    setPresentationSyncNotice('')
+    setPresentationSyncError('')
+    setSubLoadError('')
+    setLoadedFormId(null)
+    setSubmissions([])
+    setFormFields([])
+    setFieldLabels({})
     setSelectedFormId(formId)
     loadSubmissions(formId)
   }
@@ -165,6 +198,80 @@ export default function FormSubmissionsPage() {
         : [],
     [submissions],
   )
+
+  const sendToPresentationManager = async () => {
+    if (!selectedForm || loadedFormId !== selectedForm.id || presentationSyncing) return
+    setPresentationSyncNotice('')
+    setPresentationSyncError('')
+    setPresentationSyncing(true)
+
+    try {
+      // 画面を開いた時点の古い一覧ではなく、送信直前に完全な最新一覧を取り直します。
+      const snapshotRequestedAt = new Date().toISOString()
+      const [formRes, subRes] = await Promise.all([
+        fetchApi<{ success: boolean; data: FormDetail | { fields: string | FormDetail['fields'] } }>(`/api/forms/${selectedForm.id}`),
+        fetchApi<{ success: boolean; data: Submission[] }>(`/api/forms/${selectedForm.id}/submissions`),
+      ])
+      if (!formRes.success || !subRes.success) throw new Error('snapshot_failed')
+
+      const rawFields = (formRes.data as { fields: unknown }).fields
+      const latestFields = typeof rawFields === 'string'
+        ? (JSON.parse(rawFields) as FormField[])
+        : (rawFields as FormField[])
+      const latestSubmissions = subRes.data.map((submission) => ({
+        ...submission,
+        data: typeof submission.data === 'string' ? JSON.parse(submission.data) : submission.data,
+        friendName: submission.friendName ?? null,
+      }))
+      const declaredCount = (formRes.data as Partial<FormDetail>).submitCount
+      if (typeof declaredCount === 'number' && declaredCount !== latestSubmissions.length) {
+        throw new Error('count_mismatch')
+      }
+      if (
+        (latestSubmissions.length === 0 || latestSubmissions.length < submissions.length) &&
+        !window.confirm(
+          `最新の回答は${latestSubmissions.length}件です。前回表示の${submissions.length}件より少ないため、管理画面では不足分が「元回答削除済み」扱いになります。同期しますか？`,
+        )
+      ) return
+
+      const result = sendPresentationSubmissionsSync({
+        search: window.location.search,
+        selectedFormId: selectedForm.id,
+        formName: selectedForm.name,
+        fields: latestFields ?? [],
+        submissions: latestSubmissions,
+        opener: window.opener,
+        exportedAt: snapshotRequestedAt,
+      })
+
+      if (result.ok) {
+        const labels: Record<string, string> = {}
+        for (const field of latestFields ?? []) labels[field.name] = field.label
+        setFormFields(latestFields ?? [])
+        setFieldLabels(labels)
+        setSubmissions(latestSubmissions)
+        setPresentationSyncNotice(`大会管理画面へ最新の回答${latestSubmissions.length}件を送信しました。`)
+        return
+      }
+
+      const message = result.reason === 'opener_missing'
+        ? '大会管理画面との接続を確認できません。大会管理画面からもう一度開いてください。'
+        : result.reason === 'form_mismatch' || result.reason === 'submission_form_mismatch'
+          ? '対象フォームが一致しないため送信しませんでした。大会管理画面からもう一度開いてください。'
+          : result.reason === 'invalid_request'
+            ? '同期用リンクを確認できないため送信しませんでした。大会管理画面からもう一度開いてください。'
+            : '大会管理画面へ送信できませんでした。接続を確認して、もう一度お試しください。'
+      setPresentationSyncError(message)
+    } catch (error) {
+      setPresentationSyncError(
+        error instanceof Error && error.message === 'count_mismatch'
+          ? '回答件数の確認結果が一致しないため同期しませんでした。再読み込みして、もう一度お試しください。'
+          : '最新の回答一覧を取得できなかったため同期しませんでした。再読み込みして、もう一度お試しください。',
+      )
+    } finally {
+      setPresentationSyncing(false)
+    }
+  }
 
   const downloadExcel = async () => {
     if (!selectedForm || submissions.length === 0 || exporting) return
@@ -301,7 +408,17 @@ export default function FormSubmissionsPage() {
                 {subLoading ? '読み込み中...' : `${submissions.length}件`}
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              {presentationSyncRequest?.formId === selectedForm.id && loadedFormId === selectedForm.id && (
+                <button
+                  type="button"
+                  onClick={() => void sendToPresentationManager()}
+                  disabled={subLoading || presentationSyncing || Boolean(subLoadError)}
+                  className="inline-flex items-center rounded-lg border border-blue-600 bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {presentationSyncing ? '最新回答を確認中...' : '大会管理画面へ同期'}
+                </button>
+              )}
               <Link
                 href={`/form-campaigns?copyFrom=${encodeURIComponent(selectedForm.id)}`}
                 className="inline-flex items-center rounded-lg border border-[#06C755] bg-white px-3 py-2 text-xs font-semibold text-[#06C755] hover:bg-green-50"
@@ -325,10 +442,13 @@ export default function FormSubmissionsPage() {
               <button
                 onClick={() => {
                   setSelectedFormId(null)
+                  setLoadedFormId(null)
                   setSubmissions([])
                   setFormFields([])
                   setExportError('')
                   setDeleteError('')
+                  setPresentationSyncNotice('')
+                  setPresentationSyncError('')
                   setDetailSubmission(null)
                 }}
                 className="text-xs text-gray-400 hover:text-gray-600"
@@ -341,6 +461,24 @@ export default function FormSubmissionsPage() {
           {exportError && (
             <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
               {exportError}
+            </div>
+          )}
+
+          {presentationSyncNotice && (
+            <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+              {presentationSyncNotice}
+            </div>
+          )}
+
+          {presentationSyncError && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {presentationSyncError}
+            </div>
+          )}
+
+          {subLoadError && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {subLoadError}
             </div>
           )}
 
