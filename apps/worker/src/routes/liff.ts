@@ -513,7 +513,7 @@ liffRoutes.get('/auth/line', async (c) => {
       <img src="/api/qr?size=240x240&data=${encodeURIComponent(qrUrl)}" alt="QR Code">
     </div>
     <p class="hint">LINE アプリのカメラまたは<br>スマートフォンのカメラで読み取れます</p>
-    <p class="footer">友だち追加で全機能を無料体験できます</p>
+    <p class="footer">LINEアプリで友だち追加後、届いた案内をご確認ください</p>
   </div>
 </body>
 </html>`);
