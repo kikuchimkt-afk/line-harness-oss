@@ -16,6 +16,10 @@ import {
   markRichMenuGroupUnpublished,
   getLineAccountById,
   getFollowingLineUserIdsByTag,
+  upsertTagRichMenuBinding,
+  deleteTagRichMenuBinding,
+  getTagRichMenuBinding,
+  getFollowingLineUserIdsByPreferredRichMenuGroup,
   type RichMenuGroup,
   type RichMenuGroupWithPages,
   type RichMenuPageInput,
@@ -881,7 +885,41 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/publish', async (c) => {
       await setPageRichMenuId(c.env.DB, r.pageId, r.newRichMenuId);
     }
     await markRichMenuGroupPublished(c.env.DB, groupId);
-    return c.json({ success: true, data: result });
+
+    // Republishing replaces LINE richMenuIds. Re-link friends selected by a
+    // persistent tag binding so their per-user menu does not disappear with
+    // the deleted old LINE rich menu.
+    let rebound = 0;
+    let bindingWarning: string | undefined;
+    try {
+      const defaultPage =
+        group.pages.find((page) => page.id === group.default_page_id) ??
+        [...group.pages].sort((a, b) => a.order_index - b.order_index)[0];
+      const publishedDefault = result.pages.find(
+        (page) => page.pageId === defaultPage?.id,
+      );
+      if (publishedDefault) {
+        const userIds = await getFollowingLineUserIdsByPreferredRichMenuGroup(
+          c.env.DB,
+          group.account_id,
+          groupId,
+        );
+        const relinked = await linkRichMenuBulkChunked(
+          line,
+          publishedDefault.newRichMenuId,
+          userIds,
+        );
+        rebound = relinked.total;
+      }
+    } catch (error) {
+      bindingWarning = error instanceof Error ? error.message : String(error);
+      console.error(`[rich-menu-publish] binding reconcile failed group=${groupId}:`, error);
+    }
+
+    return c.json({
+      success: true,
+      data: { ...result, rebound, ...(bindingWarning ? { bindingWarning } : {}) },
+    });
   } catch (e) {
     await releasePublishLock(c.env.DB, groupId);
     const message = e instanceof Error ? e.message : String(e);
@@ -949,7 +987,11 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
   } catch {
     return c.json({ success: false, error: 'invalid JSON body' }, 400);
   }
-  const r = (body as { tagId?: unknown; mode?: unknown }) ?? {};
+  const r = (body as {
+    tagId?: unknown;
+    mode?: unknown;
+    applyToFuture?: unknown;
+  }) ?? {};
   const mode = (r.mode as string | undefined) ?? 'bulk-link';
   if (mode !== 'bulk-link' && mode !== 'set-default') {
     return c.json({ success: false, error: "mode must be 'bulk-link' or 'set-default'" }, 400);
@@ -958,8 +1000,21 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
     if (r.tagId !== null && r.tagId !== undefined && typeof r.tagId !== 'string') {
       return c.json({ success: false, error: 'tagId must be string or null' }, 400);
     }
+    if (typeof r.tagId === 'string' && r.tagId.trim().length === 0) {
+      return c.json({ success: false, error: 'tagId must not be blank' }, 400);
+    }
+    if (r.applyToFuture !== undefined && typeof r.applyToFuture !== 'boolean') {
+      return c.json({ success: false, error: 'applyToFuture must be boolean' }, 400);
+    }
   }
-  const tagId = (r.tagId as string | null | undefined) ?? null;
+  const tagId = typeof r.tagId === 'string' ? r.tagId.trim() : null;
+  const applyToFuture = r.applyToFuture as boolean | undefined;
+  if (applyToFuture === true && !tagId) {
+    return c.json(
+      { success: false, error: 'tagId is required when applyToFuture is true' },
+      400,
+    );
+  }
 
   const group = await getRichMenuGroupWithPages(c.env.DB, groupId);
   if (!group) return c.json({ success: false, error: 'not found' }, 404);
@@ -1014,6 +1069,27 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
   }
 
   // ---- mode: bulk-link (タグ or 全 follower に link) ----
+  // Save the future rule before taking the current friend snapshot so a tag
+  // assignment that happens during the bulk operation is not missed.
+  let futureApplied = false;
+  if (tagId && applyToFuture === true) {
+    await upsertTagRichMenuBinding(c.env.DB, {
+      accountId: group.account_id,
+      tagId,
+      richMenuGroupId: groupId,
+    });
+    futureApplied = true;
+  } else if (tagId && applyToFuture === false) {
+    const existingBinding = await getTagRichMenuBinding(
+      c.env.DB,
+      group.account_id,
+      tagId,
+    );
+    if (existingBinding?.rich_menu_group_id === groupId) {
+      await deleteTagRichMenuBinding(c.env.DB, group.account_id, tagId);
+    }
+  }
+
   const userIds = await getFollowingLineUserIdsByTag(
     c.env.DB,
     group.account_id,
@@ -1022,7 +1098,14 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
   if (userIds.length === 0) {
     return c.json({
       success: true,
-      data: { chunks: 0, total: 0, message: 'no matching followers' },
+      data: {
+        chunks: 0,
+        total: 0,
+        futureApplied,
+        message: futureApplied
+          ? '現在の対象者は0名です。今後このタグが付く友だちへの自動表示を設定しました。'
+          : '対象となる友だちはいませんでした。',
+      },
     });
   }
 
@@ -1033,7 +1116,16 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
       targetPage.line_richmenu_id,
       userIds,
     );
-    return c.json({ success: true, data: result });
+    return c.json({
+      success: true,
+      data: {
+        ...result,
+        futureApplied,
+        message: futureApplied
+          ? `${result.total}名に表示し、今後このタグが付く友だちへの自動表示も設定しました。`
+          : `${result.total}名に表示しました。`,
+      },
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return c.json({ success: false, error: message }, 500);

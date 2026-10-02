@@ -7,6 +7,7 @@
  */
 
 import { URL_TOKEN_SQL } from '../lib/url-token.js';
+import { applyTagRichMenuBinding } from './rich-menu-tag-binding.js';
 
 interface DuplicateTagConfig {
   /** Map of line_account_id → duplicate tag ID. */
@@ -131,6 +132,9 @@ export async function processDuplicateDetection(db: D1Database): Promise<void> {
         await db.prepare(
           `INSERT OR IGNORE INTO friend_tags (friend_id, tag_id, assigned_at) VALUES (?, ?, ?)`
         ).bind(friend.id, matchTagId, now).run();
+        await applyTagRichMenuBinding(db, friend.id, matchTagId).catch((error) => {
+          console.error('[duplicate-detect] rich-menu binding apply failed:', error);
+        });
       }
 
       // Tag match with the friend's account tag (e.g., "重複:XH1")
@@ -138,6 +142,9 @@ export async function processDuplicateDetection(db: D1Database): Promise<void> {
         await db.prepare(
           `INSERT OR IGNORE INTO friend_tags (friend_id, tag_id, assigned_at) VALUES (?, ?, ?)`
         ).bind(match.id, friendTagId, now).run();
+        await applyTagRichMenuBinding(db, match.id, friendTagId).catch((error) => {
+          console.error('[duplicate-detect] rich-menu binding apply failed:', error);
+        });
       }
 
       taggedCount++;

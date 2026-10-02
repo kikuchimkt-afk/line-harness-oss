@@ -14,7 +14,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import { getFriendByLineUserId, getFriendById } from '@line-crm/db';
-import { addTagToFriend, enrollFriendInScenario } from '@line-crm/db';
+import { enrollFriendInScenario } from '@line-crm/db';
 import type {
   Form as DbForm,
   FormSubmission as DbFormSubmission,
@@ -22,6 +22,7 @@ import type {
 } from '@line-crm/db';
 import type { Env } from '../index.js';
 import { pushMessageWithRetry } from '../services/line-push-retry.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 
 const forms = new Hono<Env>();
 const FORM_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
@@ -703,7 +704,9 @@ forms.post('/api/forms/:id/submit', async (c) => {
 
         // Add tag
         if (form.on_submit_tag_id) {
-          sideEffects.push(addTagToFriend(db, friendId, form.on_submit_tag_id));
+          sideEffects.push(
+            attachTagAndFireSideEffects(db, friendId, form.on_submit_tag_id),
+          );
         }
 
         // Enroll in scenario

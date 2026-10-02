@@ -43,6 +43,17 @@ vi.mock('../services/event-bus.js', () => ({
   fireEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../services/rich-menu-tag-binding.js', () => ({
+  applyPreferredTagRichMenuBinding: vi.fn().mockResolvedValue({
+    applied: false,
+    reason: 'binding_not_found',
+  }),
+}));
+
+vi.mock('../services/friend-tag-attach.js', () => ({
+  attachTagAndFireSideEffects: vi.fn().mockResolvedValue({ added: true }),
+}));
+
 vi.mock('../services/step-delivery.js', () => ({
   buildMessage: vi.fn(),
   expandVariables: vi.fn(),

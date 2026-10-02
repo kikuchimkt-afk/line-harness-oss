@@ -16,7 +16,6 @@ import {
   jstNow,
   computeNextDeliveryAt,
   resolveStepContent,
-  addTagToFriend,
   getEntryRouteByRefCode,
   getMessageTemplateById,
 } from '@line-crm/db';
@@ -24,6 +23,8 @@ import type { EntryRoute, Friend } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
 import { buildMessage, expandVariables, messageToLogPayload } from '../services/step-delivery.js';
 import { runWebhookEvents } from '../services/webhook-event-runner.js';
+import { applyPreferredTagRichMenuBinding } from '../services/rich-menu-tag-binding.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
@@ -579,7 +580,11 @@ async function handleEvent(
                 // 到達タグ付与 (advance / complete の後)
                 if (firstStep.on_reach_tag_id) {
                   try {
-                    await addTagToFriend(db, friend.id, firstStep.on_reach_tag_id);
+                    await attachTagAndFireSideEffects(
+                      db,
+                      friend.id,
+                      firstStep.on_reach_tag_id,
+                    );
                   } catch (err) {
                     console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
                   }
@@ -622,6 +627,14 @@ async function handleEvent(
     }
 
     // イベントバス発火: friend_add（replyToken は Step 0 で使用済みの可能性あり）
+    // A re-follow does not add the tag again, so re-evaluate persistent
+    // tag-to-rich-menu bindings explicitly.
+    try {
+      await applyPreferredTagRichMenuBinding(db, friend.id);
+    } catch (error) {
+      console.error(`[follow] rich-menu binding apply failed friend=${friend.id}:`, error);
+    }
+
     await fireEvent(db, 'friend_add', { friendId: friend.id, eventData: { displayName: friend.display_name } }, lineAccessToken, lineAccountId);
     return;
   }

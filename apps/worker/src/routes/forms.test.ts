@@ -32,6 +32,9 @@ const deliveryMocks = {
 vi.mock('../services/line-push-retry.js', () => ({
   pushMessageWithRetry: deliveryMocks.pushMessageWithRetry,
 }));
+vi.mock('../services/friend-tag-attach.js', () => ({
+  attachTagAndFireSideEffects: vi.fn().mockResolvedValue({ added: true }),
+}));
 vi.mock('../services/reward-resolver.js', () => ({
   resolveRewardTemplate: deliveryMocks.resolveRewardTemplate,
 }));

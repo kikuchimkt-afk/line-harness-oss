@@ -798,6 +798,16 @@ CREATE TABLE stripe_events (
   processed_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE tag_rich_menu_bindings (
+  account_id         TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
+  tag_id             TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  rich_menu_group_id TEXT NOT NULL REFERENCES rich_menu_groups(id) ON DELETE CASCADE,
+  is_active          INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  PRIMARY KEY (account_id, tag_id)
+);
+
 CREATE TABLE tags (
   id         TEXT PRIMARY KEY,
   name       TEXT UNIQUE NOT NULL,
@@ -1038,6 +1048,12 @@ CREATE INDEX idx_staff_members_role ON staff_members(role);
 CREATE INDEX idx_stripe_events_friend ON stripe_events (friend_id);
 
 CREATE INDEX idx_stripe_events_type ON stripe_events (event_type);
+
+CREATE INDEX idx_tag_rich_menu_bindings_active
+  ON tag_rich_menu_bindings (account_id, is_active, tag_id);
+
+CREATE INDEX idx_tag_rich_menu_bindings_group
+  ON tag_rich_menu_bindings (rich_menu_group_id);
 
 CREATE INDEX idx_templates_category ON templates (category);
 

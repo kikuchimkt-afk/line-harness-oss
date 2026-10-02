@@ -15,6 +15,10 @@ const dbFns = vi.hoisted(() => ({
 
 vi.mock('@line-crm/db', () => dbFns);
 
+vi.mock('./friend-tag-attach.js', () => ({
+  attachTagAndFireSideEffects: vi.fn().mockResolvedValue({ added: true }),
+}));
+
 import { processStepDeliveries } from './step-delivery.js';
 
 describe('scenario delivery failure recovery', () => {

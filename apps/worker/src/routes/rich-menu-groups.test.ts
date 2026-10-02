@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, vi } from 'vitest';
+import { describe, expect, test, beforeEach, afterEach, vi } from 'vitest';
 import { Hono } from 'hono';
 
 // Mock @line-crm/db so we can drive the route purely from this test file.
@@ -17,6 +17,11 @@ const dbMocks = {
   setPageRichMenuId: vi.fn(),
   markRichMenuGroupPublished: vi.fn(),
   getLineAccountById: vi.fn(),
+  getFollowingLineUserIdsByTag: vi.fn(),
+  upsertTagRichMenuBinding: vi.fn(),
+  deleteTagRichMenuBinding: vi.fn(),
+  getTagRichMenuBinding: vi.fn(),
+  getFollowingLineUserIdsByPreferredRichMenuGroup: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -78,6 +83,10 @@ function setupApp(opts: { r2?: R2Bucket; db?: D1Database } = {}) {
 
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 // ----- GET /api/rich-menu-groups -----
@@ -500,5 +509,114 @@ describe('POST /api/rich-menu-groups/:groupId/publish', () => {
     const res = await app.request('/api/rich-menu-groups/gid12345-aaaa/publish', { method: 'POST' });
     expect(res.status).toBe(500);
     expect(dbMocks.releasePublishLock).toHaveBeenCalledWith(expect.anything(), 'gid12345-aaaa');
+  });
+});
+
+// ----- POST /api/rich-menu-groups/:groupId/apply-to-tag -----
+
+function publishedGroup() {
+  return {
+    id: 'g1', account_id: 'acc-1', name: 'contest', chat_bar_text: 'menu',
+    size: 'large' as const, default_page_id: 'p1', is_default_for_all: 0,
+    status: 'published' as const, publishing_at: null,
+    created_at: '', updated_at: '',
+    pages: [{
+      id: 'p1', group_id: 'g1', order_index: 0, name: 'home',
+      alias_id: 'lhx-g1-0', line_richmenu_id: 'richmenu-1',
+      image_r2_key: 'image.jpg', image_content_type: 'image/jpeg',
+      created_at: '', updated_at: '', areas: [],
+    }],
+  };
+}
+
+describe('POST /api/rich-menu-groups/:groupId/apply-to-tag', () => {
+  test('rejects a blank tag id instead of treating it as all followers', async () => {
+    const app = setupApp();
+    const res = await app.request('/api/rich-menu-groups/g1/apply-to-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'bulk-link', tagId: '   ', applyToFuture: false }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(dbMocks.getFollowingLineUserIdsByTag).not.toHaveBeenCalled();
+  });
+
+  test('persists future auto-apply even when no current friends match', async () => {
+    dbMocks.getRichMenuGroupWithPages.mockResolvedValue(publishedGroup());
+    dbMocks.getLineAccountById.mockResolvedValue({ channel_access_token: 'token' });
+    dbMocks.upsertTagRichMenuBinding.mockResolvedValue({
+      account_id: 'acc-1', tag_id: 'tag-1', rich_menu_group_id: 'g1', is_active: 1,
+    });
+    dbMocks.getFollowingLineUserIdsByTag.mockResolvedValue([]);
+
+    const app = setupApp();
+    const res = await app.request('/api/rich-menu-groups/g1/apply-to-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'bulk-link', tagId: 'tag-1', applyToFuture: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { total: number; futureApplied: boolean } };
+    expect(body.data).toMatchObject({ total: 0, futureApplied: true });
+    expect(dbMocks.upsertTagRichMenuBinding).toHaveBeenCalledWith(expect.anything(), {
+      accountId: 'acc-1', tagId: 'tag-1', richMenuGroupId: 'g1',
+    });
+    expect(dbMocks.upsertTagRichMenuBinding.mock.invocationCallOrder[0]).toBeLessThan(
+      dbMocks.getFollowingLineUserIdsByTag.mock.invocationCallOrder[0],
+    );
+  });
+
+  test('links current friends and keeps future auto-apply active', async () => {
+    dbMocks.getRichMenuGroupWithPages.mockResolvedValue(publishedGroup());
+    dbMocks.getLineAccountById.mockResolvedValue({ channel_access_token: 'token' });
+    dbMocks.upsertTagRichMenuBinding.mockResolvedValue({
+      account_id: 'acc-1', tag_id: 'tag-1', rich_menu_group_id: 'g1', is_active: 1,
+    });
+    dbMocks.getFollowingLineUserIdsByTag.mockResolvedValue(['U1', 'U2']);
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = setupApp();
+    const res = await app.request('/api/rich-menu-groups/g1/apply-to-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'bulk-link', tagId: 'tag-1', applyToFuture: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { total: number; futureApplied: boolean } };
+    expect(body.data).toMatchObject({ total: 2, futureApplied: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.line.me/v2/bot/richmenu/bulk/link',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ richMenuId: 'richmenu-1', userIds: ['U1', 'U2'] }),
+      }),
+    );
+  });
+
+  test('an explicit false disables a previous future binding', async () => {
+    dbMocks.getRichMenuGroupWithPages.mockResolvedValue(publishedGroup());
+    dbMocks.getLineAccountById.mockResolvedValue({ channel_access_token: 'token' });
+    dbMocks.deleteTagRichMenuBinding.mockResolvedValue(true);
+    dbMocks.getTagRichMenuBinding.mockResolvedValue({
+      account_id: 'acc-1', tag_id: 'tag-1', rich_menu_group_id: 'g1', is_active: 1,
+    });
+    dbMocks.getFollowingLineUserIdsByTag.mockResolvedValue([]);
+
+    const app = setupApp();
+    const res = await app.request('/api/rich-menu-groups/g1/apply-to-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'bulk-link', tagId: 'tag-1', applyToFuture: false }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(dbMocks.deleteTagRichMenuBinding).toHaveBeenCalledWith(
+      expect.anything(), 'acc-1', 'tag-1',
+    );
+    expect(dbMocks.upsertTagRichMenuBinding).not.toHaveBeenCalled();
   });
 });

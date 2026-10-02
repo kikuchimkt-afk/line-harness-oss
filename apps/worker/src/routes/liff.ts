@@ -7,7 +7,6 @@ import {
   upsertFriend,
   getEntryRouteByRefCode,
   recordRefTracking,
-  addTagToFriend,
   getLineAccountByChannelId,
   getLineAccountById,
   getLineAccounts,
@@ -24,6 +23,7 @@ import { finalizeImmediateScenarioDelivery } from '../services/immediate-scenari
 import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
 
 const liffRoutes = new Hono<Env>();
 
@@ -134,7 +134,7 @@ async function applyRefAttribution(
 
   if (effectiveTagId) {
     try {
-      await addTagToFriend(db, friend.id, effectiveTagId);
+      await attachTagAndFireSideEffects(db, friend.id, effectiveTagId);
     } catch (err) {
       console.error(`[ref-attribution] tag attach failed ref=${ref} tag=${effectiveTagId}:`, err);
     }
@@ -150,7 +150,6 @@ async function applyRefAttribution(
         getFriendById,
         computeNextDeliveryAt,
         resolveStepContent,
-        addTagToFriend,
       } = await import('@line-crm/db');
       const { LineClient } = await import('@line-crm/line-sdk');
       const { buildMessage, evaluateCondition, expandVariables, resolveMetadata } = await import('../services/step-delivery.js');
@@ -289,7 +288,11 @@ async function applyRefAttribution(
         // 到達タグ付与 (advance / complete の後)
         if (firstStep.on_reach_tag_id) {
           try {
-            await addTagToFriend(db, friend.id, firstStep.on_reach_tag_id);
+            await attachTagAndFireSideEffects(
+              db,
+              friend.id,
+              firstStep.on_reach_tag_id,
+            );
           } catch (err) {
             console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
           }
@@ -885,7 +888,6 @@ liffRoutes.get('/auth/callback', async (c) => {
       const {
         computeNextDeliveryAt: computeNextLiff,
         resolveStepContent: resolveStepLiff,
-        addTagToFriend: addTagLiff,
       } = await import('@line-crm/db');
       const scenarios = runAccountScenariosLiff ? await getScenarios(db) : [];
       for (const scenario of scenarios) {
@@ -955,7 +957,11 @@ liffRoutes.get('/auth/callback', async (c) => {
                 // 到達タグ付与 (push 後)
                 if (firstStep.on_reach_tag_id) {
                   try {
-                    await addTagLiff(db, friend.id, firstStep.on_reach_tag_id);
+                    await attachTagAndFireSideEffects(
+                      db,
+                      friend.id,
+                      firstStep.on_reach_tag_id,
+                    );
                   } catch (err) {
                     console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
                   }
@@ -1690,8 +1696,7 @@ async function applyXHarnessActions(
           .first<{ id: string }>();
       }
       if (tagRow) {
-        const { addTagToFriend } = await import('@line-crm/db');
-        await addTagToFriend(db, friendId, tagRow.id);
+        await attachTagAndFireSideEffects(db, friendId, tagRow.id);
         console.log(`X Harness: added tag "${result.tag}" to friend ${friendId}`);
       }
     } catch (err) {

@@ -4,11 +4,8 @@ import {
   getFriendById,
   getFriendByLineUserId,
   getFriendCount,
-  addTagToFriend,
   removeTagFromFriend,
   getFriendTags,
-  getScenarios,
-  enrollFriendInScenario,
   jstNow,
 } from '@line-crm/db';
 import type { Friend as DbFriend, Tag as DbTag } from '@line-crm/db';
@@ -27,6 +24,8 @@ import {
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
 import { resolveMessageSource } from '../utils/message-source.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { reconcileTagRichMenuAfterRemoval } from '../services/rich-menu-tag-binding.js';
 
 const friends = new Hono<Env>();
 
@@ -577,24 +576,7 @@ friends.post('/api/friends/:id/tags', async (c) => {
     const db = c.env.DB;
     const denied = await denyIfCannotAccessFriendId(c, friendId);
     if (denied) return denied;
-    await addTagToFriend(db, friendId, body.tagId);
-
-    // Enroll in tag_added scenarios that match this tag
-    const allScenarios = await getScenarios(db);
-    for (const scenario of allScenarios) {
-      if (scenario.trigger_type === 'tag_added' && scenario.is_active && scenario.trigger_tag_id === body.tagId) {
-        const existing = await db
-          .prepare(`SELECT id FROM friend_scenarios WHERE friend_id = ? AND scenario_id = ?`)
-          .bind(friendId, scenario.id)
-          .first();
-        if (!existing) {
-          await enrollFriendInScenario(db, friendId, scenario.id);
-        }
-      }
-    }
-
-    // イベントバス発火: tag_change
-    await fireEvent(db, 'tag_change', { friendId, eventData: { tagId: body.tagId, action: 'add' } });
+    await attachTagAndFireSideEffects(db, friendId, body.tagId);
 
     return c.json({ success: true, data: null }, 201);
   } catch (err) {
@@ -612,6 +594,7 @@ friends.delete('/api/friends/:id/tags/:tagId', async (c) => {
     if (denied) return denied;
 
     await removeTagFromFriend(c.env.DB, friendId, tagId);
+    await reconcileTagRichMenuAfterRemoval(c.env.DB, friendId, tagId);
 
     // イベントバス発火: tag_change
     await fireEvent(c.env.DB, 'tag_change', { friendId, eventData: { tagId, action: 'remove' } });

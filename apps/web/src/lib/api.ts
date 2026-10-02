@@ -1144,7 +1144,11 @@ export const api = {
       ),
 
     publish: (groupId: string) =>
-      fetchApi<ApiResponse<{ pages: Array<{ pageId: string; newRichMenuId: string }> }>>(
+      fetchApi<ApiResponse<{
+        pages: Array<{ pageId: string; newRichMenuId: string }>
+        rebound?: number
+        bindingWarning?: string
+      }>>(
         `/api/rich-menu-groups/${groupId}/publish`,
         { method: 'POST' },
       ),
@@ -1197,11 +1201,18 @@ export const api = {
     applyToTag: (
       groupId: string,
       params:
-        | { mode: 'bulk-link'; tagId: string | null }
+        | { mode: 'bulk-link'; tagId: string; applyToFuture: boolean }
+        | { mode: 'bulk-link'; tagId: null; applyToFuture?: false }
         | { mode: 'set-default' },
     ) =>
       fetchApi<
-        ApiResponse<{ chunks: number; total: number; message?: string; mode?: string }>
+        ApiResponse<{
+          chunks: number
+          total: number
+          message?: string
+          mode?: string
+          futureApplied?: boolean
+        }>
       >(`/api/rich-menu-groups/${groupId}/apply-to-tag`, {
         method: 'POST',
         body: JSON.stringify(params),

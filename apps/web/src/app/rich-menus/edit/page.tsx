@@ -281,7 +281,13 @@ function Editor({
       await persistDraft()
       const res = await api.richMenuGroups.publish(groupId)
       if (!res.success) throw new Error(res.error ?? 'LINE 登録失敗')
-      alert('LINE への登録が完了しました。\n\n友だちに表示するには、一覧画面の「友だちに表示」を実行してください。')
+      if (res.data?.bindingWarning) {
+        alert(
+          `LINEへの登録は完了しましたが、タグ対象者への再表示でエラーが発生しました。\n\n${res.data.bindingWarning}\n\n「友だちに表示」から再実行してください。`,
+        )
+      } else {
+        alert('LINE への登録が完了しました。\n\n友だちに表示するには、一覧画面の「友だちに表示」を実行してください。')
+      }
       await reload()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

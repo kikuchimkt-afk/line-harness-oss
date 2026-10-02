@@ -18,7 +18,8 @@ type Mode =
 
 export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
   const [tags, setTags] = useState<Tag[]>([])
-  const [mode, setMode] = useState<Mode>({ kind: 'all-followers' })
+  const [mode, setMode] = useState<Mode>({ kind: 'tag', tagId: '' })
+  const [applyToFuture, setApplyToFuture] = useState(true)
   const [phase, setPhase] = useState<'config' | 'running' | 'done' | 'error'>(
     'config',
   )
@@ -28,6 +29,7 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
     total: number
     message?: string
     mode?: string
+    futureApplied?: boolean
   } | null>(null)
 
   useEffect(() => {
@@ -42,6 +44,14 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
   }, [])
 
   async function apply() {
+    if (mode.kind === 'all-followers') {
+      if (
+        !confirm(
+          'このアカウントで現在友だち状態の全員に表示します。タグによる絞り込みは行われません。\n\n続行しますか？',
+        )
+      )
+        return
+    }
     // 「全員のデフォルト」は影響範囲が大きいので強い確認。
     if (mode.kind === 'set-default') {
       if (
@@ -59,7 +69,11 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
     try {
       const params =
         mode.kind === 'tag'
-          ? { mode: 'bulk-link' as const, tagId: mode.tagId }
+          ? {
+              mode: 'bulk-link' as const,
+              tagId: mode.tagId,
+              applyToFuture,
+            }
           : mode.kind === 'all-followers'
             ? { mode: 'bulk-link' as const, tagId: null }
             : { mode: 'set-default' as const }
@@ -100,27 +114,52 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
                     })
                   }
                   label="タグで絞り込んで適用"
-                  description="指定したタグを持つ友だちだけに表示します。"
+                  description="指定したタグを現在持つ友だちに、今すぐ表示します。"
                   disabled={tags.length === 0}
                 >
                   {mode.kind === 'tag' && (
-                    <select
-                      value={mode.tagId}
-                      onChange={(e) =>
-                        setMode({ kind: 'tag', tagId: e.target.value })
-                      }
-                      className="mt-2 block w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                    >
-                      {tags.length === 0 ? (
-                        <option value="">タグがありません</option>
-                      ) : (
-                        tags.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name}
-                          </option>
-                        ))
-                      )}
-                    </select>
+                    <div className="mt-2 space-y-3">
+                      <select
+                        aria-label="表示対象のタグ"
+                        value={mode.tagId}
+                        onChange={(e) =>
+                          setMode({ kind: 'tag', tagId: e.target.value })
+                        }
+                        className="block w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      >
+                        {tags.length === 0 ? (
+                          <option value="">タグがありません</option>
+                        ) : (
+                          <>
+                            <option value="">タグを選択してください</option>
+                            {tags.map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+
+                      <div className="rounded-lg border border-green-200 bg-white p-3">
+                        <label className="flex cursor-pointer items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={applyToFuture}
+                            onChange={(e) => setApplyToFuture(e.target.checked)}
+                            className="mt-0.5 h-4 w-4 accent-green-600"
+                          />
+                          <span>
+                            <span className="block text-xs font-medium text-gray-900">
+                              今後このタグが付く友だちにも自動で表示する
+                            </span>
+                            <span className="mt-1 block text-[11px] leading-relaxed text-gray-600">
+                              新しい友だち・既存の友だちを問わず、このタグが付いた時点で自動適用します。
+                            </span>
+                          </span>
+                        </label>
+                      </div>
+                    </div>
                   )}
                 </RadioOption>
                 <RadioOption
@@ -144,7 +183,11 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
                   className="px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-opacity hover:opacity-90"
                   style={{ backgroundColor: '#06C755' }}
                 >
-                  実行する
+                  {mode.kind === 'tag'
+                    ? applyToFuture
+                      ? '現在＋今後の友だちに適用'
+                      : '現在の友だちに適用'
+                    : '実行する'}
                 </button>
               </div>
             </>
@@ -154,7 +197,9 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
             <div className="text-center py-10 text-sm text-gray-500">
               <div className="mb-2">適用中...</div>
               <div className="text-xs text-gray-400">
-                LINE Messaging API に送信しています
+                {mode.kind === 'tag' && applyToFuture
+                  ? '現在の対象者へ適用し、今後の自動表示を設定しています'
+                  : 'LINE Messaging API に送信しています'}
               </div>
             </div>
           )}
@@ -167,6 +212,11 @@ export function ApplyToTagModal({ groupId, groupName, onClose }: Props) {
                   {result.message ??
                     `${result.total} 名の友だちに適用しました (${result.chunks} chunk)`}
                 </div>
+                {result.futureApplied && (
+                  <div className="mt-2 border-t border-green-200 pt-2 text-xs font-medium">
+                    今後このタグが付く友だちへの自動表示も有効です。
+                  </div>
+                )}
               </div>
               <div className="flex justify-end">
                 <button
@@ -226,18 +276,22 @@ function RadioOption({
   children?: React.ReactNode
 }) {
   return (
-    <label
+    <div
       className={`block border rounded-lg p-3 transition-colors ${
         disabled
           ? 'opacity-50 cursor-not-allowed border-gray-200'
           : checked
             ? warn
-              ? 'border-amber-400 bg-amber-50 cursor-pointer'
-              : 'border-green-500 bg-green-50 cursor-pointer'
-            : 'border-gray-200 hover:bg-gray-50 cursor-pointer'
+              ? 'border-amber-400 bg-amber-50'
+              : 'border-green-500 bg-green-50'
+            : 'border-gray-200 hover:bg-gray-50'
       }`}
     >
-      <div className="flex items-start gap-3">
+      <label
+        className={`flex items-start gap-3 ${
+          disabled ? 'cursor-not-allowed' : 'cursor-pointer'
+        }`}
+      >
         <input
           type="radio"
           checked={checked}
@@ -248,9 +302,9 @@ function RadioOption({
         <div className="flex-1">
           <div className="text-sm font-medium text-gray-900">{label}</div>
           <p className="text-xs text-gray-600 mt-0.5">{description}</p>
-          {children}
         </div>
-      </div>
-    </label>
+      </label>
+      {children && <div className="ml-7">{children}</div>}
+    </div>
   )
 }

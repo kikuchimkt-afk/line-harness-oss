@@ -6,6 +6,7 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { applyTagRichMenuBinding } from '../services/rich-menu-tag-binding.js';
 
 const stripe = new Hono<Env>();
 
@@ -141,6 +142,9 @@ stripe.post('/api/integrations/stripe/webhook', async (c) => {
             .prepare(`INSERT OR IGNORE INTO friend_tags (friend_id, tag_id, assigned_at) VALUES (?, ?, ?)`)
             .bind(friendId, tag.id, jstNow())
             .run();
+          await applyTagRichMenuBinding(db, friendId, tag.id).catch((error) => {
+            console.error('[stripe] rich-menu binding apply failed:', error);
+          });
         }
       }
 
@@ -159,6 +163,9 @@ stripe.post('/api/integrations/stripe/webhook', async (c) => {
           .prepare(`INSERT OR IGNORE INTO friend_tags (friend_id, tag_id, assigned_at) VALUES (?, ?, ?)`)
           .bind(friendId, cancelledTag.id, jstNow())
           .run();
+        await applyTagRichMenuBinding(db, friendId, cancelledTag.id).catch((error) => {
+          console.error('[stripe] rich-menu binding apply failed:', error);
+        });
       }
     }
 

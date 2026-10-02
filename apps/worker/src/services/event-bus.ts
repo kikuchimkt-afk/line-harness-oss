@@ -48,6 +48,33 @@ export async function fireEvent(
   lineAccessToken?: string,
   lineAccountId?: string | null,
 ): Promise<void> {
+  let resolvedLineAccessToken = lineAccessToken;
+  let resolvedLineAccountId = lineAccountId;
+  if (payload.friendId) {
+    try {
+      const context = await db
+        .prepare(
+          `SELECT f.line_account_id, la.channel_access_token
+             FROM friends f
+             LEFT JOIN line_accounts la ON la.id = f.line_account_id
+            WHERE f.id = ?`,
+        )
+        .bind(payload.friendId)
+        .first<{
+          line_account_id: string | null;
+          channel_access_token: string | null;
+        }>();
+      if (context) {
+        resolvedLineAccountId = context.line_account_id;
+        if (context.channel_access_token) {
+          resolvedLineAccessToken = context.channel_access_token;
+        }
+      }
+    } catch (error) {
+      console.error('fireEvent account context resolution failed:', error);
+    }
+  }
+
   // Phase 1: fire webhooks, apply scoring rules, and ad conversion postback concurrently.
   const phase1: Promise<unknown>[] = [
     fireOutgoingWebhooks(db, eventType, payload),
@@ -72,7 +99,13 @@ export async function fireEvent(
     : payload;
 
   // Phase 2: evaluate automations.
-  await processAutomations(db, eventType, enrichedPayload, lineAccessToken, lineAccountId);
+  await processAutomations(
+    db,
+    eventType,
+    enrichedPayload,
+    resolvedLineAccessToken,
+    resolvedLineAccountId,
+  );
 }
 
 /** 送信Webhookへの通知 */
@@ -146,7 +179,8 @@ async function processAutomations(
     const allAutomations = await getActiveAutomationsByEvent(db, eventType);
     // Filter by account: match this account's automations + unassigned (backward compat)
     const automations = allAutomations.filter(
-      (a) => !a.line_account_id || !lineAccountId || a.line_account_id === lineAccountId,
+      (a) => !a.line_account_id ||
+        (lineAccountId !== null && lineAccountId !== undefined && a.line_account_id === lineAccountId),
     );
 
     for (const automation of automations) {
@@ -205,6 +239,10 @@ function matchConditions(
     if (payload.eventData.tagId !== conditions.tag_id) return false;
   }
 
+  if (conditions.tag_action !== undefined && payload.eventData) {
+    if (payload.eventData.action !== conditions.tag_action) return false;
+  }
+
   // 合言葉は、大文字・小文字と全角・半角の違いを無視して比べる
   const normalizeKeyword = (value: unknown) =>
     typeof value === 'string' ? value.normalize('NFKC').trim().toLowerCase() : '';
@@ -239,13 +277,21 @@ async function executeAction(
   }
 
   switch (action.type) {
-    case 'add_tag':
+    case 'add_tag': {
       await addTagToFriend(db, friendId!, action.params.tagId);
+      const { applyTagRichMenuBinding } = await import('./rich-menu-tag-binding.js');
+      await applyTagRichMenuBinding(db, friendId!, action.params.tagId);
       break;
+    }
 
-    case 'remove_tag':
+    case 'remove_tag': {
       await removeTagFromFriend(db, friendId!, action.params.tagId);
+      const { reconcileTagRichMenuAfterRemoval } = await import(
+        './rich-menu-tag-binding.js'
+      );
+      await reconcileTagRichMenuAfterRemoval(db, friendId!, action.params.tagId);
       break;
+    }
 
     case 'start_scenario':
       await enrollFriendInScenario(db, friendId!, action.params.scenarioId);
