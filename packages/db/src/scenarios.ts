@@ -896,7 +896,7 @@ export async function claimFriendScenarioForDelivery(
          AND status = 'active'
          AND current_step_order = ?
          AND next_delivery_at IS ?
-         AND updated_at = ?`,
+         AND updated_at IS ?`,
     )
     .bind(now, id, expectedStepOrder, expectedNextDeliveryAt, expectedUpdatedAt)
     .run();

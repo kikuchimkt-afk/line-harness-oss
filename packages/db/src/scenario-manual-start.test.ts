@@ -1,4 +1,8 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
+
+// node:sqlite (Node 22+) instead of better-sqlite3, which needs a native build.
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+type SqliteDb = InstanceType<typeof DatabaseSync>;
 import { describe, expect, test } from 'vitest';
 import {
   claimFriendScenarioForDelivery,
@@ -11,7 +15,7 @@ class SqliteD1Statement {
   private params: unknown[] = [];
 
   constructor(
-    private readonly db: Database.Database,
+    private readonly db: SqliteDb,
     private readonly sql: string,
   ) {}
 
@@ -21,21 +25,21 @@ class SqliteD1Statement {
   }
 
   async first<T>() {
-    return (this.db.prepare(this.sql).get(...this.params) as T | undefined) ?? null;
+    return (this.db.prepare(this.sql).get(...(this.params as import('node:sqlite').SQLInputValue[])) as T | undefined) ?? null;
   }
 
   async all<T>() {
-    return { results: this.db.prepare(this.sql).all(...this.params) as T[] };
+    return { results: this.db.prepare(this.sql).all(...(this.params as import('node:sqlite').SQLInputValue[])) as T[] };
   }
 
   async run() {
-    const result = this.db.prepare(this.sql).run(...this.params);
+    const result = this.db.prepare(this.sql).run(...(this.params as import('node:sqlite').SQLInputValue[]));
     return { success: true, meta: { changes: result.changes } };
   }
 }
 
 function setupDb() {
-  const sqlite = new Database(':memory:');
+  const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(`
     CREATE TABLE scenarios (
       id TEXT PRIMARY KEY,
@@ -86,7 +90,7 @@ function setupDb() {
   return { sqlite, d1 };
 }
 
-function insertScenario(sqlite: Database.Database, mode = 'relative') {
+function insertScenario(sqlite: SqliteDb, mode = 'relative') {
   sqlite.prepare(`INSERT INTO scenarios (id, delivery_mode) VALUES ('scenario-1', ?)`).run(mode);
   const insert = sqlite.prepare(
     `INSERT INTO scenario_steps
