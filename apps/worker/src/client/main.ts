@@ -20,14 +20,16 @@ import { initForm } from './form.js';
 import { buildDirectFormUrl } from '../lib/direct-form-url.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import { retryLiffLinkAfterFriendAdd, type LiffLinkAttemptResult } from './liff-link-retry.js';
+import { isExpiredLiffIdToken, shouldStartReauthentication } from './liff-token-state.js';
 
 declare const liff: {
-  init(config: { liffId: string }): Promise<void>;
+  init(config: { liffId: string; withLoginOnExternalBrowser?: boolean }): Promise<void>;
   isLoggedIn(): boolean;
   login(opts?: { redirectUri?: string }): void;
+  logout(): void;
   getProfile(): Promise<{ userId: string; displayName: string; pictureUrl?: string; statusMessage?: string }>;
   getIDToken(): string | null;
-  getDecodedIDToken(): { sub: string; name?: string; email?: string; picture?: string } | null;
+  getDecodedIDToken(): { sub: string; name?: string; email?: string; picture?: string; exp?: number } | null;
   getFriendship(): Promise<{ friendFlag: boolean }>;
   isInClient(): boolean;
   closeWindow(): void;
@@ -46,6 +48,29 @@ if (!LIFF_ID) {
 const UUID_STORAGE_KEY = 'lh_uuid';
 // Bot basic ID — resolved dynamically from API after liff.init()
 let BOT_BASIC_ID = '';
+let reauthenticationStarted = false;
+
+function sessionStore(): Storage | null {
+  try { return window.sessionStorage; } catch { return null; }
+}
+
+/** Returns true when a re-login was started (the page is about to reload). */
+function reauthenticateLiff(): boolean {
+  if (reauthenticationStarted) return true;
+  if (!shouldStartReauthentication(sessionStore())) return false;
+  reauthenticationStarted = true;
+  if (liff.isInClient()) {
+    // In a LIFF browser, liff.login() is not supported. Reopening the page
+    // reruns liff.init(), which obtains a fresh token from LINE.
+    window.location.reload();
+    return true;
+  }
+  // In an external browser, clear the expired session first. The next load
+  // reaches the supported liff.login() flow with the complete current URL.
+  liff.logout();
+  window.location.reload();
+  return true;
+}
 
 function apiCall(path: string, options?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -516,6 +541,7 @@ async function initEventBooking(initialKind: 'detail' | 'history'): Promise<void
     lineUserId: profile.userId,
     idToken,
     displayName: profile.displayName,
+    reauthenticate: reauthenticateLiff,
   };
   const initial = initialKind === 'detail'
     ? { kind: 'detail' as const, eventId }
@@ -531,6 +557,12 @@ async function main() {
 
     if (!liff.isLoggedIn()) {
       liff.login({ redirectUri: window.location.href });
+      return;
+    }
+
+    // If a re-login was just tried, continue so the normal error message
+    // shows instead of a blank page.
+    if (isExpiredLiffIdToken(liff.getDecodedIDToken()) && reauthenticateLiff()) {
       return;
     }
 
