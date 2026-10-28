@@ -9,6 +9,9 @@ let linkResponse: Promise<Response>;
 let resolveLink: (response: Response) => void;
 let rejectLink: (error: Error) => void;
 let fetchMock: ReturnType<typeof vi.fn>;
+let decodedToken: { sub: string; exp?: number } | null;
+let session: Map<string, string>;
+let reload: ReturnType<typeof vi.fn>;
 
 async function flushFlow() {
   // Drain the async init/config/profile/link JSON pipeline without real time.
@@ -20,9 +23,13 @@ beforeEach(() => {
   vi.useFakeTimers();
   app = { innerHTML: '' };
   retryClick = undefined;
+  decodedToken = { sub: 'U_synthetic', exp: Math.floor(Date.now() / 1000) + 3600 };
+  session = new Map();
+  reload = vi.fn();
   linkResponse = new Promise<Response>((resolve, reject) => { resolveLink = resolve; rejectLink = reject; });
   vi.stubGlobal('window', { location: { search: '?liffId=synthetic-liff&ref=synthetic-flyer-ref',
-    href: 'https://worker.example.com/?liffId=synthetic-liff&ref=synthetic-flyer-ref', pathname: '/' } });
+    href: 'https://worker.example.com/?liffId=synthetic-liff&ref=synthetic-flyer-ref', pathname: '/', reload },
+    sessionStorage: { getItem: (k: string) => session.get(k) ?? null, setItem: (k: string, v: string) => void session.set(k, v) } });
   vi.stubGlobal('document', {
     getElementById: (id: string) => id === 'app' ? app : {
       addEventListener: (_event: string, callback: () => void) => { if (id === 'retryEntryRefBtn') retryClick = callback; },
@@ -39,6 +46,9 @@ beforeEach(() => {
     getProfile: vi.fn().mockResolvedValue({ userId: 'U_synthetic', displayName: '架空の保護者' }),
     getFriendship: vi.fn().mockResolvedValue({ friendFlag: false }),
     getIDToken: () => 'synthetic-id-token',
+    getDecodedIDToken: () => decodedToken,
+    isInClient: () => true,
+    logout: vi.fn(),
   });
   fetchMock = vi.fn((url: string) => {
     if (url.startsWith('/api/liff/config')) return Promise.resolve(new Response(JSON.stringify({ success: true, data: { botBasicId: '@synthetic' } })));
@@ -112,5 +122,24 @@ describe('campaign LIFF pre-follow UI', () => {
     expect(app.innerHTML).not.toContain('登録完了');
     expect(app.innerHTML).not.toContain('もう一度確認する');
     expect(app.innerHTML).not.toContain('友だち追加して始める');
+  });
+});
+
+describe('expired LIFF login', () => {
+  it('re-logs in once by reloading, without calling the API with the expired token', async () => {
+    decodedToken = { sub: 'U_synthetic', exp: Math.floor(Date.now() / 1000) - 60 };
+    await import('./main.js');
+    await flushFlow();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/liff/link', expect.anything());
+  });
+
+  it('does not reload again right after a re-login (no reload loop) and continues normally', async () => {
+    decodedToken = { sub: 'U_synthetic', exp: Math.floor(Date.now() / 1000) - 60 };
+    session.set('lh_liff_reauth_at', String(Date.now() - 10_000));
+    await import('./main.js');
+    await flushFlow();
+    expect(reload).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith('/api/liff/link', expect.objectContaining({ method: 'POST' }));
   });
 });
