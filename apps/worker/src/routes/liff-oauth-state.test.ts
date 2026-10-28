@@ -31,3 +31,18 @@ describe('LINE login state with multibyte campaign parameters', () => {
     expect(JSON.parse(decoded)).toMatchObject({ ref: 'winter-flyer', utmCampaign: '冬期講習2026' });
   });
 });
+
+describe('/auth/oauth reached through a LIFF URL', () => {
+  it('keeps ref and campaign parameters carried in liff.state', async () => {
+    const liffState = '/?ref=winter-flyer&account=login-a&utm_campaign=' + encodeURIComponent('冬期講習2026');
+    const res = await liffRoutes.request(
+      'https://worker.example.com/auth/oauth?liff.state=' + encodeURIComponent(liffState),
+      { redirect: 'manual' },
+      { DB: db, LINE_LOGIN_CHANNEL_ID: 'login-a', LIFF_URL: 'https://liff.line.me/1-abc', WORKER_URL: 'https://worker.example.com' },
+    );
+    expect(res.status).toBe(302);
+    const state = new URL(res.headers.get('location')!).searchParams.get('state')!;
+    const decoded = new TextDecoder().decode(Uint8Array.from(atob(state), (ch) => ch.charCodeAt(0)));
+    expect(JSON.parse(decoded)).toMatchObject({ ref: 'winter-flyer', utmCampaign: '冬期講習2026' });
+  });
+});
