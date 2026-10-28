@@ -269,6 +269,40 @@ describe('fireEvent — send_message action logging', () => {
   });
 });
 
+describe('campaign restart and date boundaries', () => {
+  afterEach(() => vi.useRealTimers());
+  async function run(conditions: Record<string, string>, restart: boolean) {
+    vi.clearAllMocks();
+    const db = await import('@line-crm/db');
+    vi.mocked(db.getActiveAutomationsByEvent).mockResolvedValue([{
+      id: 'winter-restart', line_account_id: 'acc-1', conditions: JSON.stringify({ keyword_exact: '冬期講習', ...conditions }),
+      actions: JSON.stringify([{ type: 'start_scenario', params: { scenarioId: 'winter-1', ...(restart ? { restart: 'true' } : {}) } }]),
+    }] as never);
+    const fake = fakeDb({ capturedInserts: [], friend: { line_user_id: 'U_synthetic', line_account_id: 'acc-1' } });
+    await fireEvent(fake, 'message_received', { friendId: 'friend-1', eventData: { text: '冬期講習' } }, 'synthetic-token', 'acc-1');
+    return { db, fake };
+  }
+  it('opts only explicit restart actions into a fresh run', async () => {
+    const { db, fake } = await run({}, true);
+    expect(db.enrollFriendInScenario).toHaveBeenCalledWith(fake, 'friend-1', 'winter-1', { restart: true });
+  });
+  it('keeps ordinary enrollment idempotent', async () => {
+    const { db, fake } = await run({}, false);
+    expect(db.enrollFriendInScenario).toHaveBeenCalledWith(fake, 'friend-1', 'winter-1');
+  });
+  it.each([
+    ['2026-12-21T14:59:59Z', { before: '2026-12-22T00:00:00+09:00' }, true],
+    ['2026-12-21T15:00:00Z', { before: '2026-12-22T00:00:00+09:00' }, false],
+    ['2026-12-21T15:00:00Z', { on_or_after: '2026-12-22T00:00:00+09:00' }, true],
+    ['2027-01-31T15:00:00Z', { before: '2027-02-01T00:00:00+09:00' }, false],
+    ['2026-10-24T10:00:00Z', { before: 'invalid' }, false],
+  ])('evaluates campaign window at %s', async (now, conditions, allowed) => {
+    vi.useFakeTimers();vi.setSystemTime(new Date(now));
+    const { db } = await run(conditions, true);
+    expect(vi.mocked(db.enrollFriendInScenario).mock.calls.length).toBe(allowed ? 1 : 0);
+  });
+});
+
 describe('fireEvent — tag_change rich-menu automation', () => {
   beforeEach(() => {
     vi.clearAllMocks();

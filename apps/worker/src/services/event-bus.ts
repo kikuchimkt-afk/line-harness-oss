@@ -234,6 +234,17 @@ function matchConditions(
   // 条件が空 → 常にマッチ
   if (Object.keys(conditions).length === 0) return true;
 
+  // ISO timestamps include their timezone. Reject invalid windows rather than
+  // accidentally enabling an expired campaign.
+  if (conditions.before !== undefined) {
+    const until = Date.parse(String(conditions.before));
+    if (!Number.isFinite(until) || Date.now() >= until) return false;
+  }
+  if (conditions.on_or_after !== undefined) {
+    const from = Date.parse(String(conditions.on_or_after));
+    if (!Number.isFinite(from) || Date.now() < from) return false;
+  }
+
   // score_threshold チェック
   if (conditions.score_threshold !== undefined && payload.eventData) {
     const currentScore = payload.eventData.currentScore as number | undefined;
@@ -305,7 +316,11 @@ async function executeAction(
       break;
 
     case 'start_scenario':
-      await enrollFriendInScenario(db, friendId!, action.params.scenarioId);
+      if (action.params.restart === 'true') {
+        await enrollFriendInScenario(db, friendId!, action.params.scenarioId, { restart: true });
+      } else {
+        await enrollFriendInScenario(db, friendId!, action.params.scenarioId);
+      }
       break;
 
     case 'send_message': {

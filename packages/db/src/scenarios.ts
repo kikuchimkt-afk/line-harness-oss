@@ -13,6 +13,7 @@ export interface Scenario {
   trigger_tag_id: string | null;
   line_account_id: string | null;
   is_active: number;
+  expires_at?: string | null;
   delivery_mode: DeliveryMode;
   created_at: string;
   updated_at: string;
@@ -130,7 +131,7 @@ export async function createScenario(
 }
 
 export type UpdateScenarioInput = Partial<
-  Pick<Scenario, 'name' | 'description' | 'trigger_type' | 'trigger_tag_id' | 'is_active'>
+  Pick<Scenario, 'name' | 'description' | 'trigger_type' | 'trigger_tag_id' | 'is_active' | 'expires_at'>
 >;
 
 export async function updateScenario(
@@ -161,6 +162,10 @@ export async function updateScenario(
   if (updates.is_active !== undefined) {
     fields.push('is_active = ?');
     values.push(updates.is_active);
+  }
+  if (updates.expires_at !== undefined) {
+    fields.push('expires_at = ?');
+    values.push(updates.expires_at);
   }
 
   if (fields.length === 0) {
@@ -365,16 +370,18 @@ export async function enrollFriendInScenario(
   db: D1Database,
   friendId: string,
   scenarioId: string,
+  options?: { restart?: boolean },
 ): Promise<FriendScenario | null> {
   const id = crypto.randomUUID();
   const now = jstNow();
 
   // delivery_mode を取得（migration 037 適用前の DB では 'relative' が DEFAULT で既に入っている）
   const scenarioRow = await db
-    .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
+    .prepare(`SELECT delivery_mode, is_active, expires_at FROM scenarios WHERE id = ?`)
     .bind(scenarioId)
-    .first<{ delivery_mode: DeliveryMode }>();
+    .first<{ delivery_mode: DeliveryMode; is_active: number; expires_at: string | null }>();
   if (!scenarioRow) return null;
+  if (scenarioRow.is_active === 0 || (scenarioRow.expires_at && Date.parse(scenarioRow.expires_at) <= Date.now())) return null;
 
   const firstStep = await db
     .prepare(
@@ -392,13 +399,16 @@ export async function enrollFriendInScenario(
 
   // A scenario with no steps is immediately completed — no stuck active enrollment.
   if (!firstStep) {
-    const result = await db
+    const insert = db
       .prepare(
         `INSERT OR IGNORE INTO friend_scenarios (id, friend_id, scenario_id, current_step_order, status, started_at, next_delivery_at, updated_at)
          VALUES (?, ?, ?, 0, 'completed', ?, NULL, ?)`,
       )
-      .bind(id, friendId, scenarioId, now, now)
-      .run();
+      .bind(id, friendId, scenarioId, now, now);
+    const result = options?.restart ? (await db.batch([
+      db.prepare(`UPDATE friend_scenarios SET status = 'completed', next_delivery_at = NULL, updated_at = ? WHERE friend_id = ? AND scenario_id = ? AND status != 'completed'`).bind(now, friendId, scenarioId),
+      insert,
+    ]))[1] : await insert.run();
 
     if (!result.meta.changes || result.meta.changes === 0) return null;
 
@@ -423,13 +433,18 @@ export async function enrollFriendInScenario(
   // silently completed without delivering anything (because no step has
   // step_order > 0). This was observed in production on 2026-04-27 where
   // ~10 friend_scenarios silently completed for a 46-hour window.
-  const result = await db
+  const insert = db
     .prepare(
       `INSERT OR IGNORE INTO friend_scenarios (id, friend_id, scenario_id, current_step_order, status, started_at, next_delivery_at, updated_at)
        VALUES (?, ?, ?, -1, 'active', ?, ?, ?)`,
     )
-    .bind(id, friendId, scenarioId, now, nextDeliveryAt, now)
-    .run();
+    .bind(id, friendId, scenarioId, now, nextDeliveryAt, now);
+  // A deliberate restart retires only this friend's previous run atomically.
+  // Default callers retain INSERT OR IGNORE semantics and never replay a run.
+  const result = options?.restart ? (await db.batch([
+    db.prepare(`UPDATE friend_scenarios SET status = 'completed', next_delivery_at = NULL, updated_at = ? WHERE friend_id = ? AND scenario_id = ? AND status != 'completed'`).bind(now, friendId, scenarioId),
+    insert,
+  ]))[1] : await insert.run();
 
   if (!result.meta.changes || result.meta.changes === 0) return null;
 
@@ -451,8 +466,10 @@ export async function getFriendScenariosDueForDelivery(
        INNER JOIN scenarios s ON fs.scenario_id = s.id
        WHERE fs.status = 'active'
          AND s.is_active = 1
+         AND (s.expires_at IS NULL OR julianday(s.expires_at) > julianday(?))
          AND fs.next_delivery_at IS NOT NULL`,
     )
+    .bind(now)
     .all<FriendScenario>();
   const nowMs = new Date(now).getTime();
   return result.results

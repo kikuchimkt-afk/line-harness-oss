@@ -31,7 +31,7 @@ beforeEach(() => {
     CREATE TABLE line_accounts(id TEXT PRIMARY KEY,channel_access_token TEXT);
     CREATE TABLE automations(id TEXT PRIMARY KEY);
     CREATE TABLE account_settings(id TEXT PRIMARY KEY,line_account_id TEXT,key TEXT,value TEXT,created_at TEXT,updated_at TEXT,UNIQUE(line_account_id,key));
-    CREATE TABLE scenarios(id TEXT PRIMARY KEY,is_active INTEGER);
+    CREATE TABLE scenarios(id TEXT PRIMARY KEY,is_active INTEGER,expires_at TEXT);
     CREATE TABLE friend_scenarios(id TEXT PRIMARY KEY,friend_id TEXT,scenario_id TEXT,status TEXT,current_step_order INTEGER,next_delivery_at TEXT,started_at TEXT,updated_at TEXT);
     CREATE TABLE friend_reminders(id TEXT PRIMARY KEY,friend_id TEXT,status TEXT);
     CREATE TABLE scheduled_chat_messages(id TEXT PRIMARY KEY,friend_id TEXT,status TEXT,last_error TEXT,retry_count INTEGER,sent_at TEXT);
@@ -50,7 +50,7 @@ beforeEach(() => {
     INSERT INTO bookings VALUES('booking','blocked'); INSERT INTO event_bookings VALUES('event-booking','blocked');
     INSERT INTO booking_reminders VALUES('q','booking','pending',NULL,0,NULL);
     INSERT INTO event_booking_reminders VALUES('q','event-booking','pending',NULL,0,NULL);
-    INSERT INTO scenarios VALUES('sc',1); INSERT INTO friend_scenarios VALUES('fs','blocked','sc','active',-1,'2000-01-01T00:00:00Z','2000-01-01T00:00:00Z',NULL);
+    INSERT INTO scenarios VALUES('sc',1,NULL); INSERT INTO friend_scenarios VALUES('fs','blocked','sc','active',-1,'2000-01-01T00:00:00Z','2000-01-01T00:00:00Z',NULL);
   `);
   sql.exec(readFileSync(new URL('../../../../packages/db/migrations/056_rich_menu_assignments.sql',import.meta.url),'utf8'));
   db={prepare(query:string){let args:unknown[]=[]; const s={bind(...a:unknown[]){args=a;return s;},

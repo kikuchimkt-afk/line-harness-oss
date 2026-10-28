@@ -61,7 +61,9 @@
     "053_scheduled_chat_messages.sql",
     "054_event_booking_waitlist.sql",
     "055_event_detail_url.sql",
-    "056_rich_menu_assignments.sql"
+    "056_rich_menu_assignments.sql",
+    "058_liff_pending_ref_attributions.sql",
+    "059_scenario_expiry.sql"
   ],
-  "migrationCount": 62
+  "migrationCount": 64
 }

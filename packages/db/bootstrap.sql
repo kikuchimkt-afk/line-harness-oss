@@ -487,6 +487,16 @@ CREATE TABLE incoming_webhooks (
   updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 
+CREATE TABLE liff_pending_ref_attributions (
+  line_account_id TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
+  line_user_id TEXT NOT NULL,
+  entry_route_id TEXT NOT NULL REFERENCES entry_routes(id) ON DELETE CASCADE,
+  ref_code TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL CHECK (expires_at > created_at),
+  PRIMARY KEY (line_account_id, line_user_id)
+);
+
 CREATE TABLE line_accounts (
   id                   TEXT PRIMARY KEY,
   channel_id           TEXT NOT NULL UNIQUE,
@@ -715,6 +725,7 @@ CREATE TABLE scenarios (
   trigger_tag_id  TEXT REFERENCES tags (id) ON DELETE SET NULL,
   is_active       INTEGER NOT NULL DEFAULT 1,
   delivery_mode   TEXT NOT NULL DEFAULT 'relative' CHECK (delivery_mode IN ('relative', 'elapsed', 'absolute_time')),
+  expires_at      TEXT,
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 , line_account_id TEXT);
@@ -996,6 +1007,9 @@ CREATE INDEX idx_health_logs_account ON account_health_logs (line_account_id);
 
 CREATE INDEX idx_idempotency_expires ON booking_idempotency_keys (expires_at);
 
+CREATE INDEX idx_liff_pending_ref_expiry
+  ON liff_pending_ref_attributions(expires_at);
+
 CREATE INDEX idx_line_accounts_display_order
   ON line_accounts (display_order, created_at);
 
@@ -1076,3 +1090,12 @@ CREATE INDEX idx_users_email ON users (email);
 CREATE INDEX idx_users_external_id ON users (external_id);
 
 CREATE INDEX idx_users_phone ON users (phone);
+
+-- Recurring event appointments in JST.
+CREATE TABLE IF NOT EXISTS event_weekly_slot_rules (
+ event_id TEXT PRIMARY KEY REFERENCES events(id),
+ weekly_windows TEXT NOT NULL CHECK(json_valid(weekly_windows)),
+ horizon_days INTEGER NOT NULL DEFAULT 28 CHECK(horizon_days BETWEEN 1 AND 90),
+ capacity INTEGER NOT NULL DEFAULT 1 CHECK(capacity>=1),
+ is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN(0,1))
+);

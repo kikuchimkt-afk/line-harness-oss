@@ -708,6 +708,13 @@ function makeEventDb(state: {
             const [
               id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, _requested_at, identity_key,
             ] = bound as [string, string, string, string, string, string, string | null, string, string, string | undefined];
+            if (sql.includes('WHERE (SELECT COUNT(*)')) {
+              const capacity = bound[bound.length - 1] as number;
+              const occupied = (state.bookings ?? []).filter((b) =>
+                b.slot_id === slot_id && (b.status === 'requested' || b.status === 'confirmed'),
+              ).length;
+              if (occupied >= capacity) return { success: true, meta: { changes: 0 } };
+            }
             (state.bookings ?? []).push({
               id, event_id, status,
               slot_id, friend_id,
@@ -1692,6 +1699,19 @@ describe('event_slots admin', () => {
 });
 
 describe('LIFF event detail', () => {
+  test('does not expose private confirmation instructions before booking', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1,
+        confirmation_message_extra: 'PRIVATE_CALLER_NUMBER', reminder_message_extra: 'PRIVATE_REMINDER' })],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+    };
+    const res = await setupApp(state).request('/api/liff/events/e1?liffId=L1');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).not.toHaveProperty('confirmation_message_extra');
+    expect(body).not.toHaveProperty('reminder_message_extra');
+    expect(JSON.stringify(body)).not.toContain('PRIVATE_');
+  });
   test('GET returns published event', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1 })],
@@ -2191,6 +2211,26 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
       body: JSON.stringify({ slot_id: 's1' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  test('simultaneous requests cannot confirm two people in a one-person slot', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, max_bookings_per_friend: null, waitlist_enabled: 0 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T11:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [] as BookingRow[], accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const request = (key: string) => app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key, Authorization: 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+    const responses = await Promise.all([request('race1'), request('race2')]);
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(state.bookings).toHaveLength(1);
+    expect(state.bookings[0].status).toBe('confirmed');
   });
 
   test('409 slot_full when capacity reached', async () => {

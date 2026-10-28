@@ -121,6 +121,21 @@ const rowBase = {
   step_count: 0,
 };
 
+describe('optional campaign expiry API', () => {
+  test.each(['2027-02-01T00:00:00+09:00', null])('saves an explicit boundary %s', async expiresAt => {
+    dbMocks.updateScenario.mockResolvedValue({ id: 'winter', name: 'winter', ...rowBase, expires_at: expiresAt });
+    const db = { prepare() { const s={bind(){return s;},async first(){return {line_account_id:'acc-1'};}};return s;} } as unknown as D1Database;
+    const response=await setupApp(db).request('/api/scenarios/winter',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({expiresAt})});
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.expiresAt).toBe(expiresAt);
+    expect(dbMocks.updateScenario).toHaveBeenCalledWith(db,'winter',expect.objectContaining({expires_at:expiresAt}));
+  });
+  test.each(['2027-02-01','invalid'])('rejects ambiguous expiry %s', async expiresAt => {
+    const response=await setupApp({} as D1Database).request('/api/scenarios/winter',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({expiresAt})});
+    expect(response.status).toBe(400);expect(dbMocks.updateScenario).not.toHaveBeenCalled();
+  });
+});
+
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
   dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);

@@ -62,6 +62,7 @@ function serializeScenario(row: DbScenario) {
     // owner account was deleted.
     lineAccountId: (row as { line_account_id?: string | null }).line_account_id ?? null,
     isActive: Boolean(row.is_active),
+    expiresAt: row.expires_at ?? null,
     deliveryMode: (row.delivery_mode ?? 'relative') as DeliveryMode,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -312,10 +313,15 @@ scenarios.put('/api/scenarios/:id', async (c) => {
       triggerTagId?: string | null;
       isActive?: boolean;
       deliveryMode?: DeliveryMode;
+      expiresAt?: string | null;
     }>();
 
     if (body.deliveryMode !== undefined) {
       return c.json({ success: false, error: 'deliveryMode cannot be changed after creation' }, 400);
+    }
+    if (body.expiresAt !== undefined && body.expiresAt !== null &&
+        (!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(body.expiresAt) || !Number.isFinite(Date.parse(body.expiresAt)))) {
+      return c.json({ success: false, error: 'expiresAt must be an ISO timestamp with a timezone or null' }, 400);
     }
     const denied = await denyIfCannotAccessScenario(c, id);
     if (denied) return denied;
@@ -326,6 +332,7 @@ scenarios.put('/api/scenarios/:id', async (c) => {
       trigger_type: body.triggerType,
       trigger_tag_id: body.triggerTagId,
       is_active: body.isActive !== undefined ? (body.isActive ? 1 : 0) : undefined,
+      expires_at: body.expiresAt,
     });
 
     if (!updated) {

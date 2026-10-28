@@ -39,12 +39,14 @@ const pendingRefMocks = vi.hoisted(() => ({
   enrollPendingEntryScenarioOnce: vi.fn(),
 }));
 const lineMocks = vi.hoisted(() => ({ pushMessage: vi.fn() }));
+const conditionMock = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 
 vi.mock('@line-crm/db', () => dbMocks);
 vi.mock('../services/friend-tag-attach.js', () => ({ attachTagAndFireSideEffects }));
 vi.mock('../services/liff-pending-ref-attribution.js', () => pendingRefMocks);
 vi.mock('@line-crm/line-sdk', () => ({ LineClient: vi.fn().mockImplementation(() => lineMocks) }));
 vi.mock('../services/step-delivery.js', () => ({
+  evaluateCondition: conditionMock,
   buildMessage: vi.fn((_type: string, content: string) => ({ type: 'text', text: content })),
   expandVariables: vi.fn((content: string) => content),
   resolveMetadata: vi.fn().mockResolvedValue({}),
@@ -78,6 +80,7 @@ function makeDb(): D1Database {
 describe('POST /api/liff/link ref attribution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    conditionMock.mockResolvedValue(true);
     dbMocks.getLineAccounts.mockResolvedValue([
       { id: 'acc-1', login_channel_id: 'login-channel-1' },
     ]);
@@ -277,5 +280,16 @@ describe('POST /api/liff/link ref attribution', () => {
     expect((await dispatch()).status).toBe(401);
     expect(dbMocks.getFriendByLineUserId).not.toHaveBeenCalled();
     expect(pendingRefMocks.savePendingRefAttribution).not.toHaveBeenCalled();
+  });
+
+  it.each(['quiet', 'inactive', 'expired'])('does not replay a first push for %s campaign entry', async (reason) => {
+    dbMocks.getEntryRouteByRefCode.mockResolvedValue({ id: 'route-1', ref_code: 'lp-ref', tag_id: null, scenario_id: 'scenario-1', is_active: 1 });
+    dbMocks.getScenarioById.mockResolvedValue({ id: 'scenario-1', is_active: reason === 'inactive' ? 0 : 1,
+      expires_at: reason === 'expired' ? '2000-01-01T00:00:00+09:00' : null,
+      delivery_mode: 'absolute_time', steps: [{ id: 'step-1', step_order: 1, condition_type: 'tag_not_exists', condition_value: 'quiet-tag' }] });
+    conditionMock.mockResolvedValue(reason !== 'quiet');
+    expect((await dispatch()).status).toBe(200);
+    expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
+    expect(lineMocks.pushMessage).not.toHaveBeenCalled();
   });
 });

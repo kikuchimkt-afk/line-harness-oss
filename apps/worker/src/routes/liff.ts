@@ -176,14 +176,16 @@ async function applyRefAttribution(
         resolveStepContent,
       } = await import('@line-crm/db');
       const { LineClient } = await import('@line-crm/line-sdk');
-      const { buildMessage, expandVariables, resolveMetadata } = await import('../services/step-delivery.js');
+      const { buildMessage, expandVariables, resolveMetadata, evaluateCondition } = await import('../services/step-delivery.js');
       const scenarioRow = await getScenarioById(db, effectiveScenarioId);
       if (!scenarioRow) return;
+      if (scenarioRow.is_active === 0 || (scenarioRow.expires_at && Date.parse(scenarioRow.expires_at) <= Date.now())) return;
       const steps = scenarioRow.steps;
       const firstStep = steps[0];
       // クリックキャンペーンの即時送信は「now 以前にスケジュールされる」場合のみ。
       // elapsed/absolute_time の delay_minutes=0 は即時を意味しない（offset/clock-time 起点）。
       if (!firstStep) return;
+      if (firstStep.condition_type && !await evaluateCondition(db, friend.id, firstStep)) return;
       const enrolledAtJst = new Date(Date.now() + 9 * 60 * 60_000);
       const firstScheduledAt = computeNextDeliveryAt(
         { delivery_mode: scenarioRow.delivery_mode ?? 'relative' },
@@ -533,7 +535,7 @@ liffRoutes.get('/auth/line', async (c) => {
       <img src="/api/qr?size=240x240&data=${encodeURIComponent(qrUrl)}" alt="QR Code">
     </div>
     <p class="hint">LINE アプリのカメラまたは<br>スマートフォンのカメラで読み取れます</p>
-    <p class="footer">友だち追加で全機能を無料体験できます</p>
+    <p class="footer">友だち追加で教室のご案内を受け取れます</p>
   </div>
 </body>
 </html>`);
