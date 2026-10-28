@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const api=vi.hoisted(()=>({getBroadcastById:vi.fn(),getQueuedBroadcasts:vi.fn(),updateBroadcastStatus:vi.fn(),updateBroadcastLineRequestId:vi.fn(),createBroadcastInsight:vi.fn(),getLineAccountById:vi.fn(),getFriendsByTag:vi.fn(),updateBroadcastBatchProgress:vi.fn()}));
 vi.mock('@line-crm/db',async(importOriginal)=>({...await importOriginal<object>(),...api}));
 vi.mock('./stealth.js',()=>({calculateStaggerDelay:()=>0,sleep:async()=>{},addMessageVariation:(text:string)=>text}));
+// Sender resolution has its own tests (broadcast-sender.test.ts); keep the injected client here.
+vi.mock('./broadcast-sender.js',()=>({resolveBroadcastSender:async(_db:unknown,_b:unknown,client:unknown)=>client}));
 import { processBroadcastSend,processQueuedBroadcasts } from './broadcast.js';
 import { processSegmentSend } from './segment-send.js';
 

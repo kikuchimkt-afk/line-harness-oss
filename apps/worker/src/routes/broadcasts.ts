@@ -10,6 +10,7 @@ import {
 import type { Broadcast as DbBroadcast, BroadcastMessageType, BroadcastTargetType } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
 import { processBroadcastSend, buildMessage, processQueuedBroadcasts } from '../services/broadcast.js';
+import { BroadcastSenderError, resolveBroadcastSender } from '../services/broadcast-sender.js';
 import { computeDedupBroadcastPreview } from '../services/dedup-broadcast.js';
 import { processSegmentSend } from '../services/segment-send.js';
 import type { SegmentCondition } from '../services/segment-query.js';
@@ -549,14 +550,15 @@ broadcasts.post('/api/broadcasts/:id/send', async (c) => {
     // 500人以下またはtarget_type='all'は即時送信
     // accessToken 解決は lock 前に行う (setup 失敗時に status='sending' で stuck しないため、
     // 即時送信パスには recoverStalledBroadcasts がない)
-    let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
-    const broadcastAccountId = (existing as unknown as Record<string, unknown>).line_account_id;
-    if (broadcastAccountId) {
-      const { getLineAccountById } = await import('@line-crm/db');
-      const account = await getLineAccountById(c.env.DB, broadcastAccountId as string);
-      if (account) accessToken = account.channel_access_token;
+    let lineClient: LineClient;
+    try {
+      lineClient = await resolveBroadcastSender(
+        c.env.DB, existing, new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN),
+      );
+    } catch (err) {
+      if (err instanceof BroadcastSenderError) return c.json({ success: false, error: err.message }, 400);
+      throw err;
     }
-    const lineClient = new LineClient(accessToken);
 
     // atomic lock — 'draft' と 'scheduled' を分けて単一 UPDATE で claim する。
     // 各 UPDATE は単一 write statement なので read-then-write transaction の
