@@ -925,7 +925,7 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     }
     const friendDenied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
     if (friendDenied) return friendDenied;
-    if (!scenario.is_active) {
+    if (scenario.is_active === 0) {
       return c.json({
         success: false,
         error: 'このシナリオは無効です。有効にしてから操作してください。',
