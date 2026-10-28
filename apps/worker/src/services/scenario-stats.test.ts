@@ -5,20 +5,23 @@ import { computeScenarioStats } from './scenario-stats.js';
 function mockDb(handlers: {
   enrollment: { total: number; active_count: number; completed_count: number; paused_count: number };
   steps: Array<{ step_order: number; reached_count: number }>;
-}): D1Database {
+}, sqlCalls: string[] = []): D1Database {
   return {
-    prepare: (sql: string) => ({
-      bind: () => ({
-        first: async () => {
-          if (sql.includes('FROM friend_scenarios')) return handlers.enrollment;
-          return null;
-        },
-        all: async () => {
-          if (sql.includes('FROM scenario_steps ss')) return { results: handlers.steps };
-          return { results: [] };
-        },
-      }),
-    }),
+    prepare: (sql: string) => {
+      sqlCalls.push(sql);
+      return {
+        bind: () => ({
+          first: async () => {
+            if (sql.includes('FROM friend_scenarios')) return handlers.enrollment;
+            return null;
+          },
+          all: async () => {
+            if (sql.includes('FROM scenario_steps ss')) return { results: handlers.steps };
+            return { results: [] };
+          },
+        }),
+      };
+    },
   } as unknown as D1Database;
 }
 
@@ -72,5 +75,32 @@ describe('computeScenarioStats', () => {
       'scenario-1',
     );
     expect(stats.steps).toEqual([{ stepOrder: 1, reachedCount: 0, reachRate: 0 }]);
+  });
+
+  it('uses only the latest enrollment per friend and counts delivering as active', async () => {
+    const sqlCalls: string[] = [];
+    const stats = await computeScenarioStats(
+      mockDb({
+        // Simulates one latest active row, one transient delivering row, and
+        // one latest completed row after old completed history was removed by
+        // the ranked CTE.
+        enrollment: { total: 3, active_count: 2, completed_count: 1, paused_count: 0 },
+        steps: [],
+      }, sqlCalls),
+      'scenario-1',
+    );
+
+    expect(stats).toMatchObject({
+      enrolledTotal: 3,
+      activeNow: 2,
+      completed: 1,
+      paused: 0,
+    });
+    const enrollmentSql = sqlCalls.find((sql) => sql.includes('ranked_enrollments')) ?? '';
+    expect(enrollmentSql).toContain('ROW_NUMBER() OVER');
+    expect(enrollmentSql).toContain('PARTITION BY friend_id');
+    expect(enrollmentSql).toContain("status IN ('active', 'delivering')");
+    expect(enrollmentSql).toContain('WHERE row_rank = 1');
+    expect(enrollmentSql).toContain('julianday(started_at) DESC');
   });
 });

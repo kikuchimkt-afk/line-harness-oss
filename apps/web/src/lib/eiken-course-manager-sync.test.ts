@@ -221,6 +221,7 @@ describe('Eiken course manager sync', () => {
     ]))
     expect(JSON.stringify(payload)).not.toContain('U1')
     expect(JSON.stringify(payload)).not.toContain('保護者')
+    expect(payload.rows[0]).toHaveLength(12)
   })
 
   it('uses the LINE display name when an event has no booking form fields', () => {

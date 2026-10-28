@@ -33,20 +33,30 @@ export async function computeScenarioStats(
   db: D1Database,
   scenarioId: string,
 ): Promise<ScenarioStats> {
-  // 1) enrollment 数。enrolledTotal は DISTINCT friend_id でカウントする。
-  // friend_scenarios の同じ friend × scenario はリエンロール時に複数行になり得るため、
-  // 「ユニーク参加人数」を分母にしないと到達率計算 (reached_count も DISTINCT friend_id) と
-  // 整合しない。status カウントも同様に DISTINCT friend_id でユニーク化する。
-  // ただし「1人が active と completed の両方に該当する」ケースは仕様上発生し得る
-  // (古い completed 行が残ったまま再 enroll で active 行ができる) → ヘッダー表示では
-  // 「該当 status を持つユニーク friend 数」として扱う。enrolledTotal とは数が一致しない可能性あり。
+  // 1) enrollment 数。再 enrollment では同じ friend に複数行が残るため、
+  // started_at / updated_at / id で最新行を 1 件に絞って現在状態を集計する。
+  // これにより「登録 6 人 / 進行中 3 / 完了 4」のように状態合計が登録人数を
+  // 超える表示を防ぐ。delivering は一時的な配信ロックなので進行中に含める。
   const enrollRow = await db
     .prepare(
-      `SELECT COUNT(DISTINCT friend_id) AS total,
-              COUNT(DISTINCT CASE WHEN status='active'    THEN friend_id END) AS active_count,
-              COUNT(DISTINCT CASE WHEN status='completed' THEN friend_id END) AS completed_count,
-              COUNT(DISTINCT CASE WHEN status='paused'    THEN friend_id END) AS paused_count
-       FROM friend_scenarios WHERE scenario_id = ?`,
+      `WITH ranked_enrollments AS (
+         SELECT friend_id,
+                status,
+                ROW_NUMBER() OVER (
+                  PARTITION BY friend_id
+                  ORDER BY julianday(started_at) DESC,
+                           julianday(updated_at) DESC,
+                           id DESC
+                ) AS row_rank
+         FROM friend_scenarios
+         WHERE scenario_id = ?
+       )
+       SELECT COUNT(*) AS total,
+              COUNT(CASE WHEN status IN ('active', 'delivering') THEN 1 END) AS active_count,
+              COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed_count,
+              COUNT(CASE WHEN status = 'paused' THEN 1 END) AS paused_count
+       FROM ranked_enrollments
+       WHERE row_rank = 1`,
     )
     .bind(scenarioId)
     .first<EnrollmentRow>();
