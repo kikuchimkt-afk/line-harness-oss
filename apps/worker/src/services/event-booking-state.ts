@@ -6,16 +6,18 @@ export type EventBookingAction =
   | 'expire'
   | 'cancel'
   | 'mark_attended'
-  | 'mark_no_show';
+  | 'mark_no_show'
+  | 'restore_confirmed';
 
 const TRANSITIONS: Record<EventBookingStatus, Partial<Record<EventBookingAction, EventBookingStatus>>> = {
   requested: { confirm: 'confirmed', reject: 'rejected', expire: 'expired', cancel: 'cancelled' },
+  waitlisted: { expire: 'expired', cancel: 'cancelled' },
   confirmed: { cancel: 'cancelled', mark_attended: 'attended', mark_no_show: 'no_show' },
   rejected: {},
   expired: {},
   cancelled: {},
-  attended: {},
-  no_show: {},
+  attended: { restore_confirmed: 'confirmed' },
+  no_show: { restore_confirmed: 'confirmed' },
 };
 
 export function canTransition(from: EventBookingStatus, action: EventBookingAction): boolean {

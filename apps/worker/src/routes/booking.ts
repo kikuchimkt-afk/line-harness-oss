@@ -20,6 +20,7 @@ import {
   saveIdempotencyResponse,
 } from '../services/booking-idempotency.js';
 import { sendBookingNotification } from '../services/booking-notifier.js';
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 import {
   DEFAULT_ACCOUNT_SETTINGS,
   IDEMPOTENCY_TTL_MINUTES,
@@ -164,6 +165,8 @@ async function notifyForBooking(
   const row = await db
     .prepare(
       `SELECT b.starts_at,
+              b.friend_id,
+              b.line_account_id,
               m.name AS menu_name,
               s.display_name AS staff_name,
               la.channel_access_token,
@@ -178,6 +181,8 @@ async function notifyForBooking(
     .bind(bookingId)
     .first<{
       starts_at: string;
+      friend_id: string;
+      line_account_id: string;
       menu_name: string;
       staff_name: string;
       channel_access_token: string;
@@ -188,6 +193,9 @@ async function notifyForBooking(
     channelAccessToken: row.channel_access_token,
     toLineUserId: row.line_user_id,
     kind,
+    db,
+    friendId: row.friend_id,
+    lineAccountId: row.line_account_id,
     ctx: {
       menuName: row.menu_name,
       staffName: row.staff_name,
@@ -287,6 +295,9 @@ booking.post('/api/liff/booking/requests', async (c) => {
   }
   const friendId = await resolveFriendId(c, callerLineUserId, accountId);
   if (!friendId) return c.json({ error: 'friend_not_found' }, 404);
+  if (await isFriendBlocked(c.env.DB, friendId, accountId)) {
+    return c.json({ error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+  }
 
   // Idempotency lookup は account+friend スコープ。同じ key を別 caller が送っても
   // それぞれの caller のキャッシュを返す（=cross-tenant leak 防止）。

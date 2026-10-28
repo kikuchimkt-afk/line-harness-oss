@@ -122,8 +122,8 @@ export default function ScenarioModePicker({ open, onClose, onCreate }: Props) {
                 className="text-left border border-gray-200 rounded-lg p-5 hover:border-amber-500 hover:bg-amber-50 transition-colors"
               >
                 <div className="text-2xl mb-2">🕐</div>
-                <h3 className="font-semibold text-gray-900 mb-1">毎日◯時に配信</h3>
-                <p className="text-sm text-gray-600 mb-2">例: 翌日 朝 9:00</p>
+                <h3 className="font-semibold text-gray-900 mb-1">何日後の何時何分に配信</h3>
+                <p className="text-sm text-gray-600 mb-2">例: 2日後の 17:00</p>
                 <p className="text-xs text-green-700">✅ 深夜配信なし</p>
               </button>
               <button
@@ -167,7 +167,7 @@ export default function ScenarioModePicker({ open, onClose, onCreate }: Props) {
               配信方式:{' '}
               <span className="font-medium">
                 {mode === 'absolute_time'
-                  ? '時刻で指定'
+                  ? '何日後の何時何分に配信'
                   : mode === 'elapsed'
                     ? '経過時間で指定'
                     : '既存方式 (relative)'}

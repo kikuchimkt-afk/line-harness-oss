@@ -1,6 +1,13 @@
 export { LineClient } from './client.js';
 export { verifySignature } from './webhook.js';
 export {
+  appendOpenExternalBrowser,
+  forceExternalBrowserForZoomUrls,
+  isZoomUrl,
+  prepareMessagesForLine,
+  prepareRichMenuForLine,
+} from './external-browser.js';
+export {
   textMessage,
   imageMessage,
   flexMessage,

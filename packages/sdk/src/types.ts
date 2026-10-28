@@ -66,7 +66,7 @@ export interface CreateTagInput {
 // ─── Scenario ───────────────────────────────────────────
 /**
  * シナリオ配信モード:
- * - relative: 前ステップからの相対遅延 (delayMinutes)
+ * - relative: 前ステップからの相対遅延 (delayMinutes) または前ステップ後 N 日後の HH:MM (offsetDays + deliveryTime)
  * - elapsed: 購読開始からの経過時間 (offsetDays + offsetMinutes)
  * - absolute_time: 購読開始から N 日後の HH:MM JST (offsetDays + deliveryTime)
  */
@@ -217,8 +217,9 @@ export interface Broadcast {
   title: string
   messageType: MessageType
   messageContent: string
-  targetType: 'all' | 'tag'
+  targetType: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId: string | null
+  targetFriendIds?: string[] | null
   status: BroadcastStatus
   scheduledAt: string | null
   sentAt: string | null
@@ -252,8 +253,9 @@ export interface CreateBroadcastInput {
   title: string
   messageType: MessageType
   messageContent: string
-  targetType: 'all' | 'tag'
+  targetType: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId?: string
+  targetFriendIds?: string[]
   scheduledAt?: string
   altText?: string
 }
@@ -262,8 +264,9 @@ export interface UpdateBroadcastInput {
   title?: string
   messageType?: MessageType
   messageContent?: string
-  targetType?: 'all' | 'tag'
+  targetType?: 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup'
   targetTagId?: string | null
+  targetFriendIds?: string[] | null
   scheduledAt?: string | null
 }
 
@@ -486,6 +489,7 @@ export interface StaffMember {
    * The full key is only returned once — on create or regenerate-key responses.
    */
   apiKey: string
+  lineAccountIds: string[]
   isActive: boolean
   createdAt: string
   updatedAt: string
@@ -502,6 +506,7 @@ export interface CreateStaffInput {
   name: string
   email?: string
   role: 'admin' | 'staff'
+  lineAccountIds?: string[]
 }
 
 export interface UpdateStaffInput {
@@ -509,6 +514,7 @@ export interface UpdateStaffInput {
   email?: string | null
   role?: StaffRole
   isActive?: boolean
+  lineAccountIds?: string[]
 }
 
 // ─── High-Level ─────────────────────────────────────────
@@ -537,7 +543,16 @@ export interface UploadImageInput {
 }
 
 // ─── Conversations ──────────────────────────────────────
-export type MessageSource = 'user' | 'broadcast' | 'scenario' | 'auto_reply' | 'reminder' | 'manual'
+export type MessageSource =
+  | 'user'
+  | 'broadcast'
+  | 'scenario'
+  | 'auto_reply'
+  | 'automation'
+  | 'reminder'
+  | 'booking'
+  | 'event_booking'
+  | 'manual'
 
 export interface ConversationSummary {
   friendId: string

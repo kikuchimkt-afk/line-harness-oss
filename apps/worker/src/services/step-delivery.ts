@@ -1,4 +1,5 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import { isFriendBlocked, stopBlockedFriendWork } from './friend-block-policy.js';
 import {
   getFriendScenariosDueForDelivery,
   getScenarioSteps,
@@ -9,12 +10,45 @@ import {
   jstNow,
   computeNextDeliveryAt,
   resolveStepContent,
-  addTagToFriend,
   type DeliveryMode,
 } from '@line-crm/db';
 import type { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { jitterDeliveryTime, addJitter, sleep } from './stealth.js';
+import { addTagWithBlockEnforcement } from './block-tag-attach.js';
+import {
+  createIndividualNotificationBudget,
+  type IndividualNotificationBudget,
+  type IndividualNotificationReservation,
+} from './individual-notification-budget.js';
+
+const DELIVERY_FAILURE_RETRY_DELAY_MS = 5 * 60_000;
+
+/**
+ * Release a claimed scenario step after LINE rejected the outbound request.
+ *
+ * Keep the current step unchanged so it can be retried, but move the next
+ * attempt into the future to avoid an overlapping Cron invocation immediately
+ * claiming the same row again. The current step is part of the WHERE clause so
+ * this cannot roll back a row that has already advanced.
+ */
+export async function requeueFailedScenarioDelivery(
+  db: D1Database,
+  id: string,
+  expectedStepOrder: number,
+): Promise<void> {
+  const retryAt = new Date(Date.now() + 9 * 60 * 60_000 + DELIVERY_FAILURE_RETRY_DELAY_MS)
+    .toISOString()
+    .slice(0, -1) + '+09:00';
+  await db
+    .prepare(
+      `UPDATE friend_scenarios
+       SET status = 'active', next_delivery_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'delivering' AND current_step_order = ?`,
+    )
+    .bind(retryAt, jstNow(), id, expectedStepOrder)
+    .run();
+}
 
 /**
  * Replace template variables in message content.
@@ -92,30 +126,31 @@ export async function resolveMetadata(
   return {};
 }
 
-const MAX_SENDS_PER_CRON = 40; // CF Free plan: 50 subrequests limit (margin for other jobs)
-
 export async function processStepDeliveries(
   db: D1Database,
   lineClient: LineClient,
   workerUrl?: string,
+  budget: IndividualNotificationBudget = createIndividualNotificationBudget(),
 ): Promise<void> {
   const now = jstNow();
   const dueFriendScenarios = await getFriendScenariosDueForDelivery(db, now);
 
-  let sendCount = 0;
   for (let i = 0; i < dueFriendScenarios.length; i++) {
-    if (sendCount >= MAX_SENDS_PER_CRON) break;
+    const reservation = budget.reserve();
+    if (!reservation) break;
     const fs = dueFriendScenarios[i];
     try {
       // Stealth: add small random delay between deliveries to avoid burst patterns
       if (i > 0) {
         await sleep(addJitter(50, 200));
       }
-      const sent = await processSingleDelivery(db, lineClient, fs, workerUrl);
-      if (sent) sendCount++;
+      await processSingleDelivery(db, lineClient, fs, workerUrl, reservation);
     } catch (err) {
       console.error(`Error processing friend_scenario ${fs.id}:`, err);
       // Continue with next one
+    } finally {
+      // No-op after commit; otherwise returns unused capacity for skipped rows.
+      reservation.release();
     }
   }
 }
@@ -133,6 +168,7 @@ async function processSingleDelivery(
     started_at: string;
   },
   workerUrl?: string,
+  reservation?: IndividualNotificationReservation,
 ): Promise<boolean> {
   // Optimistic lock: claim this delivery (prevents duplicate sends from parallel workers)
   const claimed = await claimFriendScenarioForDelivery(db, fs.id, fs.current_step_order);
@@ -141,6 +177,10 @@ async function processSingleDelivery(
   const friend = await getFriendById(db, fs.friend_id);
   if (!friend || !friend.is_following) {
     await completeFriendScenario(db, fs.id);
+    return false;
+  }
+  if (await isFriendBlocked(db, friend.id)) {
+    await stopBlockedFriendWork(db, friend.id);
     return false;
   }
 
@@ -235,7 +275,27 @@ async function processSingleDelivery(
       deliveryClient = new LC(account.channel_access_token);
     }
   }
-  await deliveryClient.pushMessage(friend.line_user_id, [message]);
+  // The scenario is already claimed in D1. Commit the shared Cron slot only
+  // when an outbound LINE request is actually about to be attempted.
+  if (await isFriendBlocked(db, friend.id)) {
+    await stopBlockedFriendWork(db, friend.id);
+    return false;
+  }
+  reservation?.commit();
+  try {
+    await deliveryClient.pushMessage(friend.line_user_id, [message]);
+  } catch (pushError) {
+    // LINE rejected (or could not complete) the request, so release the claim
+    // immediately instead of leaving it in `delivering` until crash recovery.
+    // If this state update itself fails, recoverStuckDeliveries remains the
+    // final safety net.
+    try {
+      await requeueFailedScenarioDelivery(db, fs.id, fs.current_step_order);
+    } catch (requeueError) {
+      console.error(`[scenario] failed to requeue delivery ${fs.id}:`, requeueError);
+    }
+    throw pushError;
+  }
 
   // Log what we actually pushed: variables expanded, URLs auto-tracked, AND
   // any cleanEmptyNodes() mutation or parse-failure text fallback applied by
@@ -244,10 +304,10 @@ async function processSingleDelivery(
   const logPayload = messageToLogPayload(message);
   await db
     .prepare(
-      `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, created_at)
-       VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?)`,
+      `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, line_account_id, created_at)
+       VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?, ?)`,
     )
-    .bind(logId, friend.id, logPayload.messageType, logPayload.content, currentStep.id, resolved.templateIdAtSend, jstNow())
+    .bind(logId, friend.id, logPayload.messageType, logPayload.content, currentStep.id, resolved.templateIdAtSend, friendAccountId ?? null, jstNow())
     .run();
 
   // Determine next step (find the step after currentStep in the sorted list)
@@ -266,7 +326,7 @@ async function processSingleDelivery(
   // 失敗してもログに残すだけで配信フローは止めない。
   if (currentStep.on_reach_tag_id) {
     try {
-      await addTagToFriend(db, friend.id, currentStep.on_reach_tag_id);
+      await addTagWithBlockEnforcement(db, friend.id, currentStep.on_reach_tag_id);
     } catch (err) {
       console.error(`[scenario] tag attach failed step=${currentStep.id}:`, err);
     }

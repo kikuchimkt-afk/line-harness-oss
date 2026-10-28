@@ -1,0 +1,16 @@
+{
+  "projectName": "ecc-tokushima-harness",
+  "accountId": "a00008d32ce4899c34b8f45666b305ea",
+  "adminUrl": "https://ecc-tokushima-harness-admin-bd3bc565.pages.dev",
+  "workerUrl": "https://ecc-tokushima-harness.kikuchi-mkt.workers.dev",
+  "workerName": "ecc-tokushima-harness",
+  "d1DatabaseName": "ecc-tokushima-harness",
+  "d1DatabaseId": "e95e72de-a8bb-4844-b312-6cc050008125",
+  "r2BucketName": "ecc-tokushima-harness-images",
+  "cfAccountId": "a00008d32ce4899c34b8f45666b305ea",
+  "workerPublicUrl": "https://ecc-tokushima-harness.kikuchi-mkt.workers.dev",
+  "adminProject": "ecc-tokushima-harness-admin-bd3bc565",
+  "adminPublicUrl": "https://ecc-tokushima-harness-admin-bd3bc565.pages.dev",
+  "liffPublicUrl": "https://ecc-tokushima-harness.kikuchi-mkt.workers.dev",
+  "manifestUrl": "https://github.com/Shudesu/line-harness-oss/releases/latest/download/release-manifest.json"
+}

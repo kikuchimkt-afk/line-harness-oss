@@ -69,7 +69,10 @@ export async function fetchAndStoreIncomingImage(
   }
 
   try {
-    await opts.r2.put(key, data, { httpMetadata: { contentType } });
+    await opts.r2.put(key, data, {
+      httpMetadata: { contentType },
+      customMetadata: { originalFilename: `LINE-image.${ext}` },
+    });
   } catch (err) {
     console.error('incoming-image: R2 put failed', { err, messageId: opts.messageId, accountId: opts.accountId });
     return null;

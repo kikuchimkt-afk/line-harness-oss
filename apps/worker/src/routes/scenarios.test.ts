@@ -14,6 +14,8 @@ const dbMocks = {
   getFriendById: vi.fn(),
   computeNextDeliveryAt: vi.fn(),
   resolveStepContent: vi.fn(),
+  getStaffAccountIds: vi.fn(),
+  staffCanAccessLineAccount: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -22,6 +24,27 @@ vi.mock('../services/scenario-stats.js', () => ({
 }));
 
 const { scenarios: scenariosModule } = await import('./scenarios.js');
+
+describe('manual scenario enrollment respects application blocking', () => {
+  test.each([true, false])('authoritative blocked=%s controls enrollment, not caller flags', async (blocked) => {
+    vi.clearAllMocks();
+    dbMocks.getScenarioById.mockResolvedValue({ id: 'synthetic-scenario', line_account_id: 'acc-a' });
+    dbMocks.getFriendById.mockResolvedValue({ id: 'synthetic-friend', line_account_id: 'acc-a' });
+    dbMocks.enrollFriendInScenario.mockResolvedValue({ id: 'synthetic-run', friend_id: 'synthetic-friend',
+      scenario_id: 'synthetic-scenario', current_step_order: -1, status: 'active' });
+    const db = { prepare() {
+      const statement = { bind() { return statement; }, async first() { return { line_account_id: 'acc-a' }; },
+        async all() { return { results: blocked ? [{ name: 'ブロック' }] : [] }; } };
+      return statement;
+    } } as unknown as D1Database;
+    const response = await setupApp(db).request('/api/scenarios/synthetic-scenario/enroll/synthetic-friend', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked: false }),
+    });
+    expect(response.status).toBe(blocked ? 403 : 201);
+    if (blocked) expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
+    else expect(dbMocks.enrollFriendInScenario).toHaveBeenCalledOnce();
+  });
+});
 
 interface ScenarioRow {
   id: string;
@@ -56,6 +79,14 @@ function makeScenarioDb(rows: ScenarioRow[]) {
             );
             return { results: filtered };
           }
+          if (/FROM scenarios s\b/i.test(sql) && /s\.line_account_id = \?/i.test(sql)) {
+            const [lineAccountId] = bound as [string];
+            return { results: rows.filter((r) => r.line_account_id === lineAccountId) };
+          }
+          if (/FROM scenarios s\b/i.test(sql) && /s\.line_account_id IN/i.test(sql)) {
+            const allowed = new Set(bound as string[]);
+            return { results: rows.filter((r) => r.line_account_id && allowed.has(r.line_account_id)) };
+          }
           return { results: [] };
         },
       };
@@ -65,10 +96,14 @@ function makeScenarioDb(rows: ScenarioRow[]) {
   return { db, calls };
 }
 
-function setupApp(db: D1Database) {
-  const app = new Hono<{ Bindings: { DB: D1Database } }>();
+function setupApp(db: D1Database, role: 'owner' | 'admin' | 'staff' = 'owner') {
+  const app = new Hono<{
+    Bindings: { DB: D1Database };
+    Variables: { staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' } };
+  }>();
   app.use('*', async (c, next) => {
     c.env = { DB: db };
+    c.set('staff', { id: `${role}-1`, name: role, role });
     await next();
   });
   app.route('/', scenariosModule);
@@ -86,8 +121,25 @@ const rowBase = {
   step_count: 0,
 };
 
+describe('optional campaign expiry API', () => {
+  test.each(['2027-02-01T00:00:00+09:00', null])('saves an explicit boundary %s', async expiresAt => {
+    dbMocks.updateScenario.mockResolvedValue({ id: 'winter', name: 'winter', ...rowBase, expires_at: expiresAt });
+    const db = { prepare() { const s={bind(){return s;},async first(){return {line_account_id:'acc-1'};}};return s;} } as unknown as D1Database;
+    const response=await setupApp(db).request('/api/scenarios/winter',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({expiresAt})});
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.expiresAt).toBe(expiresAt);
+    expect(dbMocks.updateScenario).toHaveBeenCalledWith(db,'winter',expect.objectContaining({expires_at:expiresAt}));
+  });
+  test.each(['2027-02-01','invalid'])('rejects ambiguous expiry %s', async expiresAt => {
+    const response=await setupApp({} as D1Database).request('/api/scenarios/winter',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({expiresAt})});
+    expect(response.status).toBe(400);expect(dbMocks.updateScenario).not.toHaveBeenCalled();
+  });
+});
+
 beforeEach(() => {
   for (const fn of Object.values(dbMocks)) fn.mockReset();
+  dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+  dbMocks.getStaffAccountIds.mockResolvedValue([]);
 });
 
 describe('GET /api/scenarios?lineAccountId=X', () => {
@@ -131,6 +183,22 @@ describe('GET /api/scenarios?lineAccountId=X', () => {
     expect(dbMocks.getScenarios).toHaveBeenCalledTimes(1);
   });
 
+  test('restricted admin with no assigned accounts sees no scenarios', async () => {
+    dbMocks.getStaffAccountIds.mockResolvedValue([]);
+    dbMocks.getScenarios.mockResolvedValue([
+      { id: 's-global', name: 'global', line_account_id: null, ...rowBase },
+      { id: 's-acc1', name: 'acc1', line_account_id: 'acc-1', ...rowBase },
+    ]);
+    const { db } = makeScenarioDb([]);
+
+    const res = await setupApp(db, 'admin').request('/api/scenarios');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: { id: string }[] };
+    expect(body.success).toBe(true);
+    expect(body.data).toEqual([]);
+    expect(dbMocks.getScenarios).not.toHaveBeenCalled();
+  });
+
   test('returns empty array when filter matches nothing and no globals exist', async () => {
     const rows: ScenarioRow[] = [
       { id: 's-other', name: 'other', line_account_id: 'acc-other', ...rowBase },
@@ -141,5 +209,21 @@ describe('GET /api/scenarios?lineAccountId=X', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { success: boolean; data: unknown[] };
     expect(body.data).toEqual([]);
+  });
+
+  test('restricted admin sees only assigned account scenarios, not global scenarios', async () => {
+    dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+    dbMocks.getStaffAccountIds.mockResolvedValue(['acc-1']);
+    const rows: ScenarioRow[] = [
+      { id: 's-global', name: 'global', line_account_id: null, ...rowBase },
+      { id: 's-acc1', name: 'acc1', line_account_id: 'acc-1', ...rowBase },
+      { id: 's-acc2', name: 'acc2', line_account_id: 'acc-2', ...rowBase },
+    ];
+    const { db } = makeScenarioDb(rows);
+
+    const res = await setupApp(db, 'admin').request('/api/scenarios?lineAccountId=acc-1');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; data: { id: string }[] };
+    expect(body.data.map((d) => d.id)).toEqual(['s-acc1']);
   });
 });

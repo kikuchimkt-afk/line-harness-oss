@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
   trigger_tag_id  TEXT REFERENCES tags (id) ON DELETE SET NULL,
   is_active       INTEGER NOT NULL DEFAULT 1,
   delivery_mode   TEXT NOT NULL DEFAULT 'relative' CHECK (delivery_mode IN ('relative', 'elapsed', 'absolute_time')),
+  expires_at      TEXT,
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
@@ -107,7 +108,7 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   title           TEXT NOT NULL,
   message_type    TEXT NOT NULL CHECK (message_type IN ('text', 'image', 'flex')),
   message_content TEXT NOT NULL,
-  target_type     TEXT NOT NULL CHECK (target_type IN ('all', 'tag', 'segment', 'multi-account-dedup')) DEFAULT 'all',
+  target_type     TEXT NOT NULL CHECK (target_type IN ('all', 'tag', 'friends', 'segment', 'multi-account-dedup')) DEFAULT 'all',
   target_tag_id   TEXT REFERENCES tags (id) ON DELETE SET NULL,
   status          TEXT NOT NULL CHECK (status IN ('draft', 'scheduled', 'sending', 'sent')) DEFAULT 'draft',
   scheduled_at    TEXT,
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   account_ids        TEXT CHECK (account_ids IS NULL OR json_valid(account_ids)),
   dedup_priority     TEXT CHECK (dedup_priority IS NULL OR json_valid(dedup_priority)),
+  target_friend_ids  TEXT CHECK (target_friend_ids IS NULL OR json_valid(target_friend_ids)),
   failed_account_ids TEXT CHECK (failed_account_ids IS NULL OR json_valid(failed_account_ids)),
   dedup_progress     TEXT CHECK (dedup_progress IS NULL OR json_valid(dedup_progress)),
   batch_lock_at      TEXT
@@ -187,6 +189,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_log_friend_id ON messages_log (friend_id
 CREATE INDEX IF NOT EXISTS idx_messages_log_created_at ON messages_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_log_friend_source ON messages_log (friend_id, source);
 CREATE INDEX IF NOT EXISTS idx_messages_log_friend_direction_created ON messages_log (friend_id, direction, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_log_account_friend_created ON messages_log (line_account_id, friend_id, created_at);
 
 -- ============================================================
 -- Auto Replies
@@ -461,6 +464,7 @@ CREATE TABLE IF NOT EXISTS operators (
 CREATE TABLE IF NOT EXISTS chats (
   id            TEXT PRIMARY KEY,
   friend_id     TEXT NOT NULL REFERENCES friends (id) ON DELETE CASCADE,
+  line_account_id TEXT,
   operator_id   TEXT REFERENCES operators (id) ON DELETE SET NULL,
   status        TEXT NOT NULL DEFAULT 'unread' CHECK (status IN ('unread', 'in_progress', 'resolved')),
   notes         TEXT,
@@ -472,6 +476,7 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE INDEX IF NOT EXISTS idx_chats_friend ON chats (friend_id);
 CREATE INDEX IF NOT EXISTS idx_chats_operator ON chats (operator_id);
 CREATE INDEX IF NOT EXISTS idx_chats_status ON chats (status);
+CREATE INDEX IF NOT EXISTS idx_chats_account_friend_created ON chats (line_account_id, friend_id, created_at);
 
 -- ============================================================
 -- Round 3: 通知機能
@@ -577,6 +582,39 @@ CREATE TABLE IF NOT EXISTS automation_logs (
 CREATE INDEX IF NOT EXISTS idx_automation_logs_automation ON automation_logs (automation_id);
 
 -- ============================================================
+-- Durable per-friend rich-menu desired state / retry queue
+-- ============================================================
+CREATE TABLE IF NOT EXISTS rich_menu_assignments (
+  friend_id            TEXT PRIMARY KEY REFERENCES friends (id) ON DELETE CASCADE,
+  line_account_id      TEXT REFERENCES line_accounts (id) ON DELETE SET NULL,
+  automation_id        TEXT REFERENCES automations (id) ON DELETE SET NULL,
+  desired_rich_menu_id TEXT NOT NULL,
+  source               TEXT NOT NULL DEFAULT 'automation'
+                       CHECK (source IN ('automation', 'manual', 'backfill')),
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'retry_wait', 'processing', 'applied', 'failed_permanent')),
+  retry_count          INTEGER NOT NULL DEFAULT 0,
+  max_retries          INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at      TEXT,
+  last_attempt_at      TEXT,
+  applied_at           TEXT,
+  verified_at          TEXT,
+  last_error           TEXT,
+  generation           INTEGER NOT NULL DEFAULT 1,
+  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_rich_menu_assignments_due
+  ON rich_menu_assignments (status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_rich_menu_assignments_account_status
+  ON rich_menu_assignments (line_account_id, status);
+CREATE INDEX IF NOT EXISTS idx_rich_menu_assignments_verify
+  ON rich_menu_assignments (status, verified_at);
+CREATE INDEX IF NOT EXISTS idx_rich_menu_assignments_automation
+  ON rich_menu_assignments (automation_id, status);
+
+-- ============================================================
 -- Ad Platform Configuration
 -- ============================================================
 CREATE TABLE IF NOT EXISTS ad_platforms (
@@ -625,6 +663,16 @@ CREATE TABLE IF NOT EXISTS staff_members (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_members_api_key ON staff_members(api_key);
 CREATE INDEX IF NOT EXISTS idx_staff_members_role ON staff_members(role);
+
+CREATE TABLE IF NOT EXISTS staff_account_permissions (
+  staff_id        TEXT NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+  line_account_id TEXT NOT NULL REFERENCES line_accounts(id) ON DELETE CASCADE,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  PRIMARY KEY (staff_id, line_account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_staff_account_permissions_account
+  ON staff_account_permissions(line_account_id);
 
 -- Reusable message templates (text or Flex) for reward messages in campaigns
 CREATE TABLE IF NOT EXISTS message_templates (

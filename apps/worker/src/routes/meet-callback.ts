@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { isFriendBlocked, BLOCKED_FRIEND_MESSAGE } from '../services/friend-block-policy.js';
 import type { Env } from '../index.js';
 import { getFriendByLineUserId } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
@@ -28,6 +29,9 @@ app.post('/api/meet-callback', async (c) => {
   const friend = await getFriendByLineUserId(c.env.DB, body.line_user_id);
   if (!friend) {
     return c.json({ success: false, error: 'friend not found' }, 404);
+  }
+  if (await isFriendBlocked(c.env.DB, friend.id)) {
+    return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
   }
 
   // Resolve LINE access token (multi-account support)
@@ -73,6 +77,9 @@ app.post('/api/meet-callback', async (c) => {
   };
 
   try {
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     await lineClient.pushMessage(friend.line_user_id, [
       { type: 'flex', altText: 'ヒアリング結果', contents: resultFlex },
     ]);

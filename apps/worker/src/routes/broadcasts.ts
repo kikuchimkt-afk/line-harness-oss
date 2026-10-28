@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { isFriendBlocked } from '../services/friend-block-policy.js';
 import {
   getBroadcasts,
   getBroadcastById,
@@ -55,6 +56,7 @@ function serializeBroadcast(row: DbBroadcast) {
     lineAccountId: r.line_account_id || null,
     accountIds: parseJsonArray(r.account_ids),
     dedupPriority: parseJsonArray(r.dedup_priority),
+    targetFriendIds: parseJsonArray(r.target_friend_ids),
     failedAccountIds: parseJsonArray(r.failed_account_ids),
     createdAt: row.created_at,
   };
@@ -129,15 +131,31 @@ broadcasts.get('/api/broadcasts/:id/preview-count', async (c) => {
       count = active;
       perAccount = breakdown;
     } else if (broadcast.target_type === 'tag' && broadcast.target_tag_id) {
-      // 注: ここは inline send パス (broadcast.ts:61 getFriendsByTag) が
-      // line_account_id でフィルタしないので、preview もアカウント横断で数える。
-      // 実際の送信先と modal 表示を一致させるための整合性。
-      const row = await c.env.DB.prepare(
-        `SELECT COUNT(*) AS cnt FROM friends f
-           INNER JOIN friend_tags ft ON ft.friend_id = f.id
-           WHERE ft.tag_id = ? AND f.is_following = 1`,
-      ).bind(broadcast.target_tag_id).first<{ cnt: number }>();
+      const accountId = (raw.line_account_id as string | null) || null;
+      const sql = accountId
+        ? `SELECT COUNT(*) AS cnt FROM friends f
+             INNER JOIN friend_tags ft ON ft.friend_id = f.id
+            WHERE ft.tag_id = ? AND f.is_following = 1 AND f.line_account_id = ?`
+        : `SELECT COUNT(*) AS cnt FROM friends f
+             INNER JOIN friend_tags ft ON ft.friend_id = f.id
+            WHERE ft.tag_id = ? AND f.is_following = 1`;
+      const binds: unknown[] = accountId ? [broadcast.target_tag_id, accountId] : [broadcast.target_tag_id];
+      const row = await c.env.DB.prepare(sql).bind(...binds).first<{ cnt: number }>();
       count = row?.cnt ?? 0;
+    } else if (broadcast.target_type === 'friends') {
+      const friendIds = parseJsonArray(raw.target_friend_ids) ?? [];
+      if (friendIds.length > 0) {
+        const accountId = (raw.line_account_id as string | null) || null;
+        const placeholders = friendIds.map(() => '?').join(',');
+        const sql = accountId
+          ? `SELECT COUNT(*) AS cnt FROM friends
+              WHERE id IN (${placeholders}) AND is_following = 1 AND line_account_id = ?`
+          : `SELECT COUNT(*) AS cnt FROM friends
+              WHERE id IN (${placeholders}) AND is_following = 1`;
+        const binds: unknown[] = accountId ? [...friendIds, accountId] : friendIds;
+        const row = await c.env.DB.prepare(sql).bind(...binds).first<{ cnt: number }>();
+        count = row?.cnt ?? 0;
+      }
     } else if (broadcast.target_type === 'all') {
       const accountId = (raw.line_account_id as string | null) || null;
       const sql = accountId
@@ -270,6 +288,7 @@ broadcasts.post('/api/broadcasts', async (c) => {
       altText?: string | null;
       accountIds?: string[];
       dedupPriority?: string[];
+      targetFriendIds?: string[];
     }>();
 
     if (!body.title || !body.messageType || !body.messageContent || !body.targetType) {
@@ -298,6 +317,16 @@ broadcasts.post('/api/broadcasts', async (c) => {
         typeof id === 'string' && body.accountIds!.includes(id));
     }
 
+    if (body.targetType === 'friends') {
+      const targetFriendIds = Array.isArray(body.targetFriendIds)
+        ? Array.from(new Set(body.targetFriendIds.filter((id): id is string => typeof id === 'string' && id.length > 0)))
+        : [];
+      if (targetFriendIds.length === 0) {
+        return c.json({ success: false, error: 'targetFriendIds (length >= 1) required when targetType is "friends"' }, 400);
+      }
+      body.targetFriendIds = targetFriendIds;
+    }
+
     const broadcast = await createBroadcast(c.env.DB, {
       title: body.title,
       messageType: body.messageType,
@@ -307,6 +336,7 @@ broadcasts.post('/api/broadcasts', async (c) => {
       scheduledAt: body.scheduledAt ?? null,
       accountIds: body.accountIds,
       dedupPriority: body.dedupPriority,
+      targetFriendIds: body.targetFriendIds,
     });
 
     // Save line_account_id and alt_text if provided
@@ -347,6 +377,7 @@ broadcasts.put('/api/broadcasts/:id', async (c) => {
       messageContent?: string;
       targetType?: BroadcastTargetType;
       targetTagId?: string | null;
+      targetFriendIds?: string[] | null;
       scheduledAt?: string | null;
     }>();
 
@@ -362,6 +393,7 @@ broadcasts.put('/api/broadcasts/:id', async (c) => {
       message_content: body.messageContent,
       target_type: body.targetType,
       target_tag_id: body.targetTagId,
+      target_friend_ids: body.targetFriendIds === undefined ? undefined : JSON.stringify(body.targetFriendIds ?? []),
       scheduled_at: body.scheduledAt,
       ...(statusUpdate !== undefined ? { status: statusUpdate } : {}),
     });
@@ -496,7 +528,8 @@ broadcasts.post('/api/broadcasts/:id/send', async (c) => {
     // target_type='tag' で対象が多い場合はキュー方式
     if (existing.target_type === 'tag' && existing.target_tag_id) {
       const { getFriendsByTag } = await import('@line-crm/db');
-      const friends = await getFriendsByTag(c.env.DB, existing.target_tag_id);
+      const accountId = (existing as unknown as Record<string, unknown>).line_account_id as string | null;
+      const friends = await getFriendsByTag(c.env.DB, existing.target_tag_id, accountId);
       const followingCount = friends.filter(f => f.is_following).length;
 
       if (followingCount > 500) {
@@ -847,10 +880,12 @@ broadcasts.post('/api/broadcasts/:id/test-send', async (c) => {
 
     let sent = 0;
     let failed = 0;
+    let skipped = 0;
     const now = new Date(Date.now() + 9 * 60 * 60_000).toISOString().replace('Z', '+09:00');
 
     for (const friend of friends.results) {
       try {
+        if (await isFriendBlocked(c.env.DB, friend.id)) { skipped += 1; continue; }
         await lineClient.pushMessage(friend.line_user_id, [message]);
         sent++;
         await c.env.DB.prepare(
@@ -863,7 +898,7 @@ broadcasts.post('/api/broadcasts/:id/test-send', async (c) => {
       }
     }
 
-    return c.json({ success: true, sent, failed });
+    return c.json({ success: true, sent, failed, skipped });
   } catch (err) {
     console.error('POST /api/broadcasts/:id/test-send error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

@@ -50,7 +50,20 @@
     "042_tracked_links_og.sql",
     "043_events_og.sql",
     "044_forms_og.sql",
-    "045_menus_auto_tag.sql"
+    "045_menus_auto_tag.sql",
+    "046_staff_account_permissions.sql",
+    "047_messages_log_account_scope_indexes.sql",
+    "048_account_scoped_friends.sql",
+    "049_broadcast_selected_friends.sql",
+    "050_event_booking_form_fields.sql",
+    "051_event_slot_visibility_conditions.sql",
+    "052_event_booking_decision_notifications.sql",
+    "053_scheduled_chat_messages.sql",
+    "054_event_booking_waitlist.sql",
+    "055_event_detail_url.sql",
+    "056_rich_menu_assignments.sql",
+    "058_liff_pending_ref_attributions.sql",
+    "059_scenario_expiry.sql"
   ],
-  "migrationCount": 51
+  "migrationCount": 64
 }

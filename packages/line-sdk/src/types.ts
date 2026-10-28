@@ -271,6 +271,7 @@ export interface RichMenuObject {
 export interface PushMessageRequest {
   to: string;
   messages: Message[];
+  notificationDisabled?: boolean;
 }
 
 export interface MulticastRequest {

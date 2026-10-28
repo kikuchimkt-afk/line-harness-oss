@@ -1,0 +1,374 @@
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { NewBadge } from '../../new-badge'
+
+export const metadata: Metadata = {
+  title: '中3 基礎学ステップアップ集中講座',
+  description:
+    'ECCベストワン藍住校の中学3年生対象「基礎学ステップアップ集中講座」。英語・数学・理科から選べる、1人1回の無料体験も受け付けています。',
+}
+
+const applicationFormUrl =
+  'https://liff.line.me/2011200807-IztOr7TD?page=form&id=6dbebd34-3490-4323-b0de-86159dfd91c9&liffId=2011200807-IztOr7TD'
+
+const freeTrialBookingUrl =
+  'https://liff.line.me/2011200807-IztOr7TD/?page=event&id=2c6cc0cf-2f6c-4cb0-887b-e22b9779529a'
+
+const principles = [
+  {
+    number: '01',
+    title: '現在の理解を整理する',
+    body: 'できているところと、もう一度確認したいところを分け、学習の出発点を明確にします。',
+  },
+  {
+    number: '02',
+    title: '今必要な問題を選ぶ',
+    body: '講師が過去問や学習アプリを活用し、理解度と残り時間に合わせて取り組む内容と量を調整します。',
+  },
+  {
+    number: '03',
+    title: '解き直しを次につなげる',
+    body: '解説で間違えた理由を確認し、もう一度解ける状態にしてから、次の課題へ進みます。',
+  },
+]
+
+const learningCycle = [
+  {
+    number: '01',
+    title: '診断する',
+    body: '答案や学習状況から、優先して補いたい単元を見つけます。',
+  },
+  {
+    number: '02',
+    title: '選ぶ',
+    body: '講師がアプリを使い、今の理解度に合う問題を絞り込みます。',
+  },
+  {
+    number: '03',
+    title: '集中して解く',
+    body: '無理のない量に区切り、必要な問題へ短時間で集中します。',
+  },
+  {
+    number: '04',
+    title: '解説・解き直し',
+    body: '考え方を確かめて解き直し、その結果を次の課題選びに生かします。',
+  },
+]
+
+const studyApps = [
+  {
+    number: '01',
+    category: '徳島県の基礎学対策',
+    title: '基礎学過去問解説アプリ',
+    product: '基礎学最前線',
+    body: '徳島県の基礎学力テストの過去問を、数学・英語・理科・社会の4教科から確認できます。詳しい解説を使い、基礎学で問われる内容を一つずつ学び直します。',
+    use: '現在地の確認と、基礎学に直結する課題選びに活用します。',
+    tags: ['数学', '英語', '理科', '社会'],
+    href: 'https://frontiers-of-kisogaku.vercel.app/',
+  },
+  {
+    number: '02',
+    category: '類題で理解を確かめる',
+    title: '全国高校入試過去問解説アプリ',
+    product: '高校入試アーカイブ',
+    body: '全国の高校入試問題を、都道府県・年度・教科などから探せます。解説付き問題を使い、基礎学で見つかった弱点を別の出題でも解けるか確かめます。',
+    use: '同じ単元の類題演習と、知識を使う練習に活用します。',
+    tags: ['全国の入試問題', '類題演習', '解説付き'],
+    href: 'https://velora-studio-rust.vercel.app/',
+  },
+  {
+    number: '03',
+    category: '理科を単元別に補強',
+    title: '理科特化アプリ SCIENTIA',
+    product: '高校入試 理科単元別アーカイブ',
+    body: '中1・中2範囲の理科を、物理・化学・地学・生物の分野や単元から絞り込めます。問題・正解・解説まで続けて確認し、苦手な範囲を集中的に復習します。',
+    use: '理科の苦手単元を特定し、必要な大問だけを選ぶために活用します。',
+    tags: ['中1・中2範囲', '理科4分野', '単元別'],
+    href: 'https://lattice-studio-amber.vercel.app/',
+  },
+]
+
+export default function KisogakuStepupPage() {
+  return (
+    <div className="siteShell detailShell">
+      <header className="siteHeader">
+        <Link className="brand" href="/" aria-label="藍住校のイベント・講座一覧へ">
+          <span>つながるベストワン</span>
+          <small>ECCベストワン</small>
+        </Link>
+        <span className="schoolTag">藍住校</span>
+      </header>
+
+      <main>
+        <section className="detailHero">
+          <div className="detailHeroInner">
+            <div className="detailBadges">
+              <NewBadge publishedAt="2026-09-02" newUntil="2026-09-08" />
+              <span className="trialBadge">1人1回 無料体験</span>
+              <span className="audience audienceStrong">中学3年生対象</span>
+            </div>
+            <p className="eyebrow">KISOGAKU STEP UP</p>
+            <h1>基礎学ステップアップ集中講座</h1>
+            <p className="detailLead">
+              基礎学力テストに向けて、講師の学習設計と3つの学習アプリを組み合わせ、今必要な課題に集中する講座です。
+              適切な課題を、適切な量で。解説と解き直しまでの流れを短くし、限られた期間の学習を次に解ける力へつなげます。
+            </p>
+            <dl className="detailFacts">
+              <div>
+                <dt>対象</dt>
+                <dd>中学3年生</dd>
+              </div>
+              <div>
+                <dt>第I期</dt>
+                <dd>2026年9月8日〜10月3日</dd>
+              </div>
+              <div>
+                <dt>第II期</dt>
+                <dd>2026年10月6日〜10月31日（予定）</dd>
+              </div>
+            </dl>
+            <a className="heroTrialLink" href="#free-trial">
+              無料体験の詳細を見る
+              <span aria-hidden="true">↓</span>
+            </a>
+          </div>
+        </section>
+
+        <section className="detailSection trialSection" id="free-trial" aria-labelledby="trial-heading">
+          <div className="trialPanel">
+            <div className="sectionHeading compactHeading">
+              <p className="eyebrow">FREE TRIAL</p>
+              <h2 id="trial-heading">まずは1回、無料で体験できます</h2>
+              <p>
+                講座への参加を検討されている中学3年生を対象に、1人1回の無料体験をご用意しました。
+                一人ひとりの理解度に合わせた個別指導と、教室での学習環境を確認してから、本講座への参加をご検討いただけます。
+              </p>
+            </div>
+
+            <div className="trialHighlights">
+              <article>
+                <span>対象</span>
+                <strong>中学3年生</strong>
+              </article>
+              <article>
+                <span>体験回数</span>
+                <strong>1人1回</strong>
+              </article>
+              <article>
+                <span>対応教科</span>
+                <strong>英語・数学・理科</strong>
+              </article>
+            </div>
+
+            <div className="trialSchedule">
+              <span>予約可能日</span>
+              <strong>本講座の開講日のうち、9月11日以降</strong>
+            </div>
+
+            <div className="trialHowTo">
+              <h3>無料体験のお申し込み方法</h3>
+              <ol>
+                <li>受講者氏名・学校名・保護者氏名を入力します。</li>
+                <li>英語・数学・理科から、体験を希望する教科を1つ選択します。</li>
+                <li>9月11日以降の本講座開講日から希望日を1日選び、予約を送信します。</li>
+              </ol>
+              <p>予約内容を教室で確認後、公式LINEへ確定のご案内をお送りします。</p>
+            </div>
+
+            <p className="trialNote">
+              無料体験は、本講座に含まれる個別指導3回相当とは別枠です。体験後の本申込を強制するものではありません。
+            </p>
+
+            <a className="primaryButton trialButton" href={freeTrialBookingUrl} target="_blank" rel="noreferrer">
+              1回無料体験に申し込む
+              <span aria-hidden="true">→</span>
+            </a>
+          </div>
+        </section>
+
+        <section className="detailSection" aria-labelledby="purpose-heading">
+          <div className="sectionHeading">
+            <p className="eyebrow">PURPOSE</p>
+            <h2 id="purpose-heading">
+              「わかる」を、次に<span className="keepTogether">解ける力へ</span>
+            </h2>
+            <p>
+              基礎学力テストに向けた学習では、問題数を増やすだけでなく、理解が不十分な箇所を見つけ、
+              学び直す順番を整えることが大切です。この講座では、一人ひとりの学習を次の行動につなげることを重視します。
+            </p>
+          </div>
+
+          <div className="principleGrid">
+            {principles.map((principle) => (
+              <article className="principleCard" key={principle.number}>
+                <span>{principle.number}</span>
+                <h3>{principle.title}</h3>
+                <p>{principle.body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="detailSection courseOverviewSection" aria-labelledby="overview-heading">
+          <div className="courseOverviewPanel">
+            <div className="sectionHeading compactHeading">
+              <p className="eyebrow">PROGRAM &amp; FEE</p>
+              <h2 id="overview-heading">第I期の講座概要・受講料</h2>
+            </div>
+
+            <div className="overviewHighlights">
+              <article>
+                <span>第I期の開講日</span>
+                <strong>全11日</strong>
+              </article>
+              <article>
+                <span>講座に含まれる</span>
+                <strong>個別指導3回相当</strong>
+              </article>
+              <article>
+                <span>講師サポートあり</span>
+                <strong>管理自習</strong>
+              </article>
+            </div>
+
+            <p className="overviewNote">
+              第I期は9月8日〜10月3日の全11日開講です。個別指導3回相当と、講師サポート付きの管理自習を組み合わせます。
+            </p>
+
+            <dl className="overviewFacts">
+              <div>
+                <dt>対象</dt>
+                <dd>中学3年生</dd>
+              </div>
+              <div>
+                <dt>会場</dt>
+                <dd>
+                  ECCベストワン藍住校
+                  <small>北島中央校の登録生も受講できます</small>
+                </dd>
+              </div>
+            </dl>
+
+            <div className="tuitionBlock" aria-labelledby="tuition-heading">
+              <h3 id="tuition-heading">受講料（税込）</h3>
+              <div className="tuitionGrid">
+                <article>
+                  <span>ベストワン藍住校・北島中央校 中3生</span>
+                  <strong>14,520円</strong>
+                </article>
+                <article>
+                  <span>ECCジュニア生・外部生</span>
+                  <strong>19,360円</strong>
+                </article>
+              </div>
+              <p className="materialFee">上記受講料とは別に、教材費2,000円（税込）が必要です。</p>
+              <p className="scheduleNote">第I期の詳しい開講日は、申込フォーム送信後にLINEでご案内します。</p>
+              <a
+                className="documentButton"
+                href="/documents/kisogaku-stepup-intensive-course-guide.pdf"
+                target="_blank"
+                rel="noreferrer"
+              >
+                案内PDFを見る
+                <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <section className="detailSection appLearningSection" aria-labelledby="apps-heading">
+          <div className="sectionHeading appSectionHeading">
+            <p className="eyebrow">APP-ASSISTED LEARNING</p>
+            <h2 id="apps-heading">問題を増やすのではなく、今必要な問題に絞る</h2>
+            <p>
+              アプリを使う目的は、たくさんの問題を解かせることではありません。講師が現在の理解と次のテストまでの期間を確認し、
+              3つのアプリから今取り組む課題を選びます。解く・確かめる・解き直すサイクルを短く回し、必要な内容の習得を目指します。
+            </p>
+          </div>
+
+          <div className="learningFormula" aria-label="学習設計の考え方">
+            <strong>適切な課題</strong>
+            <span aria-hidden="true">×</span>
+            <strong>適切な量</strong>
+            <span aria-hidden="true">×</span>
+            <strong>短い学習サイクル</strong>
+          </div>
+
+          <ol className="learningCycle">
+            {learningCycle.map((step) => (
+              <li className="cycleCard" key={step.number}>
+                <span>{step.number}</span>
+                <h3>{step.title}</h3>
+                <p>{step.body}</p>
+              </li>
+            ))}
+          </ol>
+
+          <div className="studyAppGrid">
+            {studyApps.map((app) => (
+              <article className="studyAppCard" key={app.number}>
+                <div className="appCardMeta">
+                  <span>{app.number}</span>
+                  <small>{app.category}</small>
+                </div>
+                <h3>{app.title}</h3>
+                <p className="appProduct">{app.product}</p>
+                <p className="appDescription">{app.body}</p>
+                <p className="appUse"><strong>講座での活用</strong>{app.use}</p>
+                <ul className="appTags" aria-label={`${app.title}の特徴`}>
+                  {app.tags.map((tag) => (
+                    <li key={tag}>{tag}</li>
+                  ))}
+                </ul>
+                <a className="appLink" href={app.href} target="_blank" rel="noreferrer">
+                  アプリの内容を見る
+                  <span aria-hidden="true">↗</span>
+                </a>
+              </article>
+            ))}
+          </div>
+
+          <p className="appSupportNote">
+            アプリは講師の代わりではなく、課題選定と反復を速くする道具として使います。学習状況に応じて、使用するアプリ・教科・問題数を調整します。
+          </p>
+        </section>
+
+        <section className="detailSection detailSectionSoft" aria-labelledby="students-heading">
+          <div className="sectionHeading compactHeading">
+            <p className="eyebrow">FOR STUDENTS</p>
+            <h2 id="students-heading">このような中学3年生へ</h2>
+          </div>
+          <ul className="studentList">
+            <li>どこから復習すればよいか整理したい</li>
+            <li>過去問を解きっぱなしにせず、解説と解き直しまで取り組みたい</li>
+            <li>限られた時間で、必要な単元に絞って学習したい</li>
+          </ul>
+        </section>
+
+        <section className="contactSection" aria-labelledby="contact-heading">
+          <p className="eyebrow">INFORMATION</p>
+          <h2 id="contact-heading">参加申込はこちらから</h2>
+          <p>下のボタンから公式LINEの申込フォームへ進めます。送信後、詳しい開講日をLINEでご案内します。</p>
+          <div className="contactActions">
+            <a
+              className="primaryButton"
+              href={applicationFormUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              参加申込
+              <span aria-hidden="true">→</span>
+            </a>
+            <Link className="textLink" href="/">
+              イベント・講座一覧へ戻る
+            </Link>
+          </div>
+        </section>
+      </main>
+
+      <footer className="siteFooter">
+        <span>ECCベストワン 藍住校</span>
+      </footer>
+    </div>
+  )
+}

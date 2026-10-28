@@ -14,14 +14,23 @@ import { processScheduledBroadcasts, processQueuedBroadcasts } from './services/
 import { processReminderDeliveries } from './services/reminder-delivery.js';
 import { checkAccountHealth } from './services/ban-monitor.js';
 import { refreshLineAccessTokens } from './services/token-refresh.js';
+import { cleanupExpiredPendingRefs } from './services/liff-pending-ref-attribution.js';
 import { processInsightFetch } from './services/insight-fetcher.js';
 import { processDueReminders } from './services/booking-reminders.js';
 import { runExpirer } from './services/booking-expirer.js';
 import { processDueEventReminders } from './services/event-booking-reminders.js';
+import { processDueEventBookingDecisionNotifications } from './services/event-booking-decision-notifications.js';
+import { processDueScheduledChatMessages } from './services/scheduled-chat-messages.js';
 import { runEventBookingExpirer } from './services/event-booking-expirer.js';
 import { sendEventBookingNotification } from './services/event-booking-notifier.js';
 import { sendBookingNotification } from './services/booking-notifier.js';
 import { DEFAULT_ACCOUNT_SETTINGS } from './services/booking-types.js';
+import { createIndividualNotificationBudget } from './services/individual-notification-budget.js';
+import { processBlockedMenuMaintenance } from './services/blocked-menu-maintenance.js';
+import {
+  processDueRichMenuAssignments,
+  reconcileRichMenuAssignments,
+} from './services/rich-menu-assignment.js';
 import { authMiddleware } from './middleware/auth.js';
 import { rateLimitMiddleware } from './middleware/rate-limit.js';
 import { webhook } from './routes/webhook.js';
@@ -380,7 +389,7 @@ body{font-family:'Hiragino Sans','Helvetica Neue',system-ui,sans-serif;backgroun
 <img src="/api/qr?size=240x240&data=${encodeURIComponent(liffTarget)}" alt="QR Code">
 </div>
 <p class="hint">LINE アプリのカメラまたは<br>スマートフォンのカメラで読み取れます</p>
-<p class="footer">友だち追加で全機能を無料体験できます</p>
+<p class="footer">友だち追加で教室のご案内を受け取れます</p>
 </div>
 </body>
 </html>`);
@@ -554,12 +563,81 @@ export const notFoundHandler = async (c: Parameters<typeof app.notFound>[0] exte
 
 app.notFound(notFoundHandler);
 
+const SIX_HOUR_MAINTENANCE_CRON = '0 */6 * * *';
+
+async function runSixHourMaintenance(env: Env['Bindings']): Promise<void> {
+  const now = new Date();
+  const notificationBudget = createIndividualNotificationBudget();
+
+  // Expiration notices are individual LINE pushes, so they share the same
+  // per-invocation safety budget as the five-minute delivery Cron.
+  try {
+    const result = await runExpirer(env.DB, {
+      now,
+      sender: sendBookingNotification,
+      budget: notificationBudget,
+    });
+    console.log(
+      `[booking-expirer] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
+    );
+  } catch (e) {
+    console.error('booking-expirer error:', e);
+  }
+
+  // Approval requests stay pending until an operator decides. Waitlist rows
+  // whose promotion cutoff passed are closed, and duplicate-submit keys purge.
+  try {
+    const result = await runEventBookingExpirer(env.DB, { now });
+    console.log(
+      `[event-booking-cleanup] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
+    );
+  } catch (e) {
+    console.error('event-booking-cleanup error:', e);
+  }
+
+  // Keep 90 days of account-health history. The DB helper removes at most
+  // 500 rows per run so a backlog cannot consume the Free-plan write quota.
+  try {
+    const { deleteExpiredAccountHealthLogs } = await import('@line-crm/db');
+    const deleted = await deleteExpiredAccountHealthLogs(env.DB);
+    if (deleted > 0) {
+      console.log(`[account-health-cleanup] deleted=${deleted}`);
+    }
+  } catch (e) {
+    console.error('account-health-cleanup error:', e);
+  }
+
+  // Rotate through the durable desired-state table. With 25 checks every six
+  // hours, 500 friends are verified in about five days without a request spike.
+  try {
+    const result = await reconcileRichMenuAssignments(env.DB, { now });
+    if (result.verified + result.requeued + result.unavailable > 0) {
+      console.log(
+        `[rich-menu-reconcile] verified=${result.verified} requeued=${result.requeued} unavailable=${result.unavailable}`,
+      );
+    }
+  } catch (e) {
+    console.error('rich-menu-reconcile error:', e);
+  }
+}
+
 // Scheduled handler for cron triggers — runs for all active LINE accounts
 async function scheduled(
   event: ScheduledEvent,
   env: Env['Bindings'],
   _ctx: ExecutionContext,
 ): Promise<void> {
+  // The five-minute and six-hour expressions overlap four times per day.
+  // Keep the six-hour invocation maintenance-only so delivery jobs do not run
+  // twice with two independent 40-notification budgets in the same minute.
+  if (event.cron === SIX_HOUR_MAINTENANCE_CRON) {
+    await runSixHourMaintenance(env);
+    return;
+  }
+
+  const now = new Date();
+  const notificationBudget = createIndividualNotificationBudget();
+
   // Get all active accounts from DB
   const dbAccounts = await getLineAccounts(env.DB);
 
@@ -572,15 +650,14 @@ async function scheduled(
   }
   const defaultLineClient = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
 
+  // 一斉配信と保守系は個別通知40件枠の対象外。LINE multicast / broadcast
+  // を利用し、1人につき1サブリクエストを発生させないため。
   // 配信系は1回だけ実行（内部でfriendのline_account_idから正しいlineClientを動的解決）
   // 以前はアカウントごとにループしていたが、アカウントフィルタなしのDBクエリで
   // 全アカウントの配信が各ループで重複実行されていたバグを修正
-  const jobs = [];
-  jobs.push(
-    processStepDeliveries(env.DB, defaultLineClient, env.WORKER_URL),
+  const jobs: Promise<unknown>[] = [
     processScheduledBroadcasts(env.DB, defaultLineClient, env.WORKER_URL),
-    processReminderDeliveries(env.DB, defaultLineClient),
-  );
+  ];
   // キュー処理は1回だけ実行（内部でアカウント別lineClientを解決する）
   // ロック解除: タイムアウトでstuckした配信を復旧
   const { recoverStalledBroadcasts, recoverStuckDeliveries } = await import('@line-crm/db');
@@ -589,8 +666,35 @@ async function scheduled(
   jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
   jobs.push(checkAccountHealth(env.DB));
   jobs.push(refreshLineAccessTokens(env.DB));
+  jobs.push(cleanupExpiredPendingRefs(env.DB, now.getTime()));
 
   await Promise.allSettled(jobs);
+
+  // Account creation is not restricted to the admin UI (the installer also
+  // writes D1 directly). Recover missing setup after token refresh has settled.
+  // These operations never send messages and do not spend the 40-push budget.
+  try {
+    const result = await processBlockedMenuMaintenance(env.DB, { now });
+    if (result.setup.attempted + result.setup.failed + result.repair.attempted + result.restore.attempted + result.restore.failed > 0) {
+      console.log(`[blocked-menu-maintenance] setup_ready=${result.setup.ready} setup_deferred=${result.setup.deferred} setup_failed=${result.setup.failed} friend_repaired=${result.repair.repaired} friend_failed=${result.repair.failed} unblock_restored=${result.restore.repaired} unblock_failed=${result.restore.failed}`);
+    }
+  } catch {
+    console.error('blocked-menu-maintenance error: recovery deferred');
+  }
+
+  // Rich-menu switching is idempotent and has its own durable desired-state
+  // queue. Process it before message deliveries so a temporary LINE failure
+  // cannot strand LP entrants after their source tag has already been saved.
+  try {
+    const result = await processDueRichMenuAssignments(env.DB, { now });
+    if (result.applied + result.deferred + result.failedPermanent > 0) {
+      console.log(
+        `[rich-menu-retry] applied=${result.applied} deferred=${result.deferred} failed_permanent=${result.failedPermanent}`,
+      );
+    }
+  } catch (e) {
+    console.error('rich-menu-retry error:', e);
+  }
 
   // Fetch broadcast insights (runs daily, self-throttled)
   try {
@@ -599,12 +703,47 @@ async function scheduled(
     console.error('Insight fetch error:', e);
   }
 
+  // Individual notifications share one budget for this Cron invocation.
+  // Time-sensitive operator and booking messages run before scenarios so a
+  // large marketing backlog cannot starve operational notices.
+  try {
+    const result = await processDueScheduledChatMessages(env.DB, {
+      now,
+      defaultChannelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN,
+      budget: notificationBudget,
+    });
+    if (result.sent + result.failed > 0) {
+      console.log(
+        `[scheduled-chat-messages] sent=${result.sent} failed=${result.failed}`,
+      );
+    }
+  } catch (e) {
+    console.error('scheduled-chat-messages error:', e);
+  }
+
+  // Scheduled approval/rejection notices use the same five-minute Cron tick.
+  try {
+    const result = await processDueEventBookingDecisionNotifications(env.DB, {
+      now,
+      sender: sendEventBookingNotification,
+      budget: notificationBudget,
+    });
+    if (result.sent + result.failed > 0) {
+      console.log(
+        `[event-booking-decision-notifications] sent=${result.sent} failed=${result.failed}`,
+      );
+    }
+  } catch (e) {
+    console.error('event-booking-decision-notifications error:', e);
+  }
+
   // Booking reminders — every 5-minute tick scans due reminders.
   try {
     const result = await processDueReminders(env.DB, {
-      now: new Date(),
+      now,
       sender: sendBookingNotification,
       reminderHoursBefore: DEFAULT_ACCOUNT_SETTINGS.reminder_hours_before,
+      budget: notificationBudget,
     });
     if (result.sent + result.failed > 0) {
       console.log(`[booking-reminders] sent=${result.sent} failed=${result.failed}`);
@@ -613,26 +752,12 @@ async function scheduled(
     console.error('booking-reminders error:', e);
   }
 
-  // Booking expirer — runs only on the 6h cron tick.
-  if (event.cron === '0 */6 * * *') {
-    try {
-      const result = await runExpirer(env.DB, {
-        now: new Date(),
-        sender: sendBookingNotification,
-      });
-      console.log(
-        `[booking-expirer] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
-      );
-    } catch (e) {
-      console.error('booking-expirer error:', e);
-    }
-  }
-
   // Event-booking reminders — every 5-minute tick scans due reminders.
   try {
     const result = await processDueEventReminders(env.DB, {
-      now: new Date(),
+      now,
       sender: sendEventBookingNotification,
+      budget: notificationBudget,
     });
     if (result.sent + result.failed > 0) {
       console.log(`[event-booking-reminders] sent=${result.sent} failed=${result.failed}`);
@@ -641,16 +766,30 @@ async function scheduled(
     console.error('event-booking-reminders error:', e);
   }
 
-  // Event-booking expirer — 6h cron tick.
-  if (event.cron === '0 */6 * * *') {
-    try {
-      const result = await runEventBookingExpirer(env.DB, { now: new Date() });
-      console.log(
-        `[event-booking-expirer] expired=${result.expired} idempotency_purged=${result.idempotencyPurged}`,
-      );
-    } catch (e) {
-      console.error('event-booking-expirer error:', e);
-    }
+  // Legacy reminder sequences share the remaining individual-send capacity.
+  try {
+    await processReminderDeliveries(env.DB, defaultLineClient, notificationBudget);
+  } catch (e) {
+    console.error('reminder-deliveries error:', e);
+  }
+
+  // Scenario steps use whatever remains; skipped rows stay due for the next
+  // five-minute invocation.
+  try {
+    await processStepDeliveries(
+      env.DB,
+      defaultLineClient,
+      env.WORKER_URL,
+      notificationBudget,
+    );
+  } catch (e) {
+    console.error('step-deliveries error:', e);
+  }
+
+  if (notificationBudget.remaining === 0) {
+    console.log(
+      `[individual-notifications] limit=${notificationBudget.limit} reached; remaining due items will retry on the next Cron tick`,
+    );
   }
 
   // Cross-account duplicate detection — disabled.

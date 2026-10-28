@@ -1,13 +1,7 @@
-// Cron handler: expire 24h-old `requested` event bookings + purge
-// idempotency rows. Mirrors booking-expirer.ts but without a friend
-// notification — spec §7.1 lists no expired-kind notification for events.
+// Cron handler: keep approval requests pending, close waitlist rows at the
+// event's shared promotion/cancellation cutoff, and purge idempotency rows.
 
 import { purgeExpiredEventIdempotency } from './event-booking-idempotency.js';
-import { REQUESTED_EXPIRE_HOURS } from './event-booking-types.js';
-
-interface StaleRow {
-  id: string;
-}
 
 export interface RunEventBookingExpirerParams {
   now: Date;
@@ -17,41 +11,24 @@ export async function runEventBookingExpirer(
   db: D1Database,
   params: RunEventBookingExpirerParams,
 ): Promise<{ expired: number; idempotencyPurged: number }> {
-  const cutoff = new Date(
-    params.now.getTime() - REQUESTED_EXPIRE_HOURS * 3600_000,
-  ).toISOString();
-  const stale = await db
+  const nowIso = params.now.toISOString();
+  const expiredResult = await db
     .prepare(
-      `SELECT id FROM event_bookings
-        WHERE status = 'requested' AND requested_at < ?
-        LIMIT 200`,
+      `UPDATE event_bookings
+          SET status = 'expired', decided_at = ?, updated_at = ?
+        WHERE status = 'waitlisted'
+          AND EXISTS (
+            SELECT 1
+              FROM event_slots s
+              JOIN events e ON e.id = s.event_id
+             WHERE s.id = event_bookings.slot_id
+               AND e.waitlist_enabled = 1
+               AND e.cancel_deadline_hours_before IS NOT NULL
+               AND julianday(s.starts_at) - (e.cancel_deadline_hours_before / 24.0) <= julianday(?)
+          )`,
     )
-    .bind(cutoff)
-    .all<StaleRow>();
-
-  let expired = 0;
-  for (const row of stale.results ?? []) {
-    // Conditional UPDATE to avoid racing with concurrent admin decide.
-    const upd = await db
-      .prepare(
-        `UPDATE event_bookings
-            SET status = 'expired', decided_at = ?, updated_at = ?
-          WHERE id = ? AND status = 'requested'`,
-      )
-      .bind(params.now.toISOString(), params.now.toISOString(), row.id)
-      .run();
-    if ((upd.meta?.changes ?? 0) === 0) continue;
-    await db
-      .prepare(
-        `UPDATE event_booking_reminders
-            SET status = 'cancelled'
-          WHERE booking_id = ? AND status IN ('pending','failed')`,
-      )
-      .bind(row.id)
-      .run();
-    expired++;
-  }
-
+    .bind(nowIso, nowIso, nowIso)
+    .run();
   const idempotencyPurged = await purgeExpiredEventIdempotency(db, params.now);
-  return { expired, idempotencyPurged };
+  return { expired: expiredResult.meta?.changes ?? 0, idempotencyPurged };
 }

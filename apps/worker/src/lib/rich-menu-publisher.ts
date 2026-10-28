@@ -10,6 +10,7 @@
 //   4. 旧 richmenu があれば DELETE
 // 最後に isDefaultForAll なら 1 ページ目を全友だち default に。
 
+import { filterUnblockedLineUserIds } from '../services/friend-block-policy.js';
 export type Bounds = { x: number; y: number; width: number; height: number };
 
 export type ActionType = 'uri' | 'message' | 'postback' | 'richmenuswitch';
@@ -92,6 +93,74 @@ export function resolveSwitcherActions(pages: PageInput[], groupId: string): Pag
   }));
 }
 
+const TEXT_IMAGE_POSTBACK_PREFIX = 'lh:richmenu:text-image:';
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function hasReplyPayload(actionData: Record<string, unknown>): boolean {
+  const text = stringValue(actionData.text);
+  const image =
+    actionData.image && typeof actionData.image === 'object'
+      ? actionData.image as { originalContentUrl?: unknown }
+      : null;
+  return !!text || !!stringValue(image?.originalContentUrl);
+}
+
+export function toLineRichMenuAction(area: AreaInput): Record<string, unknown> {
+  if (area.actionType === 'uri') {
+    const uri = stringValue(area.actionData.uri);
+    if (!uri) throw new Error('uri action missing uri');
+    if (uri.toLowerCase().startsWith('tel:') && !/^tel:\+?\d{8,15}$/i.test(uri)) {
+      throw new Error('tel uri must contain 8 to 15 digits');
+    }
+    return { type: 'uri', uri };
+  }
+
+  if (area.actionType === 'message') {
+    const text = stringValue(area.actionData.text);
+    if (!text) throw new Error('message action missing text');
+    return { type: 'message', text };
+  }
+
+  if (area.actionType === 'richmenuswitch') {
+    const richMenuAliasId = stringValue(area.actionData.richMenuAliasId);
+    const data = stringValue(area.actionData.data);
+    if (!richMenuAliasId || !data) {
+      throw new Error('richmenuswitch action missing richMenuAliasId or data');
+    }
+    return { type: 'richmenuswitch', richMenuAliasId, data };
+  }
+
+  const kind = stringValue(area.actionData.kind);
+  if (kind === 'text_image') {
+    const actionId = stringValue(area.actionData.actionId);
+    const data = stringValue(area.actionData.data) ?? (actionId ? `${TEXT_IMAGE_POSTBACK_PREFIX}${actionId}` : undefined);
+    if (!data?.startsWith(TEXT_IMAGE_POSTBACK_PREFIX)) {
+      throw new Error('text+image rich menu action missing internal postback data');
+    }
+    if (!hasReplyPayload(area.actionData)) {
+      throw new Error('text+image rich menu action requires text or image');
+    }
+    const displayText = stringValue(area.actionData.displayText);
+    return {
+      type: 'postback',
+      data,
+      ...(displayText ? { displayText } : {}),
+    };
+  }
+
+  const data = stringValue(area.actionData.data);
+  if (!data) throw new Error('postback action missing data');
+  const displayText = stringValue(area.actionData.displayText);
+  return {
+    type: 'postback',
+    data,
+    ...(displayText ? { displayText } : {}),
+  };
+}
+
 export type PublishResult = {
   pages: { pageId: string; newRichMenuId: string }[];
 };
@@ -127,7 +196,7 @@ export async function publishRichMenuGroup(
       chatBarText: group.chatBarText,
       areas: page.areas.map((a) => ({
         bounds: a.bounds,
-        action: { type: a.actionType, ...a.actionData },
+        action: toLineRichMenuAction(a),
       })),
     });
     const newRichMenuId = created.richMenuId;
@@ -199,15 +268,20 @@ export async function linkRichMenuBulkChunked(
   line: LineRichMenuClient,
   richMenuId: string,
   userIds: string[],
+  policy: { db: D1Database; accountId: string },
 ): Promise<{ chunks: number; total: number }> {
   const CHUNK = 500;
-  const total = userIds.length;
-  if (total === 0) return { chunks: 0, total: 0 };
+  if (!policy?.db || !policy.accountId) throw new Error('Account-scoped block policy is required for bulk menu linking');
+  const candidateCount = userIds.length;
+  if (candidateCount === 0) return { chunks: 0, total: 0 };
+  let total = 0;
   let chunks = 0;
-  for (let i = 0; i < total; i += CHUNK) {
-    const slice = userIds.slice(i, i + CHUNK);
+  for (let i = 0; i < candidateCount; i += CHUNK) {
+    const slice = await filterUnblockedLineUserIds(policy.db, userIds.slice(i, i + CHUNK), policy.accountId);
+    if (!slice.length) continue;
     await line.linkRichMenuBulk(richMenuId, slice);
     chunks++;
+    total += slice.length;
   }
   return { chunks, total };
 }

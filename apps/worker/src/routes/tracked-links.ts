@@ -9,9 +9,11 @@ import {
   getLinkClicks,
   getFriendByLineUserId,
 } from '@line-crm/db';
-import { addTagToFriend, enrollFriendInScenario } from '@line-crm/db';
+import { enrollFriendInScenario } from '@line-crm/db';
 import type { TrackedLink } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { isFriendBlocked } from '../services/friend-block-policy.js';
 
 const trackedLinks = new Hono<Env>();
 
@@ -263,23 +265,17 @@ trackedLinks.get('/t/:linkId', async (c) => {
   ctx.waitUntil(
     (async () => {
       try {
+        if (friendId && await isFriendBlocked(c.env.DB, friendId)) return;
         // Record the click
         await recordLinkClick(c.env.DB, linkId, friendId);
 
         // Run automatic actions if a friend is identified
         if (friendId) {
-          const actions: Promise<unknown>[] = [];
-
           if (link.tag_id) {
-            actions.push(addTagToFriend(c.env.DB, friendId, link.tag_id));
+            await attachTagAndFireSideEffects(c.env.DB, friendId, link.tag_id);
           }
-
-          if (link.scenario_id) {
-            actions.push(enrollFriendInScenario(c.env.DB, friendId, link.scenario_id));
-          }
-
-          if (actions.length > 0) {
-            await Promise.allSettled(actions);
+          if (link.scenario_id && !(await isFriendBlocked(c.env.DB, friendId))) {
+            await enrollFriendInScenario(c.env.DB, friendId, link.scenario_id);
           }
         }
       } catch (err) {

@@ -11,6 +11,7 @@ function formatJp(iso: string): string {
 
 const statusLabel: Record<string, { text: string; cls: string }> = {
   requested: { text: '承認待ち', cls: 'bg-yellow-100 text-yellow-800' },
+  waitlisted: { text: 'キャンセル待ち', cls: 'bg-pink-100 text-pink-800' },
   confirmed: { text: '確定', cls: 'bg-green-100 text-green-800' },
   rejected: { text: '見送り', cls: 'bg-gray-200 text-gray-700' },
   cancelled: { text: 'キャンセル', cls: 'bg-gray-100 text-gray-600' },
@@ -20,7 +21,7 @@ const statusLabel: Record<string, { text: string; cls: string }> = {
 };
 
 function canCancel(b: EventBookingMine): boolean {
-  if (b.status !== 'requested' && b.status !== 'confirmed') return false;
+  if (b.status !== 'requested' && b.status !== 'waitlisted' && b.status !== 'confirmed') return false;
   if (b.cancel_deadline_hours_before == null) return false;
   const deadlineMs = new Date(b.slot_starts_at).getTime() - b.cancel_deadline_hours_before * 3600_000;
   return deadlineMs > Date.now();
@@ -51,7 +52,8 @@ export default function EventBookings() {
   }, [refresh]);
 
   async function cancel(b: EventBookingMine) {
-    if (!confirm(`「${b.event_name}」の予約をキャンセルしますか？`)) return;
+    const target = b.status === 'waitlisted' ? 'キャンセル待ち' : '予約';
+    if (!confirm(`「${b.event_name}」の${target}を取り消しますか？`)) return;
     setBusy(true);
     setError(null);
     try {
@@ -114,6 +116,12 @@ export default function EventBookings() {
                     </div>
                     <div className="text-xs text-gray-600 mt-1">{formatJp(b.slot_starts_at)}</div>
                     {b.venue_name && <div className="text-xs text-gray-600">📍 {b.venue_name}</div>}
+                    {b.status === 'waitlisted' && b.waitlist_position != null && (
+                      <div className="text-xs font-semibold text-pink-700 mt-1">現在 {b.waitlist_position}番目</div>
+                    )}
+                    {b.status === 'waitlisted' && !canCancel(b) && (
+                      <div className="text-xs text-gray-500 mt-1">繰り上げ受付は終了しました</div>
+                    )}
                   </div>
                 </div>
                 {canCancel(b) && (
@@ -123,7 +131,7 @@ export default function EventBookings() {
                       disabled={busy}
                       className="text-sm text-red-600 hover:underline disabled:opacity-50"
                     >
-                      キャンセルする
+                      {b.status === 'waitlisted' ? 'キャンセル待ちを取り消す' : 'キャンセルする'}
                     </button>
                   </div>
                 )}

@@ -8,6 +8,10 @@ import type {
   RichMenuObject,
   UserProfile,
 } from './types.js';
+import {
+  prepareMessagesForLine,
+  prepareRichMenuForLine,
+} from './external-browser.js';
 
 const LINE_API_BASE = 'https://api.line.me';
 
@@ -75,8 +79,15 @@ export class LineClient {
 
   // ─── Messaging ───────────────────────────────────────────────────────────
 
-  async pushMessage(to: string, messages: Message[]): Promise<unknown> {
-    const body: PushMessageRequest = { to, messages };
+  async pushMessage(
+    to: string,
+    messages: Message[],
+    options?: { notificationDisabled?: boolean },
+  ): Promise<unknown> {
+    const body: PushMessageRequest = { to, messages: prepareMessagesForLine(messages) };
+    if (options?.notificationDisabled !== undefined) {
+      body.notificationDisabled = options.notificationDisabled;
+    }
     const { data } = await this.request('POST', '/v2/bot/message/push', body);
     return data;
   }
@@ -86,7 +97,7 @@ export class LineClient {
     messages: Message[],
     customAggregationUnits?: string[],
   ): Promise<{ data: unknown; requestId: string | null }> {
-    const body: Record<string, unknown> = { to, messages };
+    const body: Record<string, unknown> = { to, messages: prepareMessagesForLine(messages) };
     if (customAggregationUnits) {
       body.customAggregationUnits = customAggregationUnits;
     }
@@ -101,7 +112,7 @@ export class LineClient {
   async broadcast(
     messages: Message[],
   ): Promise<{ data: unknown; requestId: string | null }> {
-    const body: BroadcastRequest = { messages };
+    const body: BroadcastRequest = { messages: prepareMessagesForLine(messages) };
     const { data, headers } = await this.request(
       'POST',
       '/v2/bot/message/broadcast',
@@ -114,7 +125,10 @@ export class LineClient {
     replyToken: string,
     messages: Message[],
   ): Promise<unknown> {
-    const body: ReplyMessageRequest = { replyToken, messages };
+    const body: ReplyMessageRequest = {
+      replyToken,
+      messages: prepareMessagesForLine(messages),
+    };
     const { data } = await this.request('POST', '/v2/bot/message/reply', body);
     return data;
   }
@@ -127,7 +141,11 @@ export class LineClient {
   }
 
   async createRichMenu(menu: RichMenuObject): Promise<{ richMenuId: string }> {
-    const { data } = await this.request('POST', '/v2/bot/richmenu', menu);
+    const { data } = await this.request(
+      'POST',
+      '/v2/bot/richmenu',
+      prepareRichMenuForLine(menu),
+    );
     return data as { richMenuId: string };
   }
 

@@ -1,5 +1,5 @@
 import { jstNow } from './utils.js';
-export type BroadcastTargetType = 'all' | 'tag' | 'multi-account-dedup';
+export type BroadcastTargetType = 'all' | 'tag' | 'friends' | 'segment' | 'multi-account-dedup';
 export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'sent';
 export type BroadcastMessageType = 'text' | 'image' | 'flex';
 
@@ -18,6 +18,7 @@ export interface Broadcast {
   created_at: string;
   account_ids: string | null;
   dedup_priority: string | null;
+  target_friend_ids: string | null;
   failed_account_ids: string | null;
   dedup_progress: string | null;
   batch_lock_at: string | null;
@@ -83,6 +84,7 @@ export interface CreateBroadcastInput {
   scheduledAt?: string | null;
   accountIds?: string[];
   dedupPriority?: string[];
+  targetFriendIds?: string[];
 }
 
 export async function createBroadcast(
@@ -97,8 +99,8 @@ export async function createBroadcast(
   await db
     .prepare(
       `INSERT INTO broadcasts
-         (id, title, message_type, message_content, target_type, target_tag_id, status, scheduled_at, sent_at, total_count, success_count, account_ids, dedup_priority, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?)`,
+         (id, title, message_type, message_content, target_type, target_tag_id, status, scheduled_at, sent_at, total_count, success_count, account_ids, dedup_priority, target_friend_ids, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -111,6 +113,7 @@ export async function createBroadcast(
       input.scheduledAt ?? null,
       input.accountIds ? JSON.stringify(input.accountIds) : null,
       input.dedupPriority ? JSON.stringify(input.dedupPriority) : null,
+      input.targetFriendIds ? JSON.stringify(input.targetFriendIds) : null,
       now,
     )
     .run();
@@ -126,6 +129,7 @@ export type UpdateBroadcastInput = Partial<
     | 'message_content'
     | 'target_type'
     | 'target_tag_id'
+    | 'target_friend_ids'
     | 'status'
     | 'scheduled_at'
   >
@@ -158,6 +162,10 @@ export async function updateBroadcast(
   if (updates.target_tag_id !== undefined) {
     fields.push('target_tag_id = ?');
     values.push(updates.target_tag_id);
+  }
+  if (updates.target_friend_ids !== undefined) {
+    fields.push('target_friend_ids = ?');
+    values.push(updates.target_friend_ids);
   }
   if (updates.status !== undefined) {
     fields.push('status = ?');

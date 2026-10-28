@@ -24,8 +24,30 @@ import type {
   DeliveryMode,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import {
+  denyIfCannotAccessLineAccount,
+  denyIfLineAccountOutsideScope,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
 
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 const scenarios = new Hono<Env>();
+
+function makePlaceholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(',');
+}
+
+async function denyIfCannotAccessScenario(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  scenarioId: string,
+): Promise<Response | null> {
+  const row = await c.env.DB
+    .prepare(`SELECT line_account_id FROM scenarios WHERE id = ?`)
+    .bind(scenarioId)
+    .first<{ line_account_id: string | null }>();
+  if (!row) return c.json({ success: false, error: 'Scenario not found' }, 404);
+  return denyIfLineAccountOutsideScope(c, row.line_account_id);
+}
 
 /** Convert D1 snake_case Scenario row to shared camelCase shape */
 function serializeScenario(row: DbScenario) {
@@ -40,6 +62,7 @@ function serializeScenario(row: DbScenario) {
     // owner account was deleted.
     lineAccountId: (row as { line_account_id?: string | null }).line_account_id ?? null,
     isActive: Boolean(row.is_active),
+    expiresAt: row.expires_at ?? null,
     deliveryMode: (row.delivery_mode ?? 'relative') as DeliveryMode,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -72,9 +95,9 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 interface StepScheduleBody {
   delayMinutes?: number;
-  offsetDays?: number;
-  offsetMinutes?: number;
-  deliveryTime?: string;
+  offsetDays?: number | null;
+  offsetMinutes?: number | null;
+  deliveryTime?: string | null;
 }
 
 /** delivery_mode に応じてスケジュールフィールドを検証する。 */
@@ -83,8 +106,19 @@ function validateStepSchedule(
   body: StepScheduleBody,
 ): { ok: true } | { ok: false; error: string } {
   if (mode === 'relative') {
-    if (body.offsetDays != null || body.offsetMinutes != null || body.deliveryTime != null) {
-      return { ok: false, error: 'relative mode: only delayMinutes is allowed' };
+    if (body.offsetMinutes != null) {
+      return { ok: false, error: 'relative mode: offsetMinutes is not allowed' };
+    }
+    const hasTimeFields = body.offsetDays !== undefined || body.deliveryTime !== undefined;
+    const clearsTimeFields = body.offsetDays === null && body.deliveryTime === null;
+    if (hasTimeFields && !clearsTimeFields) {
+      if (typeof body.offsetDays !== 'number' || body.offsetDays < 0) {
+        return { ok: false, error: 'relative time mode: offsetDays (>=0) is required' };
+      }
+      if (typeof body.deliveryTime !== 'string' || !HHMM_RE.test(body.deliveryTime)) {
+        return { ok: false, error: 'relative time mode: deliveryTime must match HH:MM' };
+      }
+      return { ok: true };
     }
     if (typeof body.delayMinutes !== 'number' || body.delayMinutes < 0) {
       return { ok: false, error: 'relative mode: delayMinutes (>=0) is required' };
@@ -136,12 +170,18 @@ scenarios.get('/api/scenarios', async (c) => {
     const lineAccountId = c.req.query('lineAccountId');
     let items: DbScenarioWithStepCount[];
     if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+      const allowedLineAccountIds = await getAllowedLineAccountIds(c);
+      const scopeSql = allowedLineAccountIds
+        ? `s.line_account_id = ?`
+        : `s.line_account_id IS NULL OR s.line_account_id = ?`;
       const result = await c.env.DB
         .prepare(
           `SELECT s.*, COUNT(ss.id) as step_count
            FROM scenarios s
            LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
-           WHERE s.line_account_id IS NULL OR s.line_account_id = ?
+           WHERE ${scopeSql}
            GROUP BY s.id
            ORDER BY s.created_at DESC`,
         )
@@ -149,7 +189,27 @@ scenarios.get('/api/scenarios', async (c) => {
         .all<DbScenarioWithStepCount>();
       items = result.results;
     } else {
-      items = await getScenarios(c.env.DB);
+      const allowedLineAccountIds = await getAllowedLineAccountIds(c);
+      if (allowedLineAccountIds) {
+        if (allowedLineAccountIds.length === 0) {
+          items = [];
+        } else {
+          const result = await c.env.DB
+            .prepare(
+              `SELECT s.*, COUNT(ss.id) as step_count
+               FROM scenarios s
+               LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
+               WHERE s.line_account_id IN (${makePlaceholders(allowedLineAccountIds.length)})
+               GROUP BY s.id
+               ORDER BY s.created_at DESC`,
+            )
+            .bind(...allowedLineAccountIds)
+            .all<DbScenarioWithStepCount>();
+          items = result.results;
+        }
+      } else {
+        items = await getScenarios(c.env.DB);
+      }
     }
     return c.json({
       success: true,
@@ -168,6 +228,8 @@ scenarios.get('/api/scenarios', async (c) => {
 scenarios.get('/api/scenarios/:id', async (c) => {
   try {
     const id = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
     const scenario = await getScenarioById(c.env.DB, id);
 
     if (!scenario) {
@@ -208,6 +270,10 @@ scenarios.post('/api/scenarios', async (c) => {
     if (!VALID_DELIVERY_MODES.includes(deliveryMode as DeliveryMode)) {
       return c.json({ success: false, error: 'invalid deliveryMode' }, 400);
     }
+    const denied = body.lineAccountId
+      ? await denyIfCannotAccessLineAccount(c, body.lineAccountId)
+      : await denyIfLineAccountOutsideScope(c, null);
+    if (denied) return denied;
 
     let scenario = await createScenario(c.env.DB, {
       name: body.name,
@@ -247,11 +313,18 @@ scenarios.put('/api/scenarios/:id', async (c) => {
       triggerTagId?: string | null;
       isActive?: boolean;
       deliveryMode?: DeliveryMode;
+      expiresAt?: string | null;
     }>();
 
     if (body.deliveryMode !== undefined) {
       return c.json({ success: false, error: 'deliveryMode cannot be changed after creation' }, 400);
     }
+    if (body.expiresAt !== undefined && body.expiresAt !== null &&
+        (!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(body.expiresAt) || !Number.isFinite(Date.parse(body.expiresAt)))) {
+      return c.json({ success: false, error: 'expiresAt must be an ISO timestamp with a timezone or null' }, 400);
+    }
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
 
     const updated = await updateScenario(c.env.DB, id, {
       name: body.name,
@@ -259,6 +332,7 @@ scenarios.put('/api/scenarios/:id', async (c) => {
       trigger_type: body.triggerType,
       trigger_tag_id: body.triggerTagId,
       is_active: body.isActive !== undefined ? (body.isActive ? 1 : 0) : undefined,
+      expires_at: body.expiresAt,
     });
 
     if (!updated) {
@@ -276,6 +350,8 @@ scenarios.put('/api/scenarios/:id', async (c) => {
 scenarios.delete('/api/scenarios/:id', async (c) => {
   try {
     const id = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, id);
+    if (denied) return denied;
     await deleteScenario(c.env.DB, id);
     return c.json({ success: true, data: null });
   } catch (err) {
@@ -288,12 +364,14 @@ scenarios.delete('/api/scenarios/:id', async (c) => {
 scenarios.post('/api/scenarios/:id/steps', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{
       stepOrder: number;
       delayMinutes?: number;
-      offsetDays?: number;
-      offsetMinutes?: number;
-      deliveryTime?: string;
+      offsetDays?: number | null;
+      offsetMinutes?: number | null;
+      deliveryTime?: string | null;
       messageType: MessageType;
       messageContent: string;
       conditionType?: string | null;
@@ -365,12 +443,14 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
   try {
     const scenarioId = c.req.param('id');
     const stepId = c.req.param('stepId');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{
       stepOrder?: number;
       delayMinutes?: number;
-      offsetDays?: number;
-      offsetMinutes?: number;
-      deliveryTime?: string;
+      offsetDays?: number | null;
+      offsetMinutes?: number | null;
+      deliveryTime?: string | null;
       messageType?: MessageType;
       messageContent?: string;
       conditionType?: string | null;
@@ -404,10 +484,10 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
     // (1 フィールドだけ更新するケース、例: elapsed step の offsetMinutes だけ変更、
     //  absolute_time step の deliveryTime だけ変更 を許可するため)
     const scheduleTouched =
-      body.delayMinutes != null ||
-      body.offsetDays != null ||
-      body.offsetMinutes != null ||
-      body.deliveryTime != null;
+      body.delayMinutes !== undefined ||
+      body.offsetDays !== undefined ||
+      body.offsetMinutes !== undefined ||
+      body.deliveryTime !== undefined;
     if (scheduleTouched) {
       const scenarioRow = await c.env.DB
         .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
@@ -434,22 +514,28 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
       // mode mismatch (relative scenario に offsetDays を投げる等) は body の生値で検出する。
       // 一方、対応 mode のフィールドが片方だけ送られた場合 (例: absolute_time で deliveryTime のみ)
       // は既存値で穴埋めする。
-      const scheduleForValidation: {
-        delayMinutes?: number;
-        offsetDays?: number;
-        offsetMinutes?: number;
-        deliveryTime?: string;
-      } = {
-        delayMinutes: body.delayMinutes,
-        offsetDays: body.offsetDays,
-        offsetMinutes: body.offsetMinutes,
-        deliveryTime: body.deliveryTime,
-      };
+      const scheduleForValidation: StepScheduleBody = {};
       if (scenarioRow.delivery_mode === 'relative') {
-        if (scheduleForValidation.delayMinutes === undefined) {
-          scheduleForValidation.delayMinutes = existingStep.delay_minutes;
+        const touchesTimeFields = body.offsetDays !== undefined || body.deliveryTime !== undefined;
+        const clearsTimeFields = body.offsetDays === null && body.deliveryTime === null;
+        if (touchesTimeFields && !clearsTimeFields) {
+          scheduleForValidation.offsetDays =
+            body.offsetDays !== undefined ? body.offsetDays : existingStep.offset_days;
+          scheduleForValidation.deliveryTime =
+            body.deliveryTime !== undefined ? body.deliveryTime : existingStep.delivery_time;
+          scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        } else {
+          scheduleForValidation.delayMinutes =
+            body.delayMinutes !== undefined ? body.delayMinutes : existingStep.delay_minutes;
+          scheduleForValidation.offsetDays = body.offsetDays;
+          scheduleForValidation.deliveryTime = body.deliveryTime;
+          scheduleForValidation.offsetMinutes = body.offsetMinutes;
         }
       } else if (scenarioRow.delivery_mode === 'elapsed') {
+        scheduleForValidation.delayMinutes = body.delayMinutes;
+        scheduleForValidation.offsetDays = body.offsetDays;
+        scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        scheduleForValidation.deliveryTime = body.deliveryTime;
         if (scheduleForValidation.offsetDays === undefined && existingStep.offset_days != null) {
           scheduleForValidation.offsetDays = existingStep.offset_days;
         }
@@ -458,6 +544,10 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
         }
       } else {
         // absolute_time
+        scheduleForValidation.delayMinutes = body.delayMinutes;
+        scheduleForValidation.offsetDays = body.offsetDays;
+        scheduleForValidation.offsetMinutes = body.offsetMinutes;
+        scheduleForValidation.deliveryTime = body.deliveryTime;
         if (scheduleForValidation.offsetDays === undefined && existingStep.offset_days != null) {
           scheduleForValidation.offsetDays = existingStep.offset_days;
         }
@@ -509,6 +599,9 @@ scenarios.put('/api/scenarios/:id/steps/:stepId', async (c) => {
 // DELETE /api/scenarios/:id/steps/:stepId - delete step
 scenarios.delete('/api/scenarios/:id/steps/:stepId', async (c) => {
   try {
+    const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const stepId = c.req.param('stepId');
     await deleteScenarioStep(c.env.DB, stepId);
     return c.json({ success: true, data: null });
@@ -522,6 +615,8 @@ scenarios.delete('/api/scenarios/:id/steps/:stepId', async (c) => {
 scenarios.post('/api/scenarios/:id/steps/reorder', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const body = await c.req.json<{ orders: { stepId: string; stepOrder: number }[] }>();
 
     if (!Array.isArray(body.orders) || body.orders.length === 0) {
@@ -599,6 +694,8 @@ const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'] as const;
 scenarios.get('/api/scenarios/:id/preview', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const scenarioRow = await c.env.DB
       .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
       .bind(scenarioId)
@@ -690,6 +787,8 @@ scenarios.get('/api/scenarios/:id/preview', async (c) => {
 scenarios.get('/api/scenarios/:id/stats', async (c) => {
   try {
     const scenarioId = c.req.param('id');
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
     const scenario = await c.env.DB
       .prepare(`SELECT id FROM scenarios WHERE id = ?`)
       .bind(scenarioId)
@@ -711,6 +810,8 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     const scenarioId = c.req.param('id');
     const friendId = c.req.param('friendId');
     const db = c.env.DB;
+    const denied = await denyIfCannotAccessScenario(c, scenarioId);
+    if (denied) return denied;
 
     // Verify both exist
     const [scenario, friend] = await Promise.all([
@@ -724,7 +825,12 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    const friendDenied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (friendDenied) return friendDenied;
 
+    if (await isFriendBlocked(db, friendId, friend.line_account_id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     const enrollment = await enrollFriendInScenario(db, friendId, scenarioId);
     if (!enrollment) {
       return c.json({ success: false, error: 'Already enrolled in this scenario' }, 409);

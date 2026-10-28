@@ -1,4 +1,5 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import { filterUnblockedRecipients } from './blocked-outbound.js';
 import {
   getBroadcastById,
   getBroadcasts,
@@ -16,6 +17,56 @@ import type { Message } from '@line-crm/line-sdk';
 import { calculateStaggerDelay, sleep, addMessageVariation } from './stealth.js';
 
 const MULTICAST_BATCH_SIZE = 500;
+
+function parseStringArray(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+async function touchBroadcastChats(
+  db: D1Database,
+  recipients: Array<{ id: string }>,
+  lineAccountId: string | null,
+  lastMessageAt: string,
+): Promise<void> {
+  if (!lineAccountId || recipients.length === 0) return;
+
+  const now = jstNow();
+  const insertStmts = recipients.map((friend) =>
+    db
+      .prepare(
+        `INSERT INTO chats (id, friend_id, line_account_id, status, last_message_at, created_at, updated_at)
+         SELECT ?, ?, ?, 'resolved', ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM chats WHERE friend_id = ? AND line_account_id = ?
+         )`,
+      )
+      .bind(crypto.randomUUID(), friend.id, lineAccountId, lastMessageAt, now, now, friend.id, lineAccountId),
+  );
+  await db.batch(insertStmts);
+
+  const updateStmts = recipients.map((friend) =>
+    db
+      .prepare(
+        `UPDATE chats
+         SET last_message_at = CASE
+             WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+             ELSE last_message_at
+           END,
+           updated_at = ?
+         WHERE friend_id = ? AND line_account_id = ?`,
+      )
+      .bind(lastMessageAt, lastMessageAt, now, friend.id, lineAccountId),
+  );
+  await db.batch(updateStmts);
+}
 
 export async function processBroadcastSend(
   db: D1Database,
@@ -62,19 +113,122 @@ export async function processBroadcastSend(
 
   try {
     if (broadcast.target_type === 'all') {
-      // Use LINE broadcast API (sends to all followers)
-      const { requestId } = await lineClient.broadcast([message]);
-      await updateBroadcastLineRequestId(db, broadcast.id, requestId, null);
-      // We don't have exact count for broadcast API, set as 0 (unknown)
-      totalCount = 0;
-      successCount = 0;
+      const broadcastAccount = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
+      const friendsResult = broadcastAccount
+        ? await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE line_account_id = ? AND is_following = 1`)
+          .bind(broadcastAccount)
+          .all<{ id: string; line_user_id: string }>()
+        : await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE is_following = 1`)
+          .all<{ id: string; line_user_id: string }>();
+      const followingFriends = await filterUnblockedRecipients(db, friendsResult.results ?? []);
+      totalCount = followingFriends.length;
+
+      const now = jstNow();
+      const totalBatches = Math.ceil(followingFriends.length / MULTICAST_BATCH_SIZE);
+      const unit = `bcast_${broadcast.id.slice(0, 8)}`;
+      for (let i = 0; i < followingFriends.length; i += MULTICAST_BATCH_SIZE) {
+        const batchIndex = Math.floor(i / MULTICAST_BATCH_SIZE);
+        let batch = followingFriends.slice(i, i + MULTICAST_BATCH_SIZE);
+
+        if (batchIndex > 0) {
+          const delay = calculateStaggerDelay(followingFriends.length, batchIndex);
+          await sleep(delay);
+        }
+
+        let batchMessage = message;
+        if (message.type === 'text' && totalBatches > 1) {
+          batchMessage = { ...message, text: addMessageVariation(message.text, batchIndex) };
+        }
+
+        try {
+          batch = await filterUnblockedRecipients(db, batch);
+          if (!batch.length) continue;
+          await lineClient.multicast(batch.map(f => f.line_user_id), [batchMessage], [unit]);
+          successCount += batch.length;
+          const logStmts = batch.map(friend =>
+            db.prepare(
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+               VALUES (?, ?, 'outgoing', ?, ?, ?, NULL, 'broadcast', ?, ?)`,
+            ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
+          );
+          await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
+        } catch (err) {
+          console.error(`Broadcast all batch ${batchIndex} failed:`, err);
+        }
+      }
+      if (totalCount > 0 && successCount === 0) {
+        throw new Error(`Broadcast ${broadcast.id} failed for all ${totalCount} recipients`);
+      }
+      await updateBroadcastLineRequestId(db, broadcast.id, null, unit);
+    } else if (broadcast.target_type === 'friends') {
+      const selectedFriendIds = parseStringArray((broadcast as unknown as Record<string, unknown>).target_friend_ids);
+      if (selectedFriendIds.length === 0) {
+        throw new Error('target_friend_ids is required for selected-friend broadcasts');
+      }
+
+      const broadcastAccount = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
+      const placeholders = selectedFriendIds.map(() => '?').join(',');
+      const friendsResult = broadcastAccount
+        ? await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${placeholders}) AND line_account_id = ? AND is_following = 1`)
+          .bind(...selectedFriendIds, broadcastAccount)
+          .all<{ id: string; line_user_id: string }>()
+        : await db
+          .prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${placeholders}) AND is_following = 1`)
+          .bind(...selectedFriendIds)
+          .all<{ id: string; line_user_id: string }>();
+      const selectedFriends = await filterUnblockedRecipients(db, friendsResult.results ?? []);
+      totalCount = selectedFriends.length;
+
+      const now = jstNow();
+      const totalBatches = Math.ceil(selectedFriends.length / MULTICAST_BATCH_SIZE);
+      const unit = `bcast_${broadcast.id.slice(0, 8)}`;
+      for (let i = 0; i < selectedFriends.length; i += MULTICAST_BATCH_SIZE) {
+        const batchIndex = Math.floor(i / MULTICAST_BATCH_SIZE);
+        let batch = selectedFriends.slice(i, i + MULTICAST_BATCH_SIZE);
+
+        if (batchIndex > 0) {
+          const delay = calculateStaggerDelay(selectedFriends.length, batchIndex);
+          await sleep(delay);
+        }
+
+        let batchMessage = message;
+        if (message.type === 'text' && totalBatches > 1) {
+          batchMessage = { ...message, text: addMessageVariation(message.text, batchIndex) };
+        }
+
+        try {
+          batch = await filterUnblockedRecipients(db, batch);
+          if (!batch.length) continue;
+          await lineClient.multicast(batch.map(f => f.line_user_id), [batchMessage], [unit]);
+          successCount += batch.length;
+          const logStmts = batch.map(friend =>
+            db.prepare(
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+               VALUES (?, ?, 'outgoing', ?, ?, ?, NULL, 'broadcast', ?, ?)`,
+            ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
+          );
+          await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
+        } catch (err) {
+          console.error(`Selected-friend broadcast batch ${batchIndex} failed:`, err);
+        }
+      }
+      if (totalCount > 0 && successCount === 0) {
+        throw new Error(`Broadcast ${broadcast.id} failed for all ${totalCount} selected recipients`);
+      }
+      await updateBroadcastLineRequestId(db, broadcast.id, null, unit);
     } else if (broadcast.target_type === 'tag') {
       if (!broadcast.target_tag_id) {
         throw new Error('target_tag_id is required for tag-targeted broadcasts');
       }
 
-      const friends = await getFriendsByTag(db, broadcast.target_tag_id);
-      const followingFriends = friends.filter((f) => f.is_following);
+      const broadcastAccount = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
+      const friends = await getFriendsByTag(db, broadcast.target_tag_id, broadcastAccount);
+      const followingFriends = await filterUnblockedRecipients(db, friends.filter((f) => f.is_following));
       totalCount = followingFriends.length;
 
       // Send in batches with stealth delays to mimic human patterns
@@ -83,8 +237,7 @@ export async function processBroadcastSend(
       const unit = `bcast_${broadcast.id.slice(0, 8)}`;
       for (let i = 0; i < followingFriends.length; i += MULTICAST_BATCH_SIZE) {
         const batchIndex = Math.floor(i / MULTICAST_BATCH_SIZE);
-        const batch = followingFriends.slice(i, i + MULTICAST_BATCH_SIZE);
-        const lineUserIds = batch.map((f) => f.line_user_id);
+        let batch = followingFriends.slice(i, i + MULTICAST_BATCH_SIZE);
 
         // Stealth: add staggered delay between batches
         if (batchIndex > 0) {
@@ -99,7 +252,9 @@ export async function processBroadcastSend(
         }
 
         try {
-          await lineClient.multicast(lineUserIds, [batchMessage], [unit]);
+          batch = await filterUnblockedRecipients(db, batch);
+          if (!batch.length) continue;
+          await lineClient.multicast(batch.map(f => f.line_user_id), [batchMessage], [unit]);
           successCount += batch.length;
 
           // Log only successfully sent messages (batch insert for performance)
@@ -113,6 +268,7 @@ export async function processBroadcastSend(
             ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcastId, broadcastAccount, now),
           );
           await db.batch(logStmts);
+          await touchBroadcastChats(db, batch, broadcastAccount, now);
         } catch (err) {
           console.error(`Multicast batch ${i / MULTICAST_BATCH_SIZE} failed:`, err);
           // Continue with next batch; failed batch is not logged
@@ -310,15 +466,24 @@ async function processQueuedBroadcastBatches(
     friends = result.results ?? [];
   } else if (broadcast.target_tag_id) {
     const { getFriendsByTag } = await import('@line-crm/db');
-    const tagFriends = await getFriendsByTag(db, broadcast.target_tag_id);
+    const tagFriends = await getFriendsByTag(db, broadcast.target_tag_id, accountId);
     friends = tagFriends.filter(f => f.is_following).map(f => ({ id: f.id, line_user_id: f.line_user_id }));
+  } else if (broadcast.target_type === 'friends') {
+    const selected = parseStringArray(raw.target_friend_ids);
+    if (!selected.length) throw new Error('Selected recipients are required');
+    const inIds = selected.map(() => '?').join(',');
+    const result = accountId
+      ? await db.prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${inIds}) AND line_account_id = ? AND is_following = 1`).bind(...selected, accountId).all<{id:string;line_user_id:string}>()
+      : await db.prepare(`SELECT id, line_user_id FROM friends WHERE id IN (${inIds}) AND is_following = 1`).bind(...selected).all<{id:string;line_user_id:string}>();
+    friends = result.results ?? [];
+  } else if (broadcast.target_type === 'all') {
+    // Never use LINE /broadcast: it cannot exclude an application-blocked friend.
+    const result = accountId
+      ? await db.prepare(`SELECT id, line_user_id FROM friends WHERE line_account_id = ? AND is_following = 1`).bind(accountId).all<{id:string;line_user_id:string}>()
+      : await db.prepare(`SELECT id, line_user_id FROM friends WHERE is_following = 1`).all<{id:string;line_user_id:string}>();
+    friends = result.results ?? [];
   } else {
-    // target_type='all' でキューに入ることはないが、念のため
-    const { requestId } = await lineClient.broadcast([message]);
-    await updateBroadcastLineRequestId(db, broadcast.id, requestId, null);
-    await createBroadcastInsight(db, broadcast.id);
-    await updateBroadcastStatus(db, broadcast.id, 'sent', { totalCount: 0, successCount: 0 });
-    return;
+    throw new Error('Unsupported queued broadcast target; refusing an unfiltered send');
   }
 
   // 初回: total_count を設定
@@ -334,8 +499,8 @@ async function processQueuedBroadcastBatches(
 
   // 1回のCron実行で全バッチを処理（タイムアウトしない範囲で）
   while (currentOffset < friends.length) {
-    const batch = friends.slice(currentOffset, currentOffset + MULTICAST_BATCH_SIZE);
-    const lineUserIds = batch.map(f => f.line_user_id);
+    const sourceBatch = friends.slice(currentOffset, currentOffset + MULTICAST_BATCH_SIZE);
+    let batch = sourceBatch;
     const batchIndex = Math.floor(currentOffset / MULTICAST_BATCH_SIZE);
 
     // ステルス遅延（最初のバッチ以外）
@@ -351,7 +516,12 @@ async function processQueuedBroadcastBatches(
     }
 
     try {
-      await lineClient.multicast(lineUserIds, [batchMessage], [unit]);
+      batch = await filterUnblockedRecipients(db, sourceBatch);
+      if (!batch.length) {
+        currentOffset += sourceBatch.length;
+        continue;
+      }
+      await lineClient.multicast(batch.map(f => f.line_user_id), [batchMessage], [unit]);
     } catch (err) {
       console.error(`Queued broadcast batch ${batchIndex} send failed:`, err);
       // 送信失敗: ロック解除 + offsetを保存して次のCronで再開
@@ -371,11 +541,12 @@ async function processQueuedBroadcastBatches(
         ).bind(crypto.randomUUID(), friend.id, broadcast.message_type, broadcast.message_content, broadcast.id, queuedBroadcastAccount, now),
       );
       await db.batch(stmts);
+      await touchBroadcastChats(db, batch, queuedBroadcastAccount, now);
     } catch (logErr) {
       console.error(`Queued broadcast batch ${batchIndex} log failed (messages already sent):`, logErr);
     }
 
-    currentOffset += batch.length;
+    currentOffset += sourceBatch.length;
     // Update success_count but keep batch_offset=-1 (locked) during processing
     await db.prepare(
       `UPDATE broadcasts SET success_count = success_count + ? WHERE id = ?`,

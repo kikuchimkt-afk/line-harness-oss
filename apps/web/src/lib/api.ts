@@ -12,6 +12,7 @@ import type {
   Template,
   Automation,
   AutomationLog,
+  RichMenuAssignmentOverview,
   Chat,
   Reminder,
   ReminderStep,
@@ -33,12 +34,30 @@ import type {
   TrafficPool,
   PoolAccount,
 } from '@line-crm/shared'
+import type { ScenarioDeliveryStatus } from './scenario-delivery-status'
+import type {
+  ScenarioManualStartState,
+  ScenarioStartFromStepResult,
+} from './scenario-manual-start'
+import type { ScenarioScheduleUpdateResult } from './scenario-schedule-edit'
+
+export type {
+  ScenarioDeliveryStatus,
+  ScenarioSentDelivery,
+  ScenarioUpcomingDelivery,
+} from './scenario-delivery-status'
+export type {
+  ScenarioManualStartState,
+  ScenarioStartFromStepResult,
+} from './scenario-manual-start'
+export type { ScenarioScheduleUpdateResult } from './scenario-schedule-edit'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
 export type ApiBroadcast = Omit<Broadcast, 'targetType'> & {
   targetType: BroadcastTargetType;
   accountIds: string[] | null;
   dedupPriority: string[] | null;
+  targetFriendIds: string[] | null;
   failedAccountIds: string[] | null;
 };
 
@@ -71,37 +90,97 @@ if (!API_URL) {
  * cached here.
  */
 export const CSRF_STORAGE_KEY = 'lh_csrf'
+export const SESSION_API_KEY_STORAGE_KEY = 'lh_session_api_key'
 
 export function getCsrfToken(): string {
   if (typeof window === 'undefined') return ''
-  return localStorage.getItem(CSRF_STORAGE_KEY) || ''
+  try {
+    return localStorage.getItem(CSRF_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
 }
 
 export function setCsrfToken(token: string | undefined | null): void {
   if (typeof window === 'undefined' || !token) return
-  localStorage.setItem(CSRF_STORAGE_KEY, token)
+  try {
+    localStorage.setItem(CSRF_STORAGE_KEY, token)
+  } catch {
+    // Best-effort cache only.
+  }
+}
+
+export function clearCsrfToken(): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.removeItem(CSRF_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+export function getSessionApiKey(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return sessionStorage.getItem(SESSION_API_KEY_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setSessionApiKey(apiKey: string): boolean {
+  if (typeof window === 'undefined' || !apiKey) return false
+  try {
+    sessionStorage.setItem(SESSION_API_KEY_STORAGE_KEY, apiKey)
+    return sessionStorage.getItem(SESSION_API_KEY_STORAGE_KEY) === apiKey
+  } catch {
+    return false
+  }
+}
+
+export function clearSessionApiKey(): void {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.removeItem(SESSION_API_KEY_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup only.
+  }
 }
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method ?? 'GET').toUpperCase()
-  const csrfHeaders: Record<string, string> = {}
-  if (MUTATING_METHODS.has(method)) {
+  const sessionApiKey = getSessionApiKey()
+  const headers = new Headers(options?.headers)
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (sessionApiKey) {
+    headers.set('Authorization', `Bearer ${sessionApiKey}`)
+  }
+  if (MUTATING_METHODS.has(method) && !sessionApiKey) {
     const token = getCsrfToken()
-    if (token) csrfHeaders['X-CSRF-Token'] = token
+    if (token) headers.set('X-CSRF-Token', token)
   }
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
-    // Send the HttpOnly session cookie with every request.
+    // Send the HttpOnly session cookie when the browser supports it. LINE's
+    // in-app browser may drop cross-site cookies, so a sessionStorage-scoped
+    // Bearer fallback is also supported after staff login.
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...csrfHeaders,
-      ...options?.headers,
-    },
+    headers,
   })
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  if (!res.ok) {
+    let message = `API error: ${res.status}`
+    try {
+      const body = (await res.json()) as { error?: string; message?: string }
+      message = body.error || body.message || message
+    } catch {
+      // Keep the status-based fallback when the response body is not JSON.
+    }
+    throw new Error(message)
+  }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
@@ -129,6 +208,15 @@ export type FriendListParams = {
 }
 
 export type FriendWithTags = Friend & { tags: Tag[] }
+export type FriendProfileInput = Partial<{
+  harnessDisplayName: string
+  profileType: string
+  kana: string
+  schoolGrade: string
+  phone: string
+  email: string
+  memo: string
+}>
 /** Friend list items, optionally hydrated with chat status (when ?includeChatStatus=true) */
 export type FriendListItem = FriendWithTags & Partial<{
   latestIncomingMessage: { content: string; messageType: string; createdAt: string } | null
@@ -156,6 +244,11 @@ export const api = {
     },
     get: (id: string) =>
       fetchApi<ApiResponse<FriendWithTags>>(`/api/friends/${id}`),
+    updateProfile: (id: string, data: FriendProfileInput) =>
+      fetchApi<ApiResponse<FriendWithTags>>(`/api/friends/${id}/profile`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
     count: (params?: { accountId?: string }) => {
       const query = params?.accountId ? '?lineAccountId=' + params.accountId : ''
       return fetchApi<ApiResponse<{ count: number }>>('/api/friends/count' + query)
@@ -180,6 +273,11 @@ export const api = {
     create: (data: { name: string; color: string }) =>
       fetchApi<ApiResponse<Tag>>('/api/tags', {
         method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: { name?: string; color?: string }) =>
+      fetchApi<ApiResponse<Tag>>(`/api/tags/${id}`, {
+        method: 'PUT',
         body: JSON.stringify(data),
       }),
     delete: (id: string) =>
@@ -211,9 +309,9 @@ export const api = {
         messageType: ScenarioStep['messageType']
         messageContent: string
         delayMinutes?: number
-        offsetDays?: number
-        offsetMinutes?: number
-        deliveryTime?: string
+        offsetDays?: number | null
+        offsetMinutes?: number | null
+        deliveryTime?: string | null
         templateId?: string | null
         onReachTagId?: string | null
       },
@@ -230,9 +328,9 @@ export const api = {
         messageType?: ScenarioStep['messageType']
         messageContent?: string
         delayMinutes?: number
-        offsetDays?: number
-        offsetMinutes?: number
-        deliveryTime?: string
+        offsetDays?: number | null
+        offsetMinutes?: number | null
+        deliveryTime?: string | null
         templateId?: string | null
         onReachTagId?: string | null
       },
@@ -271,6 +369,46 @@ export const api = {
         paused: number
         steps: Array<{ stepOrder: number; reachedCount: number; reachRate: number }>
       }>>(`/api/scenarios/${id}/stats`),
+    deliveryStatus: (id: string, limit = 200) => {
+      const normalizedLimit = Number.isFinite(limit)
+        ? Math.min(500, Math.max(1, Math.trunc(limit)))
+        : 200
+      return fetchApi<ApiResponse<ScenarioDeliveryStatus>>(
+        `/api/scenarios/${encodeURIComponent(id)}/delivery-status?limit=${normalizedLimit}`,
+      )
+    },
+    manualStartState: (id: string, friendId: string) =>
+      fetchApi<ApiResponse<ScenarioManualStartState>>(
+        `/api/scenarios/${encodeURIComponent(id)}/manual-start-state/${encodeURIComponent(friendId)}`,
+      ),
+    startFromStep: (
+      id: string,
+      data: {
+        friendId: string
+        stepId: string
+        deliveryTiming: 'configured' | 'next_cron'
+        expectedStateVersion: string
+      },
+    ) =>
+      fetchApi<ApiResponse<ScenarioStartFromStepResult>>(
+        `/api/scenarios/${encodeURIComponent(id)}/start-from-step`,
+        { method: 'POST', body: JSON.stringify(data) },
+      ),
+    updateDeliverySchedule: (
+      id: string,
+      enrollmentId: string,
+      data: {
+        friendId: string
+        stepId: string
+        nextDeliveryAt: string
+        expectedStateVersion: string
+        confirmPreviouslySent: boolean
+      },
+    ) =>
+      fetchApi<ApiResponse<ScenarioScheduleUpdateResult>>(
+        `/api/scenarios/${encodeURIComponent(id)}/enrollments/${encodeURIComponent(enrollmentId)}/schedule`,
+        { method: 'PATCH', body: JSON.stringify(data) },
+      ),
   },
   broadcasts: {
     list: (params?: { accountId?: string }) => {
@@ -290,6 +428,7 @@ export const api = {
       lineAccountId?: string | null
       accountIds?: string[]
       dedupPriority?: string[]
+      targetFriendIds?: string[]
     }) =>
       fetchApi<ApiResponse<ApiBroadcast>>('/api/broadcasts', {
         method: 'POST',
@@ -303,6 +442,7 @@ export const api = {
         messageContent?: string
         targetType?: ApiBroadcast['targetType']
         targetTagId?: string | null
+        targetFriendIds?: string[] | null
         scheduledAt?: string | null
       }
     ) =>
@@ -385,6 +525,15 @@ export const api = {
       fetchApi<{ success: boolean; data: Array<{ id: string; displayName: string; pictureUrl: string | null }> }>(`/api/account-settings/test-recipients?accountId=${accountId}`),
     updateTestRecipients: (accountId: string, friendIds: string[]) =>
       fetchApi<{ success: boolean }>('/api/account-settings/test-recipients', {
+        method: 'PUT',
+        body: JSON.stringify({ accountId, friendIds }),
+      }),
+    getNoticeRecipients: (accountId: string) =>
+      fetchApi<{ success: boolean; data: Array<{ id: string; displayName: string; pictureUrl: string | null }> }>(
+        `/api/account-settings/incoming-notice-recipients?accountId=${accountId}`,
+      ),
+    updateNoticeRecipients: (accountId: string, friendIds: string[]) =>
+      fetchApi<{ success: boolean }>('/api/account-settings/incoming-notice-recipients', {
         method: 'PUT',
         body: JSON.stringify({ accountId, friendIds }),
       }),
@@ -641,6 +790,7 @@ export const api = {
       name: string
       eventType: Automation['eventType']
       actions: Automation['actions']
+      lineAccountId: string
       description?: string | null
       conditions?: Record<string, unknown>
       priority?: number
@@ -649,7 +799,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: Partial<Pick<Automation, 'name' | 'description' | 'eventType' | 'conditions' | 'actions' | 'isActive' | 'priority'>>) =>
+    update: (id: string, data: Partial<Pick<Automation, 'name' | 'description' | 'eventType' | 'conditions' | 'actions' | 'lineAccountId' | 'isActive' | 'priority'>>) =>
       fetchApi<ApiResponse<Automation>>(`/api/automations/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -659,6 +809,21 @@ export const api = {
     logs: (id: string, limit?: number) =>
       fetchApi<ApiResponse<AutomationLog[]>>(
         `/api/automations/${id}/logs` + (limit ? `?limit=${limit}` : ''),
+      ),
+    richMenuAssignments: (lineAccountId: string, limit = 100) =>
+      fetchApi<ApiResponse<RichMenuAssignmentOverview>>(
+        '/api/automations/rich-menu-assignments?' +
+          new URLSearchParams({ lineAccountId, limit: String(limit) }),
+      ),
+    retryRichMenuAssignment: (assignmentKey: string) =>
+      fetchApi<ApiResponse<{ queued: boolean }>>(
+        `/api/automations/rich-menu-assignments/${encodeURIComponent(assignmentKey)}/retry`,
+        { method: 'POST' },
+      ),
+    retryFailedRichMenuAssignments: (lineAccountId: string) =>
+      fetchApi<ApiResponse<{ queued: number }>>(
+        '/api/automations/rich-menu-assignments/retry-failed',
+        { method: 'POST', body: JSON.stringify({ lineAccountId }) },
       ),
   },
   chats: {
@@ -672,25 +837,47 @@ export const api = {
         '/api/chats?' + new URLSearchParams(query),
       )
     },
-    get: (id: string) =>
-      fetchApi<ApiResponse<Chat & { messages?: { id: string; content: string; senderType: string; createdAt: string }[] }>>(
-        `/api/chats/${id}`,
-      ),
+    get: (id: string, params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<Chat & { messages?: { id: string; content: string; senderType: string; createdAt: string }[] }>>(
+        `/api/chats/${id}${query}`,
+      )
+    },
     create: (data: { friendId: string; operatorId?: string | null }) =>
       fetchApi<ApiResponse<Chat>>('/api/chats', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: { operatorId?: string | null; status?: Chat['status']; notes?: string | null }) =>
-      fetchApi<ApiResponse<Chat>>(`/api/chats/${id}`, {
+    update: (id: string, data: { operatorId?: string | null; status?: Chat['status']; notes?: string | null }, params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<Chat>>(`/api/chats/${id}${query}`, {
         method: 'PUT',
         body: JSON.stringify(data),
-      }),
-    send: (id: string, data: { content: string; messageType?: string }) =>
-      fetchApi<ApiResponse<unknown>>(`/api/chats/${id}/send`, {
+      })
+    },
+    send: (
+      id: string,
+      data: {
+        content: string
+        messageType?: string
+        scheduled_at?: string | null
+        notification_disabled?: boolean
+      },
+      params?: { accountId?: string },
+    ) => {
+      const query = params?.accountId ? '?' + new URLSearchParams({ lineAccountId: params.accountId }) : ''
+      return fetchApi<ApiResponse<{
+        sent: boolean
+        scheduled: boolean
+        messageId?: string
+        scheduledMessageId?: string
+        scheduledAt?: string
+        notificationDisabled: boolean
+      }>>(`/api/chats/${id}/send${query}`, {
         method: 'POST',
         body: JSON.stringify(data),
-      }),
+      })
+    },
   },
   reminders: {
     list: (params?: { accountId?: string }) => {
@@ -825,12 +1012,12 @@ export const api = {
       fetchApi<ApiResponse<StaffMember>>(`/api/staff/${id}`),
     me: () =>
       fetchApi<ApiResponse<{ id: string; name: string; role: string; email: string | null }>>('/api/staff/me'),
-    create: (data: { name: string; email?: string; role: 'admin' | 'staff' }) =>
+    create: (data: { name: string; email?: string; role: 'admin' | 'staff'; lineAccountIds?: string[] }) =>
       fetchApi<ApiResponse<StaffMember>>('/api/staff', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: { name?: string; email?: string | null; role?: string; isActive?: boolean }) =>
+    update: (id: string, data: { name?: string; email?: string | null; role?: string; isActive?: boolean; lineAccountIds?: string[] }) =>
       fetchApi<ApiResponse<StaffMember>>(`/api/staff/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(data),
@@ -1096,6 +1283,7 @@ export const api = {
     // 画像 upload は Content-Type を image/* で送るので fetchApi を使わず直接 fetch。
     uploadImage: async (groupId: string, pageId: string, file: File) => {
       const csrf = getCsrfToken();
+      const sessionApiKey = getSessionApiKey();
       const res = await fetch(
         `${API_URL}/api/rich-menu-groups/${groupId}/pages/${pageId}/image`,
         {
@@ -1103,7 +1291,11 @@ export const api = {
           credentials: 'include',
           headers: {
             'Content-Type': file.type,
-            ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
+            ...(sessionApiKey
+              ? { Authorization: `Bearer ${sessionApiKey}` }
+              : csrf
+                ? { 'X-CSRF-Token': csrf }
+                : {}),
           },
           body: file,
         },
@@ -1137,6 +1329,121 @@ export const api = {
         createdAt: string
         updatedAt: string
       }>>>('/api/message-templates'),
+    create: (data: { name: string; messageType: 'text' | 'flex'; messageContent: string }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        messageType: string
+        messageContent: string
+        createdAt: string
+        updatedAt: string
+      }>>('/api/message-templates', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
+  forms: {
+    list: () =>
+      fetchApi<ApiResponse<Array<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+        lastSubmittedAt: string | null
+        usedByAccounts: Array<{
+          id: string
+          name: string
+          country: string | null
+          displayOrder: number
+          count: number
+        }>
+      }>>>('/api/forms'),
+    get: (id: string) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        onSubmitWebhookUrl: string | null
+        onSubmitWebhookHeaders: string | null
+        onSubmitWebhookFailMessage: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+      }>>(`/api/forms/${encodeURIComponent(id)}`),
+    create: (data: {
+      name: string
+      description?: string | null
+      fields: unknown[]
+      onSubmitTagId?: string | null
+      onSubmitScenarioId?: string | null
+      onSubmitMessageType?: 'text' | 'flex' | null
+      onSubmitMessageContent?: string | null
+      saveToMetadata?: boolean
+    }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitTagId: string | null
+        onSubmitScenarioId: string | null
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        createdAt: string
+        updatedAt: string
+      }>>('/api/forms', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: {
+      name?: string
+      description?: string | null
+      fields?: unknown[]
+      onSubmitTagId?: string | null
+      onSubmitScenarioId?: string | null
+      onSubmitMessageType?: 'text' | 'flex' | null
+      onSubmitMessageContent?: string | null
+      saveToMetadata?: boolean
+      isActive?: boolean
+    }) =>
+      fetchApi<ApiResponse<{
+        id: string
+        name: string
+        description: string | null
+        fields: unknown[]
+        onSubmitMessageType: 'text' | 'flex' | null
+        onSubmitMessageContent: string | null
+        saveToMetadata: boolean
+        isActive: boolean
+        submitCount: number
+        updatedAt: string
+      }>>(`/api/forms/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: string) =>
+      fetchApi<ApiResponse<null>>(`/api/forms/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
   },
   entryRoutes: {
     list: () => fetchApi<ApiResponse<EntryRoute[]>>('/api/entry-routes'),
@@ -1412,14 +1719,17 @@ export interface EventListItem {
   name: string;
   venue_name: string | null;
   venue_url: string | null;
+  detail_url: string | null;
   image_url: string | null;
   description: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  confirmation_message_extra?: string | null;
   is_published: number;
   sort_order: number;
   created_at: string;
@@ -1428,6 +1738,7 @@ export interface EventListItem {
   total_capacity: number | null;
   total_active: number;
   pending_count: number;
+  waitlist_count: number;
   // Multi-account fields (migration 040)
   target_type?: 'single' | 'multi-account-dedup';
   account_ids?: string | string[] | null;
@@ -1439,22 +1750,50 @@ export interface EventDetail {
   name: string;
   venue_name: string | null;
   venue_url: string | null;
+  detail_url: string | null;
   image_url: string | null;
   description: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
+  confirmation_message_extra?: string | null;
   is_published: number;
   sort_order: number;
+  booking_form_fields?: EventBookingFormField[] | string | null;
   // Multi-account fields (migration 040, broadcasts と同パターン)
   target_type?: 'single' | 'multi-account-dedup';
   // Worker は JSON 文字列で返す。UI 側で parse して string[] を扱う。
   account_ids?: string | string[] | null;
   dedup_priority?: string | string[] | null;
   line_account_id?: string;
+}
+
+export type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+export interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
+}
+
+export interface SlotVisibilityCondition {
+  fieldId: string;
+  operator: 'in';
+  values: string[];
+}
+
+export type SlotVisibilityLogic = 'and' | 'or';
+
+export interface SlotVisibilityRule {
+  logic: SlotVisibilityLogic;
+  conditions: SlotVisibilityCondition[];
 }
 
 export interface EventSlot {
@@ -1465,6 +1804,9 @@ export interface EventSlot {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  // Older slots store a plain condition array. Newer slots store a rule with
+  // an explicit AND/OR choice. Both shapes remain readable for compatibility.
+  visibility_conditions?: SlotVisibilityRule | SlotVisibilityCondition[] | string | null;
   active_count?: number;
 }
 
@@ -1476,8 +1818,11 @@ export interface EventBookingItem {
   line_account_id: string;
   status: string;
   customer_note: string | null;
+  form_answers: string | Record<string, string | string[]> | null;
   internal_note: string | null;
   requested_at: string;
+  promoted_at?: string | null;
+  waitlist_position?: number | null;
   decided_at: string | null;
   cancelled_at: string | null;
   cancelled_by: string | null;
@@ -1485,6 +1830,20 @@ export interface EventBookingItem {
   slot_ends_at: string;
   friend_display_name: string | null;
   friend_line_user_id: string | null;
+  /**
+   * 参加申込フォーム（friends.metadata の q1..q7）の回答。
+   * 日程予約側のフォームは二重入力になるため運用で外しており、
+   * 受講者の情報はこちらにしか無い。
+   * チェックボックス設問は配列のまま入るので、表示前に平坦化すること。
+   */
+  friend_student_name?: string | null;
+  friend_guardian_name?: string | null;
+  friend_school_name?: string | null;
+  friend_school_grade?: string | null;
+  /** 受検予定級。チェックボックス設問なので ["5級"] の形で届くことがある。 */
+  friend_course_level?: string | null;
+  friend_affiliation?: string | null;
+  friend_request_note?: string | null;
 }
 
 export const eventsApi = {
@@ -1500,6 +1859,11 @@ export const eventsApi = {
     fetchApi<EventDetail>(
       withAccount('/api/events/admin/events', accountId),
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+  duplicateEvent: (accountId: string, id: string) =>
+    fetchApi<EventDetail>(
+      withAccount(`/api/events/admin/events/${id}/duplicate`, accountId),
+      { method: 'POST' },
     ),
   updateEvent: (accountId: string, id: string, body: Partial<EventDetail>) =>
     fetchApi<EventDetail>(
@@ -1519,7 +1883,14 @@ export const eventsApi = {
   createSlots: (
     accountId: string,
     eventId: string,
-    slots: Array<{ starts_at: string; ends_at: string; capacity: number | null; is_active?: number; sort_order?: number }>,
+    slots: Array<{
+      starts_at: string;
+      ends_at: string;
+      capacity: number | null;
+      is_active?: number;
+      sort_order?: number;
+      visibility_conditions?: SlotVisibilityRule | SlotVisibilityCondition[] | null;
+    }>,
   ) =>
     fetchApi<{ items: EventSlot[] }>(
       withAccount(`/api/events/admin/events/${eventId}/slots`, accountId),
@@ -1555,10 +1926,48 @@ export const eventsApi = {
     bookingId: string,
     action: 'confirm' | 'reject',
     reason?: string,
+    comment?: string,
+    notification?: {
+      notify_at?: string;
+      notification_disabled?: boolean;
+    },
   ) =>
     fetchApi<EventBookingItem>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}/decide`, accountId),
-      { method: 'POST', body: JSON.stringify({ action, reason }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({ action, reason, comment, ...notification }),
+      },
+    ),
+  bulkDecideBookings: (
+    accountId: string,
+    eventId: string,
+    bookingIds: string[],
+    action: 'confirm' | 'reject',
+    reason?: string,
+    comment?: string,
+    notification?: {
+      notify_at?: string;
+      notification_disabled?: boolean;
+    },
+  ) =>
+    fetchApi<{
+      ok: true;
+      updated: number;
+      skipped: number;
+      notification: { mode: 'immediate' | 'scheduled'; notify_at?: string };
+    }>(
+      withAccount(`/api/events/admin/events/${eventId}/bookings/bulk-decide`, accountId),
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          booking_ids: bookingIds,
+          action,
+          reason,
+          comment,
+          ...notification,
+        }),
+      },
     ),
   adminCancelBooking: (accountId: string, eventId: string, bookingId: string) =>
     fetchApi<{ ok: true }>(
@@ -1569,7 +1978,7 @@ export const eventsApi = {
     accountId: string,
     eventId: string,
     bookingId: string,
-    body: { internal_note?: string | null; status?: 'attended' | 'no_show' },
+    body: { internal_note?: string | null; status?: 'confirmed' | 'attended' | 'no_show' },
   ) =>
     fetchApi<EventBookingItem>(
       withAccount(`/api/events/admin/events/${eventId}/bookings/${bookingId}`, accountId),

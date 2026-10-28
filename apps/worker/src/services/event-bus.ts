@@ -19,10 +19,14 @@ import {
   enrollFriendInScenario,
   jstNow,
   getFriendScore,
+  getFriendById,
+  getLineAccountById,
 } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { sendAdConversions } from './ad-conversion.js';
+import { applyDesiredRichMenu } from './rich-menu-assignment.js';
+import { assertFriendNotBlocked, isFriendBlocked, stopBlockedFriendWork } from './friend-block-policy.js';
 
 export interface EventPayload {
   friendId?: string;
@@ -48,6 +52,7 @@ export async function fireEvent(
   lineAccessToken?: string,
   lineAccountId?: string | null,
 ): Promise<void> {
+  if (payload.friendId && await isFriendBlocked(db, payload.friendId)) return;
   // Phase 1: fire webhooks, apply scoring rules, and ad conversion postback concurrently.
   const phase1: Promise<unknown>[] = [
     fireOutgoingWebhooks(db, eventType, payload),
@@ -59,6 +64,29 @@ export async function fireEvent(
     );
   }
   await Promise.allSettled(phase1);
+
+  // Some internal event sources (for example tracked-link / LP tag attribution)
+  // only know the Harness friend ID. Resolve the authoritative LINE account and
+  // access token here so account-scoped automations cannot leak across accounts
+  // and LINE actions do not silently run without credentials.
+  let resolvedLineAccessToken = lineAccessToken;
+  let resolvedLineAccountId = lineAccountId;
+  if (payload.friendId && (!resolvedLineAccessToken || !resolvedLineAccountId)) {
+    try {
+      const friend = await getFriendById(db, payload.friendId);
+      if (!resolvedLineAccountId) {
+        resolvedLineAccountId = friend?.line_account_id ?? null;
+      }
+      if (!resolvedLineAccessToken && resolvedLineAccountId) {
+        const account = await getLineAccountById(db, resolvedLineAccountId);
+        resolvedLineAccessToken = account?.channel_access_token;
+      }
+    } catch (err) {
+      // Continue so global, non-LINE automations can still run. LINE actions
+      // validate their requirements and will be recorded as failed below.
+      console.error('resolve automation LINE context error:', err);
+    }
+  }
 
   // Build an enriched payload with the freshly-updated score.
   const enrichedPayload: EventPayload = payload.friendId
@@ -72,7 +100,13 @@ export async function fireEvent(
     : payload;
 
   // Phase 2: evaluate automations.
-  await processAutomations(db, eventType, enrichedPayload, lineAccessToken, lineAccountId);
+  await processAutomations(
+    db,
+    eventType,
+    enrichedPayload,
+    resolvedLineAccessToken,
+    resolvedLineAccountId,
+  );
 }
 
 /** 送信Webhookへの通知 */
@@ -110,6 +144,7 @@ async function fireOutgoingWebhooks(
           headers['X-Webhook-Signature'] = hexSignature;
         }
 
+        if (payload.friendId && await isFriendBlocked(db, payload.friendId)) return;
         await fetch(wh.url, { method: 'POST', headers, body });
       } catch (err) {
         console.error(`送信Webhook ${wh.id} への通知失敗:`, err);
@@ -146,7 +181,7 @@ async function processAutomations(
     const allAutomations = await getActiveAutomationsByEvent(db, eventType);
     // Filter by account: match this account's automations + unassigned (backward compat)
     const automations = allAutomations.filter(
-      (a) => !a.line_account_id || !lineAccountId || a.line_account_id === lineAccountId,
+      (a) => !a.line_account_id || (!!lineAccountId && a.line_account_id === lineAccountId),
     );
 
     for (const automation of automations) {
@@ -160,7 +195,14 @@ async function processAutomations(
 
       for (const action of actions) {
         try {
-          await executeAction(db, action, payload, lineAccessToken, lineAccountId);
+          await executeAction(
+            db,
+            action,
+            payload,
+            lineAccessToken,
+            lineAccountId,
+            automation.id,
+          );
           results.push({ action: action.type, success: true });
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -192,6 +234,17 @@ function matchConditions(
   // 条件が空 → 常にマッチ
   if (Object.keys(conditions).length === 0) return true;
 
+  // ISO timestamps include their timezone. Reject invalid windows rather than
+  // accidentally enabling an expired campaign.
+  if (conditions.before !== undefined) {
+    const until = Date.parse(String(conditions.before));
+    if (!Number.isFinite(until) || Date.now() >= until) return false;
+  }
+  if (conditions.on_or_after !== undefined) {
+    const from = Date.parse(String(conditions.on_or_after));
+    if (!Number.isFinite(from) || Date.now() < from) return false;
+  }
+
   // score_threshold チェック
   if (conditions.score_threshold !== undefined && payload.eventData) {
     const currentScore = payload.eventData.currentScore as number | undefined;
@@ -201,20 +254,29 @@ function matchConditions(
   }
 
   // tag_id チェック
-  if (conditions.tag_id !== undefined && payload.eventData) {
-    if (payload.eventData.tagId !== conditions.tag_id) return false;
+  if (conditions.tag_id !== undefined) {
+    if (payload.eventData?.tagId !== conditions.tag_id) return false;
   }
+
+  // tag_change の add/remove を区別する。LP 流入用ルールは action='add'
+  // を必須にして、タグ解除時の意図しない再リンクを防ぐ。
+  if (conditions.action !== undefined) {
+    if (payload.eventData?.action !== conditions.action) return false;
+  }
+
+  // 合言葉は、大文字・小文字と全角・半角の違いを無視して比べる
+  const normalizeKeyword = (value: unknown) =>
+    typeof value === 'string' ? value.normalize('NFKC').trim().toLowerCase() : '';
 
   // keyword チェック（message_received イベント用）
   if (conditions.keyword !== undefined && payload.eventData) {
-    const text = payload.eventData.text as string | undefined;
-    if (!text || !text.includes(conditions.keyword as string)) return false;
+    const text = normalizeKeyword(payload.eventData.text);
+    if (!text || !text.includes(normalizeKeyword(conditions.keyword))) return false;
   }
 
   // keyword_exact（完全一致）
   if (typeof conditions.keyword_exact === 'string') {
-    const text = typeof payload.eventData?.text === 'string' ? payload.eventData.text.trim() : '';
-    if (text !== conditions.keyword_exact) {
+    if (normalizeKeyword(payload.eventData?.text) !== normalizeKeyword(conditions.keyword_exact)) {
       return false;
     }
   }
@@ -229,8 +291,10 @@ async function executeAction(
   payload: EventPayload,
   lineAccessToken?: string,
   lineAccountId?: string | null,
+  automationId?: string | null,
 ): Promise<void> {
   const friendId = payload.friendId;
+  if (friendId) await assertFriendNotBlocked(db, friendId);
   if (!friendId && action.type !== 'send_webhook') {
     throw new Error('friendId is required for this action');
   }
@@ -238,6 +302,13 @@ async function executeAction(
   switch (action.type) {
     case 'add_tag':
       await addTagToFriend(db, friendId!, action.params.tagId);
+      if (await isFriendBlocked(db, friendId!)) {
+        await stopBlockedFriendWork(db, friendId!);
+        const { cancelBlockedFriendOutboundWork } = await import('./blocked-outbound.js');
+        await cancelBlockedFriendOutboundWork(db, friendId!);
+        const { applyBlockedRichMenuForFriend } = await import('./rich-menu-assignment.js');
+        await applyBlockedRichMenuForFriend(db, friendId!);
+      }
       break;
 
     case 'remove_tag':
@@ -245,7 +316,11 @@ async function executeAction(
       break;
 
     case 'start_scenario':
-      await enrollFriendInScenario(db, friendId!, action.params.scenarioId);
+      if (action.params.restart === 'true') {
+        await enrollFriendInScenario(db, friendId!, action.params.scenarioId, { restart: true });
+      } else {
+        await enrollFriendInScenario(db, friendId!, action.params.scenarioId);
+      }
       break;
 
     case 'send_message': {
@@ -295,6 +370,7 @@ async function executeAction(
       }
 
       let deliveryType: 'reply' | 'push';
+      await assertFriendNotBlocked(db, friendId);
       if (payload.replyToken) {
         try {
           await lineClient.replyMessage(payload.replyToken, [msg]);
@@ -304,6 +380,7 @@ async function executeAction(
           const errMsg = err instanceof Error ? err.message : String(err);
           const isTokenError = errMsg.includes('400') || errMsg.includes('Invalid reply token');
           if (isTokenError) {
+            await assertFriendNotBlocked(db, friendId);
             await lineClient.pushMessage(friend.line_user_id, [msg]);
             deliveryType = 'push';
           } else {
@@ -343,14 +420,18 @@ async function executeAction(
     }
 
     case 'switch_rich_menu': {
-      if (!lineAccessToken || !friendId) break;
-      const friend = await db
-        .prepare('SELECT line_user_id FROM friends WHERE id = ?')
-        .bind(friendId)
-        .first<{ line_user_id: string }>();
-      if (!friend) break;
-      const lineClient = new LineClient(lineAccessToken);
-      await lineClient.linkRichMenuToUser(friend.line_user_id, action.params.richMenuId);
+      const richMenuId = action.params?.richMenuId;
+      if (!richMenuId) {
+        throw new Error('richMenuId is required for switch_rich_menu');
+      }
+      await applyDesiredRichMenu(db, {
+        friendId: friendId!,
+        richMenuId,
+        lineAccessToken,
+        lineAccountId,
+        automationId,
+        source: 'automation',
+      });
       break;
     }
 

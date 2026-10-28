@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { richMenus } from './rich-menus.js';
 
 const uploadRichMenuImage = vi.fn();
+const emptyDB = { prepare: () => ({ bind: () => ({ first: async () => null }) }) } as unknown as D1Database;
 
 vi.mock('@line-crm/line-sdk', () => ({
   LineClient: vi.fn().mockImplementation(() => ({
@@ -38,7 +39,7 @@ describe('POST /api/rich-menus/:id/image', () => {
       }),
     }, {
       LINE_CHANNEL_ACCESS_TOKEN: 'token',
-      DB: {} as D1Database,
+      DB: emptyDB,
     });
 
     expect(res.status).toBe(200);
@@ -60,7 +61,7 @@ describe('POST /api/rich-menus/:id/image', () => {
       }),
     }, {
       LINE_CHANNEL_ACCESS_TOKEN: 'token',
-      DB: {} as D1Database,
+      DB: emptyDB,
     });
 
     expect(res.status).toBe(200);

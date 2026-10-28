@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   buildAliasId,
   resolveSwitcherActions,
+  toLineRichMenuAction,
   publishRichMenuGroup,
   unpublishRichMenuGroup,
   linkRichMenuBulkChunked,
@@ -67,6 +68,71 @@ describe('resolveSwitcherActions', () => {
       }],
     }];
     expect(() => resolveSwitcherActions(pages, 'gid12345-aaaa')).toThrow(/nonexistent/);
+  });
+});
+
+describe('toLineRichMenuAction', () => {
+  it('電話番号を LINE の tel URI action として公開する', () => {
+    const action = toLineRichMenuAction({
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+      actionType: 'uri',
+      actionData: {
+        kind: 'phone',
+        phoneNumber: '088-600-8922',
+        uri: 'tel:0886008922',
+      },
+    });
+
+    expect(action).toEqual({
+      type: 'uri',
+      uri: 'tel:0886008922',
+    });
+  });
+
+  it('不正な電話番号は LINE 公開前に拒否する', () => {
+    expect(() =>
+      toLineRichMenuAction({
+        bounds: { x: 0, y: 0, width: 100, height: 100 },
+        actionType: 'uri',
+        actionData: { kind: 'phone', uri: 'tel:088-ABC' },
+      }),
+    ).toThrow(/8 to 15 digits/);
+  });
+
+  it('text_image の内部データを LINE postback action に変換する', () => {
+    const action = toLineRichMenuAction({
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+      actionType: 'postback',
+      actionData: {
+        kind: 'text_image',
+        actionId: 'action-1',
+        data: 'lh:richmenu:text-image:action-1',
+        text: '案内です',
+        image: {
+          originalContentUrl: 'https://example.com/image.jpg',
+          previewImageUrl: 'https://example.com/image.jpg',
+        },
+      },
+    });
+
+    expect(action).toEqual({
+      type: 'postback',
+      data: 'lh:richmenu:text-image:action-1',
+    });
+  });
+
+  it('text_image は本文または画像がない場合 publish 前に拒否する', () => {
+    expect(() =>
+      toLineRichMenuAction({
+        bounds: { x: 0, y: 0, width: 100, height: 100 },
+        actionType: 'postback',
+        actionData: {
+          kind: 'text_image',
+          actionId: 'action-1',
+          data: 'lh:richmenu:text-image:action-1',
+        },
+      }),
+    ).toThrow(/requires text or image/);
   });
 });
 
@@ -346,10 +412,11 @@ describe('unpublishRichMenuGroup', () => {
 });
 
 describe('linkRichMenuBulkChunked', () => {
+  const policy = { accountId: 'synthetic-account', db: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) } as unknown as D1Database };
   it('500 以下は 1 chunk', async () => {
     const line = makeMockLineClient();
     const ids = Array.from({ length: 300 }, (_, i) => `U${i}`);
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids, policy);
     expect(result).toEqual({ chunks: 1, total: 300 });
     expect(line.calls).toEqual(['link-bulk-300']);
   });
@@ -357,14 +424,14 @@ describe('linkRichMenuBulkChunked', () => {
   it('500 超は分割', async () => {
     const line = makeMockLineClient();
     const ids = Array.from({ length: 1100 }, (_, i) => `U${i}`);
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids, policy);
     expect(result).toEqual({ chunks: 3, total: 1100 });
     expect(line.calls).toEqual(['link-bulk-500', 'link-bulk-500', 'link-bulk-100']);
   });
 
   it('空配列は no-op', async () => {
     const line = makeMockLineClient();
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', []);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', [], policy);
     expect(result).toEqual({ chunks: 0, total: 0 });
     expect(line.calls).toEqual([]);
   });

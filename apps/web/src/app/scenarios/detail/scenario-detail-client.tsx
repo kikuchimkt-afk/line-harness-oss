@@ -14,6 +14,9 @@ import ScheduleInput, {
   type ScheduleValue,
 } from '@/components/scenarios/schedule-input'
 import BulkPreviewModal from '@/components/scenarios/bulk-preview-modal'
+import ScenarioDeliveryStatusPanel from '@/components/scenarios/scenario-delivery-status-panel'
+
+const WORKER_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
 
 type ScenarioWithSteps = Scenario & { steps: ScenarioStep[] }
 
@@ -30,7 +33,7 @@ const messageTypeOptions: { value: MessageType; label: string }[] = [
 ]
 
 const modeBadgeStyle: Record<DeliveryMode, { bg: string; text: string; label: string }> = {
-  relative: { bg: 'bg-gray-100', text: 'text-gray-600', label: 'Legacy' },
+  relative: { bg: 'bg-pink-50', text: 'text-pink-700', label: '前ステップ基準' },
   elapsed: { bg: 'bg-blue-50', text: 'text-blue-700', label: '経過時間' },
   absolute_time: { bg: 'bg-amber-50', text: 'text-amber-700', label: '時刻指定' },
 }
@@ -52,7 +55,12 @@ function formatDelay(minutes: number): string {
 
 function formatScheduleLabel(mode: DeliveryMode | undefined, step: ScenarioStep): string {
   const m = mode ?? 'relative'
-  if (m === 'relative') return formatDelay(step.delayMinutes)
+  if (m === 'relative') {
+    if (step.offsetDays != null && step.deliveryTime) {
+      return `前ステップ配信後 ${step.offsetDays}日後の ${step.deliveryTime}`
+    }
+    return formatDelay(step.delayMinutes)
+  }
   if (m === 'elapsed') {
     const days = step.offsetDays ?? 0
     const mins = step.offsetMinutes ?? 0
@@ -79,10 +87,10 @@ interface StepFormState {
   inputMode: 'direct' | 'template'
 }
 
-function emptyStepForm(stepOrder: number): StepFormState {
+function emptyStepForm(stepOrder: number, relativeMode: ScheduleValue['relativeMode'] = 'time'): StepFormState {
   return {
     stepOrder,
-    schedule: { ...emptySchedule },
+    schedule: { ...emptySchedule, relativeMode },
     messageType: 'text',
     messageContent: '',
     templateId: null,
@@ -157,6 +165,9 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
   const [stats, setStats] = useState<ScenarioStats | null>(null)
   const [templates, setTemplates] = useState<TemplateOpt[]>([])
   const [tags, setTags] = useState<TagOpt[]>([])
+  // このシナリオを起動する流入リンク（友だち追加のURL）
+  const [routes, setRoutes] = useState<Array<{ id: string; name: string; refCode: string }>>([])
+  const [urlCopied, setUrlCopied] = useState('')
 
   const deliveryMode: DeliveryMode = (scenario?.deliveryMode ?? 'relative') as DeliveryMode
 
@@ -195,7 +206,12 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
       api.scenarios.stats(id).catch(() => null),
       api.templates.list().catch(() => null),
       api.tags.list().catch(() => null),
-    ]).then(([statsRes, tplRes, tagRes]) => {
+      api.entryRoutes.list().catch(() => null),
+    ]).then(([statsRes, tplRes, tagRes, routeRes]) => {
+      if (routeRes && routeRes.success) {
+        const all = Array.isArray(routeRes.data) ? routeRes.data : []
+        setRoutes(all.filter((route) => route.scenarioId === id).map((route) => ({ id: route.id, name: route.name, refCode: route.refCode })))
+      }
       if (cancelled) return
       if (statsRes && statsRes.success) setStats(statsRes.data)
       if (tplRes && tplRes.success) {
@@ -243,7 +259,8 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
 
   const openAddStep = () => {
     const nextOrder = scenario ? (scenario.steps.length > 0 ? Math.max(...scenario.steps.map(s => s.stepOrder)) + 1 : 1) : 1
-    setStepForm(emptyStepForm(nextOrder))
+    const relativeMode = deliveryMode === 'relative' && nextOrder === 1 ? 'minutes' : 'time'
+    setStepForm(emptyStepForm(nextOrder, relativeMode))
     setEditingStepId(null)
     setShowStepForm(true)
     setStepError('')
@@ -259,6 +276,7 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
         offsetHours: ui.offsetHours,
         offsetMinutesRemainder: ui.offsetMinutesRemainder,
         deliveryTime: step.deliveryTime ?? '09:00',
+        relativeMode: step.offsetDays != null && step.deliveryTime ? 'time' : 'minutes',
       },
       messageType: step.messageType,
       messageContent: step.messageContent,
@@ -342,8 +360,8 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
       setEditingStepId(null)
       loadScenario()
       reloadStats()
-    } catch {
-      setStepError('ステップの保存に失敗しました')
+    } catch (e) {
+      setStepError(e instanceof Error ? `ステップの保存に失敗しました: ${e.message}` : 'ステップの保存に失敗しました')
     } finally {
       setStepSaving(false)
     }
@@ -548,9 +566,55 @@ export default function ScenarioDetailClient({ scenarioId }: { scenarioId: strin
               <span>ステップ数: {scenario.steps.length}</span>
               <span>作成日: {new Date(scenario.createdAt).toLocaleDateString('ja-JP')}</span>
             </div>
+
+            <div className="mt-3 rounded-lg border border-pink-100 bg-pink-50/50 p-3">
+              <p className="text-xs font-medium text-gray-700">このシナリオが流れる流入URL</p>
+              {routes.length === 0 ? (
+                <p className="mt-1 text-xs text-gray-500">
+                  まだありません。
+                  <a href="/inflow-links" className="ml-1 text-blue-600 hover:underline">流入リンク</a>
+                  で、起動シナリオにこのシナリオを選んで作成してください。
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-2">
+                  {routes.map((route) => {
+                    const url = `${WORKER_BASE}/r/${route.refCode}`
+                    return (
+                      <li key={route.id} className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-gray-600">{route.name}</span>
+                        <code className="flex-1 break-all rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-700">
+                          {url}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(url)
+                            setUrlCopied(route.id)
+                            setTimeout(() => setUrlCopied(''), 1500)
+                          }}
+                          className="shrink-0 rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50"
+                        >
+                          {urlCopied === route.id ? 'コピー済' : 'コピー'}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
           </div>
         )}
       </div>
+
+      <ScenarioDeliveryStatusPanel
+        scenarioId={id}
+        scenarioName={scenario.name}
+        scenarioIsActive={scenario.isActive}
+        lineAccountId={scenario.lineAccountId}
+        deliveryMode={scenario.deliveryMode}
+        steps={sortedSteps}
+        onEnrollmentChanged={reloadStats}
+      />
 
       {/* Steps */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">

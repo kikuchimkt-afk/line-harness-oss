@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { isFriendBlocked, BLOCKED_FRIEND_MESSAGE } from '../services/friend-block-policy.js';
+import type { Message } from '@line-crm/line-sdk';
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
 import {
   getOperators,
@@ -15,8 +17,41 @@ import {
   jstNow,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { parseFriendMetadata, resolveFriendDisplayName } from '../utils/friend-profile.js';
+import {
+  denyIfCannotAccessLineAccount,
+  denyIfLineAccountOutsideScope,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
+import { resolveMessageSource } from '../utils/message-source.js';
+import {
+  enqueueScheduledChatMessage,
+  type ScheduledChatMessageType,
+} from '../services/scheduled-chat-messages.js';
 
 const chats = new Hono<Env>();
+
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(',');
+}
+
+async function denyIfCannotAccessFriend(
+  c: Parameters<typeof denyIfCannotAccessLineAccount>[0],
+  friendId: string,
+  requestedLineAccountId?: string,
+): Promise<Response | null> {
+  const friend = await getFriendById(c.env.DB, friendId);
+  if (!friend) return null;
+  if (requestedLineAccountId) {
+    if (friend.line_account_id && friend.line_account_id !== requestedLineAccountId) {
+      return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+    }
+    const denied = await denyIfCannotAccessLineAccount(c, requestedLineAccountId);
+    if (denied) return denied;
+    return denyIfLineAccountOutsideScope(c, friend.line_account_id);
+  }
+  return denyIfLineAccountOutsideScope(c, friend.line_account_id);
+}
 
 function clampLoadingSeconds(value: number | undefined): number {
   const n = Number.isFinite(value) ? Math.floor(value as number) : 5;
@@ -50,6 +85,7 @@ async function startLoadingAnimation(
 type ChatLike = {
   id: string;
   friend_id: string;
+  line_account_id: string | null;
   operator_id: string | null;
   status: string;
   notes: string | null;
@@ -62,22 +98,30 @@ type ChatLike = {
 // push / broadcast / scenario 配信だけを受けた友だちもチャット画面に現れるため、ここで lazy create が必要。
 // 新規作成する場合は status='resolved' にし、last_message_at は messages_log の実際の最終時刻を使う
 // （jstNow を入れると一覧並び順が壊れるため）。
-async function resolveOrCreateChat(db: D1Database, id: string): Promise<ChatLike | null> {
+async function resolveOrCreateChat(db: D1Database, id: string, lineAccountId?: string): Promise<ChatLike | null> {
   const existing = await getChatById(db, id);
   if (existing) return existing as ChatLike;
   const friend = await getFriendById(db, id);
   if (!friend) return null;
+  const chatAccountSql = lineAccountId ? 'AND line_account_id = ?' : '';
+  const byFriendBindings: unknown[] = lineAccountId ? [friend.id, lineAccountId] : [friend.id];
   const byFriend = await db
-    .prepare(`SELECT * FROM chats WHERE friend_id = ? ORDER BY created_at ASC LIMIT 1`)
-    .bind(friend.id)
+    .prepare(`SELECT * FROM chats WHERE friend_id = ? ${chatAccountSql} ORDER BY created_at ASC LIMIT 1`)
+    .bind(...byFriendBindings)
     .first<ChatLike>();
   if (byFriend) return byFriend;
 
+  const messageAccountSql = lineAccountId ? 'AND line_account_id = ?' : '';
+  const lastMsgBindings: unknown[] = lineAccountId ? [friend.id, lineAccountId] : [friend.id];
   const lastMsg = await db
     .prepare(
-      `SELECT MAX(created_at) AS last FROM messages_log WHERE friend_id = ? AND (delivery_type IS NULL OR delivery_type != 'test')`,
+      `SELECT MAX(created_at) AS last
+       FROM messages_log
+       WHERE friend_id = ?
+         AND (delivery_type IS NULL OR delivery_type != 'test')
+         ${messageAccountSql}`,
     )
-    .bind(friend.id)
+    .bind(...lastMsgBindings)
     .first<{ last: string | null }>();
   const newId = crypto.randomUUID();
   const now = jstNow();
@@ -85,33 +129,85 @@ async function resolveOrCreateChat(db: D1Database, id: string): Promise<ChatLike
   // 同時実行で二重挿入されないように WHERE NOT EXISTS で原子挿入。挿入結果に関わらず最古行を返して収束。
   await db
     .prepare(
-      `INSERT INTO chats (id, friend_id, status, last_message_at, created_at, updated_at)
-       SELECT ?, ?, 'resolved', ?, ?, ?
-       WHERE NOT EXISTS (SELECT 1 FROM chats WHERE friend_id = ?)`,
+      `INSERT INTO chats (id, friend_id, line_account_id, status, last_message_at, created_at, updated_at)
+       SELECT ?, ?, ?, 'resolved', ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM chats
+         WHERE friend_id = ?
+           AND ${lineAccountId ? 'line_account_id = ?' : '1=1'}
+       )`,
     )
-    .bind(newId, friend.id, lastMessageAt, now, now, friend.id)
+    .bind(...(lineAccountId
+      ? [newId, friend.id, lineAccountId, lastMessageAt, now, now, friend.id, lineAccountId]
+      : [newId, friend.id, null, lastMessageAt, now, now, friend.id]))
     .run();
   return (await db
-    .prepare(`SELECT * FROM chats WHERE friend_id = ? ORDER BY created_at ASC LIMIT 1`)
-    .bind(friend.id)
+    .prepare(`SELECT * FROM chats WHERE friend_id = ? ${chatAccountSql} ORDER BY created_at ASC LIMIT 1`)
+    .bind(...byFriendBindings)
     .first<ChatLike>())!;
+}
+
+function normalizeScheduledSendAt(value: unknown, now: Date): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error('scheduled_at must be an ISO date string');
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error('scheduled_at is invalid');
+  }
+  if (parsed.getTime() <= now.getTime()) {
+    throw new Error('scheduled_at must be in the future');
+  }
+  return parsed.toISOString();
+}
+
+function buildOutgoingLineMessage(
+  messageType: ScheduledChatMessageType,
+  content: string,
+): Message {
+  if (messageType === 'text') {
+    return { type: 'text', text: content };
+  }
+  if (messageType === 'image') {
+    const parsed = JSON.parse(content) as {
+      originalContentUrl: string;
+      previewImageUrl: string;
+    };
+    if (!parsed.originalContentUrl || !parsed.previewImageUrl) {
+      throw new Error('image content is invalid');
+    }
+    return {
+      type: 'image',
+      originalContentUrl: parsed.originalContentUrl,
+      previewImageUrl: parsed.previewImageUrl,
+    };
+  }
+  const contents = JSON.parse(content);
+  return {
+    type: 'flex',
+    altText: extractFlexAltText(contents),
+    contents,
+  };
 }
 
 async function resolveFriendAndAccessToken(
   db: D1Database,
   friendId: string,
   defaultAccessToken: string,
+  preferredLineAccountId?: string,
 ) {
   const friend = await getFriendById(db, friendId);
   if (!friend) {
     return { friend: null, accessToken: defaultAccessToken };
   }
 
-  if (!friend.line_account_id) {
+  const lineAccountId = preferredLineAccountId || friend.line_account_id;
+  if (!lineAccountId) {
     return { friend, accessToken: defaultAccessToken };
   }
 
-  const account = await getLineAccountById(db, friend.line_account_id);
+  const account = await getLineAccountById(db, lineAccountId);
   if (!account) {
     return { friend, accessToken: defaultAccessToken };
   }
@@ -187,11 +283,22 @@ chats.get('/api/chats', async (c) => {
     const lineAccountId = c.req.query('lineAccountId') ?? undefined;
     const unansweredOnly =
       c.req.query('unansweredOnly') === 'true' || c.req.query('unansweredOnly') === '1';
+    if (lineAccountId) {
+      const denied = await denyIfCannotAccessLineAccount(c, lineAccountId);
+      if (denied) return denied;
+    }
+    const allowedLineAccountIds = lineAccountId ? null : await getAllowedLineAccountIds(c);
+    if (!lineAccountId && allowedLineAccountIds?.length === 0) {
+      return c.json({ success: true, data: [] });
+    }
 
     let unansweredIds: Set<string> | null = null;
     if (unansweredOnly) {
       const { getUnansweredFriendIds } = await import('../services/unanswered-inbox.js');
-      unansweredIds = await getUnansweredFriendIds(c.env.DB);
+      unansweredIds = await getUnansweredFriendIds(c.env.DB, {
+        account: lineAccountId,
+        accountIds: allowedLineAccountIds ?? undefined,
+      });
       // 空 Set のとき = 未対応ゼロ。早期 return で空配列を返す。
       if (unansweredIds.size === 0) {
         return c.json({ success: true, data: [] });
@@ -210,20 +317,28 @@ chats.get('/api/chats', async (c) => {
     //      を ranking する (アカ別 inbox が他アカの履歴をスキャンしないように)。
     //   2. content は text のみ先頭 200 文字まで切り詰めて返す (flex/image など raw JSON を返すと
     //      broadcast 後の rows で multi-MB レスポンスになる)。
-    const accountFilterSql = lineAccountId
-      ? `friend_id IN (SELECT id FROM friends WHERE line_account_id = ?)`
-      : `1=1`;
+    const scopedAccountSql = allowedLineAccountIds
+      ? `line_account_id IN (${placeholders(allowedLineAccountIds.length)})`
+      : null;
+    const messageAccountFilterSql = lineAccountId
+      ? `line_account_id = ?`
+      : scopedAccountSql ?? `1=1`;
+    const chatAccountFilterSql = lineAccountId
+      ? `(line_account_id = ? OR (line_account_id IS NULL AND friend_id IN (SELECT id FROM friends WHERE line_account_id = ?)))`
+      : allowedLineAccountIds
+        ? `(line_account_id IN (${placeholders(allowedLineAccountIds.length)}) OR (line_account_id IS NULL AND friend_id IN (SELECT id FROM friends WHERE line_account_id IN (${placeholders(allowedLineAccountIds.length)}))))`
+        : `1=1`;
     let sql = `
       WITH activity AS (
         SELECT friend_id, MAX(created_at) AS last_message_at
         FROM messages_log
         WHERE (delivery_type IS NULL OR delivery_type != 'test')
-          AND ${accountFilterSql}
+          AND ${messageAccountFilterSql}
         GROUP BY friend_id
         UNION ALL
         SELECT friend_id, last_message_at
         FROM chats
-        WHERE ${accountFilterSql}
+        WHERE ${chatAccountFilterSql}
       ),
       deduped AS (
         SELECT friend_id, MAX(last_message_at) AS last_message_at
@@ -250,7 +365,7 @@ chats.get('/api/chats', async (c) => {
         FROM messages_log
         WHERE direction = 'incoming'
           AND (delivery_type IS NULL OR delivery_type != 'test')
-          AND ${accountFilterSql}
+          AND ${messageAccountFilterSql}
       ),
       ranked_any AS (
         SELECT friend_id,
@@ -259,7 +374,7 @@ chats.get('/api/chats', async (c) => {
           ROW_NUMBER() OVER (PARTITION BY friend_id ORDER BY created_at DESC) AS rn
         FROM messages_log
         WHERE (delivery_type IS NULL OR delivery_type != 'test')
-          AND ${accountFilterSql}
+          AND ${messageAccountFilterSql}
       ),
       -- ra (any direction の最新) を master にして、ri (incoming の最新) を LEFT JOIN。
       -- COALESCE で ri 優先 → incoming があればそれ、無ければ outbound にフォールバック。
@@ -279,6 +394,7 @@ chats.get('/api/chats', async (c) => {
         f.id AS id,
         f.id AS friend_id,
         f.display_name,
+        f.metadata,
         f.picture_url,
         f.line_user_id,
         f.line_account_id,
@@ -303,8 +419,16 @@ chats.get('/api/chats', async (c) => {
     `;
     // accountFilterSql に '?' が複数 (4 箇所) あるので、bindings は事前に積んでおく。
     const ctePrebindings: unknown[] = lineAccountId
-      ? [lineAccountId, lineAccountId, lineAccountId, lineAccountId]
-      : [];
+      ? [lineAccountId, lineAccountId, lineAccountId, lineAccountId, lineAccountId]
+      : allowedLineAccountIds
+        ? [
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+            ...allowedLineAccountIds,
+          ]
+        : [];
     const conditions: string[] = [];
     const bindings: unknown[] = [];
 
@@ -316,11 +440,6 @@ chats.get('/api/chats', async (c) => {
       conditions.push('c.operator_id = ?');
       bindings.push(operatorId);
     }
-    if (lineAccountId) {
-      conditions.push('f.line_account_id = ?');
-      bindings.push(lineAccountId);
-    }
-
     if (conditions.length > 0) {
       sql += ' WHERE ' + conditions.join(' AND ');
     }
@@ -336,7 +455,10 @@ chats.get('/api/chats', async (c) => {
     let data = result.results.map((ch: Record<string, unknown>) => ({
       id: ch.id as string,
       friendId: ch.friend_id,
-      friendName: ch.display_name || '名前なし',
+      friendName: resolveFriendDisplayName(
+        ch.display_name as string | null,
+        parseFriendMetadata(ch.metadata as string | null),
+      ),
       friendPictureUrl: ch.picture_url || null,
       operatorId: ch.operator_id,
       status: ch.status,
@@ -363,6 +485,7 @@ chats.get('/api/chats', async (c) => {
 chats.get('/api/chats/:id', async (c) => {
   try {
     const rawId = c.req.param('id');
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
 
     // id は chats.id または friend.id のどちらでもOK。
     // 優先順: chats.id 一致 → friend.id のとき chats.friend_id 最新行 → 何も無ければ friend のみで synthetic
@@ -374,9 +497,11 @@ chats.get('/api/chats/:id', async (c) => {
       if (!friendRow) return c.json({ success: false, error: 'Chat not found' }, 404);
       friendId = friendRow.id;
       // 同じ friend に紐づく chats 行があれば採用（lazy-create 後の再読みで status/notes を拾うため）
+      const chatAccountSql = lineAccountId ? 'AND line_account_id = ?' : '';
+      const chatBindings: unknown[] = lineAccountId ? [friendRow.id, lineAccountId] : [friendRow.id];
       const existing = await c.env.DB
-        .prepare(`SELECT * FROM chats WHERE friend_id = ? ORDER BY created_at DESC LIMIT 1`)
-        .bind(friendRow.id)
+        .prepare(`SELECT * FROM chats WHERE friend_id = ? ${chatAccountSql} ORDER BY created_at DESC LIMIT 1`)
+        .bind(...chatBindings)
         .first<{ id: string; friend_id: string; operator_id: string | null; status: string; notes: string | null; last_message_at: string | null; created_at: string; updated_at: string }>();
       if (existing) {
         chatRow = existing as Awaited<ReturnType<typeof getChatById>>;
@@ -393,21 +518,34 @@ chats.get('/api/chats/:id', async (c) => {
     const createdAt = chatRow?.created_at ?? null;
 
     const friend = await c.env.DB
-      .prepare(`SELECT display_name, picture_url, line_user_id FROM friends WHERE id = ?`)
+      .prepare(`SELECT display_name, metadata, picture_url, line_user_id, line_account_id FROM friends WHERE id = ?`)
       .bind(resolvedFriendId)
-      .first<{ display_name: string | null; picture_url: string | null; line_user_id: string }>();
+      .first<{ display_name: string | null; metadata: string | null; picture_url: string | null; line_user_id: string; line_account_id: string | null }>();
+    if (friend) {
+      if (lineAccountId && friend.line_account_id && friend.line_account_id !== lineAccountId) {
+        return c.json({ success: false, error: 'Friend does not belong to this LINE account' }, 403);
+      }
+      const denied = lineAccountId
+        ? await denyIfCannotAccessLineAccount(c, lineAccountId)
+        : await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+      if (denied) return denied;
+    }
 
-    // 新しい1000件を取って昇順に戻す。LIMIT 200 ASC だと古い200件だけで broadcast/scenario 等の
-    // 新しい push が欠落していた（Shu で 481件中 281件欠落のバグあり）。一覧側と同様に test 配信は除外。
-    // 現状の最重量ユーザー(481件)の2倍バッファ。これ以上の履歴はページング未実装（Phase 2 TODO）。
+    // 個別チャットでは、LINEへ実際に送受信した履歴を種別に関係なく全件表示する。
+    // 管理者向け test 配信だけは実ユーザーとの会話ではないため除外する。
+    const messageAccountSql = lineAccountId ? 'AND line_account_id = ?' : '';
+    const messageBindings: unknown[] = lineAccountId ? [resolvedFriendId, lineAccountId] : [resolvedFriendId];
     const messages = await c.env.DB
       .prepare(
-        `SELECT id, friend_id, direction, message_type, content, created_at
+        `SELECT id, friend_id, direction, message_type, content,
+                delivery_type, source, broadcast_id, scenario_step_id, created_at
          FROM messages_log
-         WHERE friend_id = ? AND (delivery_type IS NULL OR delivery_type != 'test')
-         ORDER BY created_at DESC LIMIT 1000`,
+         WHERE friend_id = ?
+           AND (delivery_type IS NULL OR delivery_type != 'test')
+           ${messageAccountSql}
+         ORDER BY created_at DESC`,
       )
-      .bind(resolvedFriendId)
+      .bind(...messageBindings)
       .all();
     messages.results = (messages.results as Record<string, unknown>[]).reverse();
 
@@ -416,7 +554,9 @@ chats.get('/api/chats/:id', async (c) => {
       data: {
         id: responseId,
         friendId: resolvedFriendId,
-        friendName: friend?.display_name || '名前なし',
+        friendName: friend
+          ? resolveFriendDisplayName(friend.display_name, parseFriendMetadata(friend.metadata))
+          : '名前なし',
         friendPictureUrl: friend?.picture_url || null,
         operatorId,
         status,
@@ -428,6 +568,7 @@ chats.get('/api/chats/:id', async (c) => {
           direction: m.direction,
           messageType: m.message_type,
           content: m.content,
+          source: resolveMessageSource(m),
           createdAt: m.created_at,
         })),
       },
@@ -459,8 +600,11 @@ chats.post('/api/chats', async (c) => {
 chats.put('/api/chats/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const resolved = await resolveOrCreateChat(c.env.DB, id);
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
+    const resolved = await resolveOrCreateChat(c.env.DB, id, lineAccountId);
     if (!resolved) return c.json({ success: false, error: 'Not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, resolved.friend_id, lineAccountId);
+    if (denied) return denied;
     const body = await c.req.json<{ operatorId?: string | null; status?: string; notes?: string }>();
     await updateChat(c.env.DB, resolved.id, body);
     const updated = await getChatById(c.env.DB, resolved.id);
@@ -480,8 +624,11 @@ chats.put('/api/chats/:id', async (c) => {
 chats.post('/api/chats/:id/loading', async (c) => {
   try {
     const chatId = c.req.param('id');
-    const chat = await resolveOrCreateChat(c.env.DB, chatId);
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
+    const chat = await resolveOrCreateChat(c.env.DB, chatId, lineAccountId);
     if (!chat) return c.json({ success: false, error: 'Chat not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, chat.friend_id, lineAccountId);
+    if (denied) return denied;
 
     let loadingSecondsInput: number | undefined;
     try {
@@ -496,9 +643,13 @@ chats.post('/api/chats/:id/loading', async (c) => {
       c.env.DB,
       chat.friend_id,
       c.env.LINE_CHANNEL_ACCESS_TOKEN,
+      lineAccountId,
     );
     if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
 
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     await startLoadingAnimation(
       accessToken,
       friend.line_user_id,
@@ -517,52 +668,122 @@ chats.post('/api/chats/:id/loading', async (c) => {
 chats.post('/api/chats/:id/send', async (c) => {
   try {
     const chatId = c.req.param('id');
-    const chat = await resolveOrCreateChat(c.env.DB, chatId);
+    const lineAccountId = c.req.query('lineAccountId') ?? undefined;
+    const chat = await resolveOrCreateChat(c.env.DB, chatId, lineAccountId);
     if (!chat) return c.json({ success: false, error: 'Chat not found' }, 404);
+    const denied = await denyIfCannotAccessFriend(c, chat.friend_id, lineAccountId);
+    if (denied) return denied;
 
-    const body = await c.req.json<{ messageType?: string; content: string }>();
+    const body = await c.req.json<{
+      messageType?: string;
+      content: string;
+      scheduled_at?: string | null;
+      notification_disabled?: boolean;
+    }>();
     if (!body.content) return c.json({ success: false, error: 'content is required' }, 400);
+    if (
+      body.notification_disabled !== undefined
+      && typeof body.notification_disabled !== 'boolean'
+    ) {
+      return c.json(
+        { success: false, error: 'notification_disabled must be boolean' },
+        422,
+      );
+    }
+
+    let scheduledAt: string | null;
+    try {
+      scheduledAt = normalizeScheduledSendAt(body.scheduled_at, new Date());
+    } catch (error) {
+      return c.json(
+        {
+          success: false,
+          error: error instanceof Error ? error.message : 'scheduled_at is invalid',
+        },
+        422,
+      );
+    }
 
     const { friend, accessToken } = await resolveFriendAndAccessToken(
       c.env.DB,
       chat.friend_id,
       c.env.LINE_CHANNEL_ACCESS_TOKEN,
+      lineAccountId,
     );
     if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
 
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     // LINE APIでメッセージ送信
     const { LineClient } = await import('@line-crm/line-sdk');
     const lineClient = new LineClient(accessToken);
     const messageType = body.messageType ?? 'text';
-
-    if (messageType === 'text') {
-      await lineClient.pushTextMessage(friend.line_user_id, body.content);
-    } else if (messageType === 'flex') {
-      const contents = JSON.parse(body.content);
-      await lineClient.pushFlexMessage(friend.line_user_id, extractFlexAltText(contents), contents);
-    } else if (messageType === 'image') {
-      const parsed = JSON.parse(body.content) as {
-        originalContentUrl: string;
-        previewImageUrl: string;
-      };
-      await lineClient.pushImageMessage(
-        friend.line_user_id,
-        parsed.originalContentUrl,
-        parsed.previewImageUrl,
-      );
+    if (!['text', 'image', 'flex'].includes(messageType)) {
+      return c.json({ success: false, error: 'Unsupported message type' }, 400);
     }
+
+    const typedMessageType = messageType as ScheduledChatMessageType;
+    let lineMessage: Message;
+    try {
+      lineMessage = buildOutgoingLineMessage(typedMessageType, body.content);
+    } catch {
+      return c.json({ success: false, error: 'Message content is invalid' }, 400);
+    }
+
+    const effectiveLineAccountId = lineAccountId ?? friend.line_account_id ?? null;
+    if (scheduledAt) {
+      const scheduledMessageId = await enqueueScheduledChatMessage(c.env.DB, {
+        chatId: chat.id,
+        friendId: friend.id,
+        lineAccountId: effectiveLineAccountId,
+        messageType: typedMessageType,
+        content: body.content,
+        scheduledAt,
+        notificationDisabled: body.notification_disabled === true,
+      });
+      return c.json({
+        success: true,
+        data: {
+          sent: false,
+          scheduled: true,
+          scheduledMessageId,
+          scheduledAt,
+          notificationDisabled: body.notification_disabled === true,
+        },
+      });
+    }
+
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
+    await lineClient.pushMessage(
+      friend.line_user_id,
+      [lineMessage],
+      body.notification_disabled === true
+        ? { notificationDisabled: true }
+        : undefined,
+    );
 
     // メッセージログに記録
     const logId = crypto.randomUUID();
     await c.env.DB
-      .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, created_at) VALUES (?, ?, 'outgoing', ?, ?, 'manual', ?)`)
-      .bind(logId, friend.id, messageType, body.content, jstNow())
+      .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, line_account_id, created_at) VALUES (?, ?, 'outgoing', ?, ?, 'manual', ?, ?)`)
+      .bind(logId, friend.id, typedMessageType, body.content, effectiveLineAccountId, jstNow())
       .run();
 
     // チャットの最終メッセージ日時を更新（chat.id を直接使う — friend_id で呼ばれても resolveOrCreateChat 済み）
     await updateChat(c.env.DB, chat.id, { status: 'in_progress', lastMessageAt: jstNow() });
 
-    return c.json({ success: true, data: { sent: true, messageId: logId } });
+    return c.json({
+      success: true,
+      data: {
+        sent: true,
+        scheduled: false,
+        messageId: logId,
+        notificationDisabled: body.notification_disabled === true,
+      },
+    });
   } catch (err) {
     console.error('POST /api/chats/:id/send error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

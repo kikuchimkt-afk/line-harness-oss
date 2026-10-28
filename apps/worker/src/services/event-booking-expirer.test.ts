@@ -7,6 +7,7 @@ interface BookingRow {
   requested_at: string;
   decided_at: string | null;
   updated_at: string | null;
+  waitlist_cutoff_at?: string;
 }
 interface ReminderRow {
   id: string;
@@ -36,6 +37,23 @@ function memDB(state: { bookings: BookingRow[]; reminders: ReminderRow[]; idem: 
           return { results: [] };
         },
         async run() {
+          if (sql.includes("WHERE status = 'waitlisted'")) {
+            const [decided_at, updated_at, nowIso] = bound as [string, string, string];
+            let changes = 0;
+            for (const booking of state.bookings) {
+              if (
+                booking.status === 'waitlisted' &&
+                booking.waitlist_cutoff_at != null &&
+                booking.waitlist_cutoff_at <= nowIso
+              ) {
+                booking.status = 'expired';
+                booking.decided_at = decided_at;
+                booking.updated_at = updated_at;
+                changes += 1;
+              }
+            }
+            return { success: true, meta: { changes } };
+          }
           if (sql.includes('UPDATE event_bookings\n            SET status = \'expired\'')) {
             const [decided_at, _updated_at, id] = bound as [string, string, string];
             const b = state.bookings.find((x) => x.id === id && x.status === 'requested');
@@ -75,7 +93,7 @@ function memDB(state: { bookings: BookingRow[]; reminders: ReminderRow[]; idem: 
 }
 
 describe('runEventBookingExpirer', () => {
-  test('expires requested bookings older than 24h', async () => {
+  test('keeps requested bookings pending even when older than 24h', async () => {
     const now = new Date('2026-05-09T12:00:00Z');
     const stale = '2026-05-08T11:00:00Z'; // > 24h ago
     const fresh = '2026-05-09T11:30:00Z'; // 30min ago
@@ -88,12 +106,12 @@ describe('runEventBookingExpirer', () => {
       idem: [{ key: 'k1', expires_at: '2026-05-09T00:00:00Z' }],
     };
     const result = await runEventBookingExpirer(memDB(state), { now });
-    expect(result.expired).toBe(1);
-    expect(state.bookings[0].status).toBe('expired');
+    expect(result.expired).toBe(0);
+    expect(state.bookings[0].status).toBe('requested');
     expect(state.bookings[1].status).toBe('requested');
   });
 
-  test('cancels related pending reminders', async () => {
+  test('does not cancel reminders for pending approval requests', async () => {
     const now = new Date('2026-05-09T12:00:00Z');
     const state = {
       bookings: [{ id: 'b1', status: 'requested', requested_at: '2026-05-08T00:00:00Z', decided_at: null, updated_at: null }],
@@ -105,7 +123,7 @@ describe('runEventBookingExpirer', () => {
       idem: [],
     };
     await runEventBookingExpirer(memDB(state), { now });
-    expect(state.reminders[0].status).toBe('cancelled');
+    expect(state.reminders[0].status).toBe('pending');
     expect(state.reminders[1].status).toBe('sent');
     expect(state.reminders[2].status).toBe('pending');
   });
@@ -123,6 +141,23 @@ describe('runEventBookingExpirer', () => {
     const result = await runEventBookingExpirer(memDB(state), { now });
     expect(result.idempotencyPurged).toBe(1);
     expect(state.idem.map((x) => x.key)).toEqual(['new']);
+  });
+
+  test('expires only waitlist rows whose shared cutoff has arrived', async () => {
+    const now = new Date('2026-09-08T10:00:00Z');
+    const state = {
+      bookings: [
+        { id: 'wait-closed', status: 'waitlisted', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-08T10:00:00.000Z' },
+        { id: 'wait-open', status: 'waitlisted', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-09T10:00:00.000Z' },
+        { id: 'confirmed', status: 'confirmed', requested_at: '2026-09-01T00:00:00Z', decided_at: null, updated_at: null, waitlist_cutoff_at: '2026-09-01T10:00:00.000Z' },
+      ],
+      reminders: [],
+      idem: [],
+    };
+
+    const result = await runEventBookingExpirer(memDB(state), { now });
+    expect(result.expired).toBe(1);
+    expect(state.bookings.map((booking) => booking.status)).toEqual(['expired', 'waitlisted', 'confirmed']);
   });
 
   test('does nothing when no stale bookings', async () => {

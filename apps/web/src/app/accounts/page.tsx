@@ -5,6 +5,7 @@ import { api } from '@/lib/api'
 import Header from '@/components/layout/header'
 import CcPromptButton from '@/components/cc-prompt-button'
 import TestRecipientsSetting from '@/components/accounts/test-recipients-setting'
+import NoticeRecipientsSetting from '@/components/accounts/notice-recipients-setting'
 import AccountSettingsSection from '@/components/accounts/account-settings-section'
 import ReorderMode from '@/components/accounts/reorder-mode'
 import {
@@ -14,6 +15,7 @@ import {
 } from '@/components/accounts/account-form-fields'
 import AccountSetupUrls from '@/components/accounts/account-setup-urls'
 import AccountEditModal from '@/components/accounts/account-edit-modal'
+import { useAccount } from '@/contexts/account-context'
 
 interface LineAccountListItem {
   id: string
@@ -54,6 +56,7 @@ const ccPrompts = [
 ]
 
 export default function AccountsPage() {
+  const { refreshAccounts } = useAccount()
   const [accounts, setAccounts] = useState<LineAccountListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -79,6 +82,10 @@ export default function AccountsPage() {
       setError('APIに接続できませんでした。サーバーが起動しているか確認してください。')
     }
     setLoading(false)
+  }
+
+  const refreshLocalAndSharedAccounts = async () => {
+    await Promise.all([load(), refreshAccounts()])
   }
 
   useEffect(() => { load() }, [])
@@ -311,6 +318,7 @@ export default function AccountsPage() {
                 initialRole={(account as { role?: string | null }).role ?? null}
                 onUpdated={load}
               />
+              <NoticeRecipientsSetting accountId={account.id} />
               <TestRecipientsSetting accountId={account.id} />
 
               <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
@@ -357,7 +365,7 @@ export default function AccountsPage() {
           initialLoginChannelId={editing.loginChannelId}
           initialLiffId={editing.liffId}
           onClose={() => setEditing(null)}
-          onSaved={load}
+          onSaved={() => { void refreshLocalAndSharedAccounts() }}
         />
       )}
     </div>

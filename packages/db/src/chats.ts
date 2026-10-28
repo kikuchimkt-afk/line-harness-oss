@@ -14,6 +14,7 @@ export interface OperatorRow {
 export interface ChatRow {
   id: string;
   friend_id: string;
+  line_account_id: string | null;
   operator_id: string | null;
   status: string;
   notes: string | null;
@@ -92,18 +93,24 @@ export async function getChatById(db: D1Database, id: string): Promise<ChatRow |
   return db.prepare(`SELECT * FROM chats WHERE id = ?`).bind(id).first<ChatRow>();
 }
 
-export async function getChatByFriendId(db: D1Database, friendId: string): Promise<ChatRow | null> {
+export async function getChatByFriendId(db: D1Database, friendId: string, lineAccountId?: string | null): Promise<ChatRow | null> {
+  if (lineAccountId) {
+    return db
+      .prepare(`SELECT * FROM chats WHERE friend_id = ? AND line_account_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .bind(friendId, lineAccountId)
+      .first<ChatRow>();
+  }
   return db.prepare(`SELECT * FROM chats WHERE friend_id = ? ORDER BY created_at DESC LIMIT 1`).bind(friendId).first<ChatRow>();
 }
 
 export async function createChat(
   db: D1Database,
-  input: { friendId: string; operatorId?: string },
+  input: { friendId: string; operatorId?: string; lineAccountId?: string | null },
 ): Promise<ChatRow> {
   const id = crypto.randomUUID();
   const now = jstNow();
-  await db.prepare(`INSERT INTO chats (id, friend_id, operator_id, last_message_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-    .bind(id, input.friendId, input.operatorId ?? null, now, now, now).run();
+  await db.prepare(`INSERT INTO chats (id, friend_id, line_account_id, operator_id, last_message_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, input.friendId, input.lineAccountId ?? null, input.operatorId ?? null, now, now, now).run();
   return (await getChatById(db, id))!;
 }
 
@@ -126,8 +133,8 @@ export async function updateChat(
 }
 
 /** 友だちからメッセージ受信時にチャットを作成/更新 */
-export async function upsertChatOnMessage(db: D1Database, friendId: string): Promise<ChatRow> {
-  const existing = await getChatByFriendId(db, friendId);
+export async function upsertChatOnMessage(db: D1Database, friendId: string, lineAccountId?: string | null): Promise<ChatRow> {
+  const existing = await getChatByFriendId(db, friendId, lineAccountId);
   const now = jstNow();
   if (existing) {
     // resolvedだった場合はunreadに戻す
@@ -135,5 +142,5 @@ export async function upsertChatOnMessage(db: D1Database, friendId: string): Pro
     await updateChat(db, existing.id, { status: newStatus, lastMessageAt: now });
     return (await getChatById(db, existing.id))!;
   }
-  return createChat(db, { friendId });
+  return createChat(db, { friendId, lineAccountId });
 }

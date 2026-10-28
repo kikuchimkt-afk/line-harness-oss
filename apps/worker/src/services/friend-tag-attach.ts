@@ -1,5 +1,6 @@
 import { getScenarios, enrollFriendInScenario, jstNow } from '@line-crm/db';
 import { fireEvent } from './event-bus.js';
+import { isFriendBlocked, stopBlockedFriendWork } from './friend-block-policy.js';
 
 // friend に tag を attach し、`POST /api/friends/:id/tags` と同じ side effects を発火する。
 // side effects: tag_added シナリオ enrollment + tag_change イベント (automation/webhook/scoring 用)。
@@ -15,6 +16,7 @@ export async function attachTagAndFireSideEffects(
   friendId: string,
   tagId: string,
 ): Promise<{ added: boolean }> {
+  if (await isFriendBlocked(db, friendId)) return { added: false };
   const result = await db
     .prepare(
       `INSERT OR IGNORE INTO friend_tags (friend_id, tag_id, assigned_at)
@@ -24,6 +26,14 @@ export async function attachTagAndFireSideEffects(
     .run();
   const added = (result.meta?.changes ?? 0) > 0;
   if (!added) return { added: false };
+  if (await isFriendBlocked(db, friendId)) {
+    await stopBlockedFriendWork(db, friendId);
+    const { cancelBlockedFriendOutboundWork } = await import('./blocked-outbound.js');
+    await cancelBlockedFriendOutboundWork(db, friendId);
+    const { applyBlockedRichMenuForFriend } = await import('./rich-menu-assignment.js');
+    await applyBlockedRichMenuForFriend(db, friendId);
+    return { added: true };
+  }
 
   const scenarios = await getScenarios(db);
   for (const scenario of scenarios) {

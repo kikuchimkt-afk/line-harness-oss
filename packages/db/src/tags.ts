@@ -24,6 +24,11 @@ export interface CreateTagInput {
   color?: string;
 }
 
+export interface UpdateTagInput {
+  name?: string;
+  color?: string;
+}
+
 export async function createTag(
   db: D1Database,
   input: CreateTagInput,
@@ -48,6 +53,31 @@ export async function createTag(
 
 export async function deleteTag(db: D1Database, id: string): Promise<void> {
   await db.prepare(`DELETE FROM tags WHERE id = ?`).bind(id).run();
+}
+
+export async function updateTag(
+  db: D1Database,
+  id: string,
+  input: UpdateTagInput,
+): Promise<Tag | null> {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (input.name !== undefined) {
+    sets.push('name = ?');
+    values.push(input.name);
+  }
+  if (input.color !== undefined) {
+    sets.push('color = ?');
+    values.push(input.color);
+  }
+  if (sets.length > 0) {
+    values.push(id);
+    await db
+      .prepare(`UPDATE tags SET ${sets.join(', ')} WHERE id = ?`)
+      .bind(...values)
+      .run();
+  }
+  return db.prepare(`SELECT * FROM tags WHERE id = ?`).bind(id).first<Tag>();
 }
 
 export async function addTagToFriend(
@@ -100,7 +130,22 @@ import type { Friend } from './friends';
 export async function getFriendsByTag(
   db: D1Database,
   tagId: string,
+  lineAccountId?: string | null,
 ): Promise<Friend[]> {
+  if (lineAccountId) {
+    const result = await db
+      .prepare(
+        `SELECT f.*
+         FROM friends f
+         INNER JOIN friend_tags ft ON ft.friend_id = f.id
+         WHERE ft.tag_id = ? AND f.line_account_id = ?
+         ORDER BY f.created_at DESC`,
+      )
+      .bind(tagId, lineAccountId)
+      .all<Friend>();
+    return result.results;
+  }
+
   const result = await db
     .prepare(
       `SELECT f.*

@@ -1,4 +1,5 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import { isFriendBlocked } from './friend-block-policy.js';
 
 /**
  * リマインダ配信処理 — cronトリガーで定期実行
@@ -15,15 +16,20 @@ import {
 } from '@line-crm/db';
 import type { LineClient, Message } from '@line-crm/line-sdk';
 import { addJitter, sleep } from './stealth.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
 
 export async function processReminderDeliveries(
   db: D1Database,
   lineClient: LineClient,
+  budget?: IndividualNotificationBudget,
 ): Promise<void> {
   const now = jstNow();
   const dueReminders = await getDueReminderDeliveries(db, now);
+  dueReminders.sort((a, b) =>
+    a.target_date.localeCompare(b.target_date) || a.id.localeCompare(b.id),
+  );
 
-  for (let i = 0; i < dueReminders.length; i++) {
+  deliveryLoop: for (let i = 0; i < dueReminders.length; i++) {
     const fr = dueReminders[i];
     try {
       // ステルス: バースト回避のためランダム遅延
@@ -33,6 +39,10 @@ export async function processReminderDeliveries(
 
       const friend = await getFriendById(db, fr.friend_id);
       if (!friend || !friend.is_following) {
+        continue;
+      }
+      if (await isFriendBlocked(db, friend.id)) {
+        await db.prepare(`UPDATE friend_reminders SET status = 'cancelled' WHERE id = ? AND status = 'active'`).bind(fr.id).run();
         continue;
       }
 
@@ -50,7 +60,20 @@ export async function processReminderDeliveries(
 
       for (const step of fr.steps) {
         const message = buildMessage(step.message_type, step.message_content);
-        await deliveryClient.pushMessage(friend.line_user_id, [message]);
+        const reservation = budget?.reserve();
+        if (budget && !reservation) break deliveryLoop;
+        try {
+          if (await isFriendBlocked(db, friend.id)) {
+            await db.prepare(`UPDATE friend_reminders SET status = 'cancelled' WHERE id = ? AND status = 'active'`).bind(fr.id).run();
+            break;
+          }
+          // All eligibility checks are complete; this step is now claimed by
+          // this invocation for an immediate outbound attempt.
+          reservation?.commit();
+          await deliveryClient.pushMessage(friend.line_user_id, [message]);
+        } finally {
+          reservation?.release();
+        }
 
         // Mark as delivered AFTER successful send.
         // INSERT OR IGNORE prevents duplicate records if parallel workers both sent.
@@ -65,10 +88,10 @@ export async function processReminderDeliveries(
         const logId = crypto.randomUUID();
         await db
           .prepare(
-            `INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, created_at)
-             VALUES (?, ?, 'outgoing', ?, ?, 'reminder', ?)`,
+            `INSERT INTO messages_log (id, friend_id, direction, message_type, content, source, line_account_id, created_at)
+             VALUES (?, ?, 'outgoing', ?, ?, 'reminder', ?, ?)`,
           )
-          .bind(logId, friend.id, step.message_type, step.message_content, jstNow())
+          .bind(logId, friend.id, step.message_type, step.message_content, friendAccountId ?? null, jstNow())
           .run();
       }
 

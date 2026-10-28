@@ -5,6 +5,10 @@ import {
   countUnanswered,
   type UnansweredInboxOptions,
 } from '../services/unanswered-inbox.js';
+import {
+  denyIfCannotAccessLineAccount,
+  getAllowedLineAccountIds,
+} from '../middleware/account-access.js';
 
 export const inbox = new Hono<Env>();
 
@@ -15,10 +19,16 @@ inbox.get('/api/inbox/unanswered', async (c) => {
     const minWaitMinutesStr = c.req.query('minWaitMinutes');
     const pageStr = c.req.query('page');
     const pageSizeStr = c.req.query('pageSize');
+    if (account) {
+      const denied = await denyIfCannotAccessLineAccount(c, account);
+      if (denied) return denied;
+    }
+    const allowedAccountIds = account ? null : await getAllowedLineAccountIds(c);
 
     const opts: UnansweredInboxOptions = {
       q: q || undefined,
       account,
+      accountIds: allowedAccountIds ?? undefined,
       minWaitMinutes: minWaitMinutesStr ? Number.parseInt(minWaitMinutesStr, 10) : undefined,
       page: pageStr ? Number.parseInt(pageStr, 10) : undefined,
       pageSize: pageSizeStr ? Number.parseInt(pageSizeStr, 10) : undefined,
@@ -34,7 +44,8 @@ inbox.get('/api/inbox/unanswered', async (c) => {
 
 inbox.get('/api/inbox/unanswered/count', async (c) => {
   try {
-    const result = await countUnanswered(c.env.DB);
+    const allowedAccountIds = await getAllowedLineAccountIds(c);
+    const result = await countUnanswered(c.env.DB, { accountIds: allowedAccountIds ?? undefined });
     return c.json({ success: true, data: result });
   } catch (err) {
     console.error('GET /api/inbox/unanswered/count error:', err);

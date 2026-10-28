@@ -16,22 +16,291 @@ import {
   jstNow,
   computeNextDeliveryAt,
   resolveStepContent,
-  addTagToFriend,
   getEntryRouteByRefCode,
   getMessageTemplateById,
 } from '@line-crm/db';
 import type { EntryRoute, Friend } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
-import { buildMessage, expandVariables } from '../services/step-delivery.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { addTagWithBlockEnforcement } from '../services/block-tag-attach.js';
+import { enrollPendingEntryScenarioOnce, hasPendingRefTracking, recoverPendingRefAttribution } from '../services/liff-pending-ref-attribution.js';
+import { assertFriendNotBlocked, isFriendBlocked, isLineUserBlocked, stopBlockedFriendWork } from '../services/friend-block-policy.js';
+import { buildMessage, expandVariables, messageToLogPayload } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
 
 const webhook = new Hono<Env>();
+
+/**
+ * 合言葉の照合をやさしくする。
+ * スマホの自動大文字化や全角入力でも通るよう、NFKC・小文字・前後の空白をそろえて比べる。
+ */
+function normalizeKeywordText(value: string): string {
+  return (value ?? '').normalize('NFKC').trim().toLowerCase();
+}
 
 // LINE webhook bodies are small (events array). Cap defends against unauthenticated
 // large-payload DoS before signature verification (#104). 1 MiB leaves room for
 // bursty batched deliveries (~100 events × ~5 KB) while still well below the
 // 128 MB Cloudflare Workers memory ceiling.
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
+const INCOMING_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
+const NOTICE_PREVIEW_MAX_LENGTH = 500;
+const RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX = 'lh:richmenu:text-image:';
+
+type NoticeRecipient = {
+  id: string;
+  line_user_id: string;
+};
+
+type RichMenuTextImageActionData = {
+  kind?: unknown;
+  actionId?: unknown;
+  text?: unknown;
+  image?: {
+    originalContentUrl?: unknown;
+    previewImageUrl?: unknown;
+  } | null;
+};
+
+function truncateNoticeText(text: string): string {
+  if (text.length <= NOTICE_PREVIEW_MAX_LENGTH) return text;
+  return `${text.slice(0, NOTICE_PREVIEW_MAX_LENGTH)}...`;
+}
+
+function incomingMessagePreview(messageType: string, content: string): string {
+  if (messageType === 'text') return truncateNoticeText(content);
+  if (messageType === 'image') return '画像が届きました';
+  if (messageType === 'sticker') return 'スタンプが届きました';
+  if (messageType === 'audio') return '音声が届きました';
+  if (messageType === 'video') return '動画が届きました';
+  if (messageType === 'file') return 'ファイルが届きました';
+  if (messageType === 'location') return '位置情報が届きました';
+  return truncateNoticeText(content || `[${messageType}]`);
+}
+
+async function getNoticeRecipients(
+  db: D1Database,
+  lineAccountId: string,
+  excludeFriendId?: string,
+): Promise<{ accountName: string; recipients: NoticeRecipient[] }> {
+  const setting = await db
+    .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+    .bind(lineAccountId, INCOMING_NOTICE_RECIPIENTS_KEY)
+    .first<{ value: string }>();
+
+  let recipientIds: string[] = [];
+  if (setting?.value) {
+    try {
+      const parsed = JSON.parse(setting.value);
+      recipientIds = Array.isArray(parsed)
+        ? parsed
+            .filter((id): id is string => typeof id === 'string')
+            .map((id) => id.trim())
+            .filter((id) => id.length > 0 && id !== excludeFriendId)
+        : [];
+    } catch {
+      recipientIds = [];
+    }
+  }
+  recipientIds = [...new Set(recipientIds)];
+
+  const account = await db
+    .prepare(`SELECT name FROM line_accounts WHERE id = ?`)
+    .bind(lineAccountId)
+    .first<{ name: string | null }>();
+
+  if (recipientIds.length === 0) {
+    return { accountName: account?.name ?? 'LINE公式アカウント', recipients: [] };
+  }
+
+  const placeholders = recipientIds.map(() => '?').join(',');
+  const recipients = await db
+    .prepare(
+      `SELECT id, line_user_id
+       FROM friends
+       WHERE line_account_id = ?
+         AND is_following = 1
+         AND id IN (${placeholders})`,
+    )
+    .bind(lineAccountId, ...recipientIds)
+    .all<NoticeRecipient>();
+
+  return {
+    accountName: account?.name ?? 'LINE公式アカウント',
+    recipients: recipients.results,
+  };
+}
+
+async function notifyIncomingMessageRecipients(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    lineAccountId: string | null;
+    senderFriendId: string;
+    senderName: string | null;
+    messageType: string;
+    content: string;
+  },
+): Promise<void> {
+  if (!params.lineAccountId) return;
+
+  try {
+    const { accountName, recipients } = await getNoticeRecipients(db, params.lineAccountId, params.senderFriendId);
+    if (recipients.length === 0) return;
+
+    const text = [
+      '📩 新しいメッセージが届きました',
+      '',
+      `アカウント：${accountName}`,
+      `送信者：${params.senderName || '名前なし'}`,
+      `内容：${incomingMessagePreview(params.messageType, params.content)}`,
+      '',
+      'L Harnessの個別チャットで確認してください。',
+    ].join('\n');
+
+    for (const recipient of recipients) {
+      try {
+        if (await isFriendBlocked(db, recipient.id, params.lineAccountId)) continue;
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[webhook] incoming notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] incoming notice failed', err);
+  }
+}
+
+async function handleRichMenuTextImagePostback(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    friend: Friend;
+    lineAccountId: string | null;
+    postbackData: string;
+    replyToken: string;
+  },
+): Promise<boolean> {
+  if (!params.postbackData.startsWith(RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX)) {
+    return false;
+  }
+  if (!params.lineAccountId) {
+    console.warn('text+image rich menu postback received without lineAccountId');
+    return true;
+  }
+
+  const actionId = params.postbackData.slice(RICH_MENU_TEXT_IMAGE_POSTBACK_PREFIX.length);
+  if (!actionId) return true;
+
+  const row = await db
+    .prepare(
+      `SELECT a.action_data
+         FROM rich_menu_areas a
+         JOIN rich_menu_pages p ON p.id = a.page_id
+         JOIN rich_menu_groups g ON g.id = p.group_id
+        WHERE g.account_id = ?
+          AND a.action_type = 'postback'
+          AND json_extract(a.action_data, '$.kind') = 'text_image'
+          AND json_extract(a.action_data, '$.actionId') = ?
+        LIMIT 1`,
+    )
+    .bind(params.lineAccountId, actionId)
+    .first<{ action_data: string }>();
+
+  if (!row?.action_data) {
+    console.warn(`text+image rich menu action not found: ${actionId}`);
+    return true;
+  }
+
+  let parsed: RichMenuTextImageActionData;
+  try {
+    parsed = JSON.parse(row.action_data) as RichMenuTextImageActionData;
+  } catch {
+    console.warn(`invalid text+image rich menu action JSON: ${actionId}`);
+    return true;
+  }
+
+  const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+  const originalContentUrl = typeof parsed.image?.originalContentUrl === 'string'
+    ? parsed.image.originalContentUrl
+    : '';
+  const previewImageUrl = typeof parsed.image?.previewImageUrl === 'string'
+    ? parsed.image.previewImageUrl
+    : originalContentUrl;
+
+  const messages: ReturnType<typeof buildMessage>[] = [];
+  if (text) messages.push(buildMessage('text', text));
+  if (originalContentUrl) {
+    messages.push(buildMessage('image', JSON.stringify({ originalContentUrl, previewImageUrl })));
+  }
+
+  if (messages.length === 0) {
+    console.warn(`text+image rich menu action has no reply payload: ${actionId}`);
+    return true;
+  }
+
+  await assertFriendNotBlocked(db, params.friend.id, params.friend.line_account_id);
+  await lineClient.replyMessage(params.replyToken, messages);
+  for (const message of messages) {
+    const payload = messageToLogPayload(message);
+    await db
+      .prepare(
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'rich_menu', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), params.friend.id, payload.messageType, payload.content, params.lineAccountId, jstNow())
+      .run();
+  }
+
+  return true;
+}
+
+async function notifyFriendAddRecipients(
+  db: D1Database,
+  lineClient: LineClient,
+  params: {
+    lineAccountId: string | null;
+    friendId: string;
+    friendName: string | null;
+    referralRouteName?: string | null;
+    refCode?: string | null;
+  },
+): Promise<void> {
+  if (!params.lineAccountId) return;
+
+  try {
+    const { accountName, recipients } = await getNoticeRecipients(db, params.lineAccountId, params.friendId);
+    if (recipients.length === 0) return;
+
+    const routeLine = params.referralRouteName
+      ? `流入元：${params.referralRouteName}`
+      : params.refCode
+        ? `流入元コード：${params.refCode}`
+        : null;
+    const lines = [
+      '👤 新しい友だちが追加されました',
+      '',
+      `アカウント：${accountName}`,
+      `友だち：${params.friendName || '名前なし'}`,
+      routeLine,
+      `登録日時：${jstNow().replace('T', ' ').slice(0, 16)}`,
+      '',
+      'L Harnessの友だち管理で確認してください。',
+    ].filter((line): line is string => line !== null);
+    const text = lines.join('\n');
+
+    for (const recipient of recipients) {
+      try {
+        if (await isFriendBlocked(db, recipient.id, params.lineAccountId)) continue;
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[webhook] friend-add notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] friend-add notice failed', err);
+  }
+}
 
 async function ensureFriendFromWebhookUser(
   db: D1Database,
@@ -39,7 +308,7 @@ async function ensureFriendFromWebhookUser(
   userId: string,
   lineAccountId: string | null,
 ): Promise<Friend | null> {
-  let friend = await getFriendByLineUserId(db, userId);
+  let friend = await getFriendByLineUserId(db, userId, lineAccountId);
 
   if (!friend) {
     let profile: Awaited<ReturnType<LineClient['getProfile']>> | null = null;
@@ -57,17 +326,9 @@ async function ensureFriendFromWebhookUser(
       displayName: profile?.displayName ?? null,
       pictureUrl: profile?.pictureUrl ?? null,
       statusMessage: profile?.statusMessage ?? null,
+      lineAccountId,
     });
     console.log(`[webhook] auto-registered existing friend userId=${userId} friendId=${friend.id}`);
-  }
-
-  if (lineAccountId && friend.line_account_id !== lineAccountId) {
-    const now = jstNow();
-    await db
-      .prepare('UPDATE friends SET line_account_id = ?, is_following = 1, updated_at = ? WHERE id = ?')
-      .bind(lineAccountId, now, friend.id)
-      .run();
-    friend = { ...friend, line_account_id: lineAccountId, is_following: 1, updated_at: now };
   }
 
   return friend;
@@ -193,6 +454,16 @@ async function handleEvent(
 
     console.log(`[follow] userId=${userId} lineAccountId=${lineAccountId}`);
 
+    const existingBeforeFollow = await getFriendByLineUserId(db, userId, lineAccountId);
+    if (existingBeforeFollow && await isFriendBlocked(db, existingBeforeFollow.id, existingBeforeFollow.line_account_id)) {
+      // Keep LINE's actual follow state accurate. Application blocking is a
+      // tag policy, not a fabricated unfollow; no welcome/automation runs.
+      await updateFriendFollowStatus(db, userId, true, lineAccountId);
+      await stopBlockedFriendWork(db, existingBeforeFollow.id, existingBeforeFollow.line_account_id);
+      return;
+    }
+    const shouldNotifyFriendAdd = !existingBeforeFollow || existingBeforeFollow.is_following !== 1;
+
     // プロフィール取得 & 友だち登録/更新
     let profile;
     try {
@@ -208,15 +479,13 @@ async function handleEvent(
       displayName: profile?.displayName ?? null,
       pictureUrl: profile?.pictureUrl ?? null,
       statusMessage: profile?.statusMessage ?? null,
+      lineAccountId,
     });
 
     console.log(`[follow] friend.id=${friend.id} friend.line_account_id=${(friend as any).line_account_id}`);
-
-    // Set line_account_id for multi-account tracking (always update on follow)
-    if (lineAccountId) {
-      await db.prepare('UPDATE friends SET line_account_id = ?, updated_at = ? WHERE id = ?')
-        .bind(lineAccountId, jstNow(), friend.id).run();
-      console.log(`[follow] line_account_id set to ${lineAccountId} for friend ${friend.id}`);
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      await stopBlockedFriendWork(db, friend.id, friend.line_account_id);
+      return;
     }
 
     // Resolve referral link (entry_route) for this friend.
@@ -228,6 +497,9 @@ async function handleEvent(
     const { getFriendById } = await import('@line-crm/db');
     let friendRefCode = (friend as { ref_code?: string | null }).ref_code ?? null;
     if (!friendRefCode) {
+      friendRefCode = await recoverPendingRefAttribution(db, friend, lineAccountId, userId);
+    }
+    if (!friendRefCode) {
       for (let attempt = 0; attempt < 5; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 200));
         const refreshed = await getFriendById(db, friend.id);
@@ -236,6 +508,10 @@ async function handleEvent(
           friendRefCode = refreshedRef;
           break;
         }
+        // A LIFF pending write can race this follow upsert. Check the same
+        // account/user key during the existing bounded callback retry.
+        friendRefCode = await recoverPendingRefAttribution(db, friend, lineAccountId, userId);
+        if (friendRefCode) break;
       }
     }
     const referralRoute: EntryRoute | null = friendRefCode
@@ -244,10 +520,24 @@ async function handleEvent(
     const runAccountScenarios =
       !referralRoute || referralRoute.run_account_friend_add_scenarios !== 0;
 
+    if (shouldNotifyFriendAdd) {
+      await notifyFriendAddRecipients(db, lineClient, {
+        lineAccountId,
+        friendId: friend.id,
+        friendName: friend.display_name,
+        referralRouteName: referralRoute?.name ?? null,
+        refCode: friendRefCode,
+      });
+    }
+
     // friend_add シナリオに登録（このアカウントのシナリオのみ）
     // Skip entirely when a referral link explicitly overrides (run_account_friend_add_scenarios=0).
     const scenarios = runAccountScenarios ? await getScenarios(db) : [];
     for (const scenario of scenarios) {
+      if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+        await stopBlockedFriendWork(db, friend.id, friend.line_account_id);
+        return;
+      }
       // Only trigger scenarios belonging to this account (or unassigned for backward compat)
       const scenarioAccountMatch = !scenario.line_account_id || !lineAccountId || scenario.line_account_id === lineAccountId;
       if (scenario.trigger_type === 'friend_add' && scenario.is_active && scenarioAccountMatch) {
@@ -285,6 +575,7 @@ async function handleEvent(
                 const resolvedMeta = await resolveMetadata(db, { user_id: (friend as unknown as Record<string, string | null>).user_id, metadata: (friend as unknown as Record<string, string | null>).metadata });
                 const expandedContent = expandVariables(resolved.messageContent, { ...friend, metadata: resolvedMeta } as Parameters<typeof expandVariables>[1]);
                 const message = buildMessage(resolved.messageType, expandedContent);
+                await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
                 await lineClient.replyMessage(event.replyToken, [message]);
                 console.log(`Immediate delivery: sent step ${firstStep.id} to ${userId}`);
 
@@ -295,10 +586,10 @@ async function handleEvent(
                 const wbScenarioPayload = logPayload1(message);
                 await db
                   .prepare(
-                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, template_id_at_send, created_at)
-                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'reply', 'scenario', ?, ?)`,
+                    `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, template_id_at_send, line_account_id, created_at)
+                     VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'reply', 'scenario', ?, ?, ?)`,
                   )
-                  .bind(logId, friend.id, wbScenarioPayload.messageType, wbScenarioPayload.content, firstStep.id, resolved.templateIdAtSend, jstNow())
+                  .bind(logId, friend.id, wbScenarioPayload.messageType, wbScenarioPayload.content, firstStep.id, resolved.templateIdAtSend, lineAccountId ?? null, jstNow())
                   .run();
 
                 // Advance or complete the friend_scenario — step 2 のスケジュールも
@@ -318,7 +609,7 @@ async function handleEvent(
                 // 到達タグ付与 (advance / complete の後)
                 if (firstStep.on_reach_tag_id) {
                   try {
-                    await addTagToFriend(db, friend.id, firstStep.on_reach_tag_id);
+                    await addTagWithBlockEnforcement(db, friend.id, firstStep.on_reach_tag_id);
                   } catch (err) {
                     console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
                   }
@@ -335,12 +626,14 @@ async function handleEvent(
 
     // Referral link side-effects (intro push + dedicated scenario)
     if (referralRoute) {
+      await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
       // Intro push from referral link
       if (referralRoute.intro_template_id) {
         try {
           const template = await getMessageTemplateById(db, referralRoute.intro_template_id);
           if (template) {
             const message = buildMessage(template.message_type, template.message_content);
+            await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
             await lineClient.pushMessage(userId, [message]);
             console.log(`[follow] referral intro push sent route=${referralRoute.id}`);
           }
@@ -350,12 +643,46 @@ async function handleEvent(
       }
 
       // Dedicated scenario enrollment from referral link
+      let pendingEntryMode = false;
+      let pendingClassificationCompleted = false;
+      let pendingEnrollmentFailed = false;
       if (referralRoute.scenario_id) {
         try {
-          await enrollFriendInScenario(db, friend.id, referralRoute.scenario_id);
+          pendingEntryMode = await hasPendingRefTracking(db, friend.id, lineAccountId, friendRefCode!);
+          pendingClassificationCompleted = true;
+          if (pendingEntryMode) {
+            await enrollPendingEntryScenarioOnce(db, friend.id, referralRoute.scenario_id, lineAccountId);
+          } else {
+            await enrollFriendInScenario(db, friend.id, referralRoute.scenario_id);
+          }
           console.log(`[follow] referral scenario enrolled scenario=${referralRoute.scenario_id}`);
         } catch (err) {
+          // An unavailable proof query is not evidence of a legacy route.
+          // Fail closed until classification succeeds, rather than silently
+          // falling back to tag-trigger enrollment after a database error.
+          pendingEnrollmentFailed = !pendingClassificationCompleted || pendingEntryMode;
           console.error('[follow] referral scenario enrollment failed', err);
+        }
+      }
+
+      // Follow can finish before the user returns to LIFF. Apply the known
+      // referral tag here too, without inferring a campaign from a missing ref.
+      // Enroll the dedicated scenario first: the tag helper then sees that row
+      // and does not enroll it again if a tag_added trigger targets the same one.
+      if (referralRoute.tag_id) {
+        if (pendingEnrollmentFailed) {
+          // The verified ref/tracking proof survives. A later LIFF return
+          // can retry the atomic enrollment; do not let tag_added fall back
+          // to the legacy enrollment path after this pending-mode failure.
+          console.error(`[follow] pending referral tag deferred after enrollment failure route=${referralRoute.id}`);
+        } else if (friend.line_account_id !== lineAccountId) {
+          console.error(`[follow] referral tag skipped: account mismatch route=${referralRoute.id}`);
+        } else {
+          try {
+            await attachTagAndFireSideEffects(db, friend.id, referralRoute.tag_id);
+          } catch (err) {
+            console.error(`[follow] referral tag attach failed route=${referralRoute.id}:`, err);
+          }
         }
       }
     }
@@ -370,7 +697,7 @@ async function handleEvent(
       event.source.type === 'user' ? event.source.userId : undefined;
     if (!userId) return;
 
-    await updateFriendFollowStatus(db, userId, false);
+    await updateFriendFollowStatus(db, userId, false, lineAccountId);
     return;
   }
 
@@ -382,6 +709,10 @@ async function handleEvent(
 
     const friend = await ensureFriendFromWebhookUser(db, lineClient, userId, lineAccountId);
     if (!friend) return;
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      await logBlockedIncomingEvent(db, friend, event, lineAccountId);
+      return;
+    }
 
     const postbackData = (event as unknown as { postback: { data: string } }).postback.data;
 
@@ -416,6 +747,14 @@ async function handleEvent(
       console.error('Failed to log incoming postback', err);
     }
 
+    const handledRichMenuTextImage = await handleRichMenuTextImagePostback(db, lineClient, {
+      friend,
+      lineAccountId,
+      postbackData,
+      replyToken: event.replyToken,
+    });
+    if (handledRichMenuTextImage) return;
+
     for (const rule of autoReplies.results) {
       const isMatch = rule.match_type === 'exact'
         ? postbackData === rule.keyword
@@ -431,20 +770,23 @@ async function handleEvent(
             response_content: rule.response_content,
           });
           const expandedContent = expandVariables(resolved.content, { ...friend, metadata: resolvedMeta } as Parameters<typeof expandVariables>[1], workerUrl);
-          const replyMsg = buildMessage(resolved.messageType, expandedContent);
-          await lineClient.replyMessage(event.replyToken, [replyMsg]);
+          const replyMessages = buildAutoReplyMessages(resolved.messageType, expandedContent);
+          await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
+          await lineClient.replyMessage(event.replyToken, replyMessages);
 
           // 送信ログ — Rich Menu 経由の Flex 応答もチャット詳細に残るようにする。
           // テキスト auto_reply (line ~390) と同じパターン。
           const { messageToLogPayload: logPayload } = await import('../services/step-delivery.js');
-          const replyPayload = logPayload(replyMsg);
-          await db
-            .prepare(
-              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
-               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
-            )
-            .bind(crypto.randomUUID(), friend.id, replyPayload.messageType, replyPayload.content, lineAccountId ?? null, jstNow())
-            .run();
+          for (const replyMsg of replyMessages) {
+            const replyPayload = logPayload(replyMsg);
+            await db
+              .prepare(
+                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+                 VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
+              )
+              .bind(crypto.randomUUID(), friend.id, replyPayload.messageType, replyPayload.content, lineAccountId ?? null, jstNow())
+              .run();
+          }
         } catch (err) {
           console.error('Failed to send postback reply', err);
         }
@@ -462,6 +804,10 @@ async function handleEvent(
     if (!userId) return;
     const friend = await ensureFriendFromWebhookUser(db, lineClient, userId, lineAccountId);
     if (!friend) return;
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      await logBlockedIncomingEvent(db, friend, event, lineAccountId);
+      return;
+    }
 
     const msg = event.message as {
       id: string;
@@ -511,11 +857,19 @@ async function handleEvent(
 
     await db
       .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-         VALUES (?, ?, 'incoming', ?, ?, NULL, NULL, 'user', ?)`,
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+         VALUES (?, ?, 'incoming', ?, ?, NULL, NULL, 'user', ?, ?)`,
       )
-      .bind(crypto.randomUUID(), friend.id, msg.type, finalContent, jstNow())
+      .bind(crypto.randomUUID(), friend.id, msg.type, finalContent, lineAccountId ?? null, jstNow())
       .run();
+
+    await notifyIncomingMessageRecipients(db, lineClient, {
+      lineAccountId,
+      senderFriendId: friend.id,
+      senderName: friend.display_name,
+      messageType: msg.type,
+      content: finalContent,
+    });
     return;
   }
 
@@ -527,6 +881,10 @@ async function handleEvent(
 
     const friend = await ensureFriendFromWebhookUser(db, lineClient, userId, lineAccountId);
     if (!friend) return;
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      await logBlockedIncomingEvent(db, friend, event, lineAccountId);
+      return;
+    }
 
     const incomingText = textMessage.text;
     const now = jstNow();
@@ -535,11 +893,19 @@ async function handleEvent(
     // 受信メッセージをログに記録
     await db
       .prepare(
-        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, created_at)
-         VALUES (?, ?, 'incoming', 'text', ?, NULL, NULL, 'user', ?)`,
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, line_account_id, created_at)
+         VALUES (?, ?, 'incoming', 'text', ?, NULL, NULL, 'user', ?, ?)`,
       )
-      .bind(logId, friend.id, incomingText, now)
+      .bind(logId, friend.id, incomingText, lineAccountId ?? null, now)
       .run();
+
+    await notifyIncomingMessageRecipients(db, lineClient, {
+      lineAccountId,
+      senderFriendId: friend.id,
+      senderName: friend.display_name,
+      messageType: 'text',
+      content: incomingText,
+    });
 
     // Cross-account trigger: send message from another account via UUID
     if (incomingText === '体験を完了する' && lineAccountId) {
@@ -548,10 +914,11 @@ async function handleEvent(
         if (friendRecord?.user_id) {
           // Find the same user on other accounts
           const otherFriends = await db.prepare(
-            'SELECT f.line_user_id, la.channel_access_token FROM friends f INNER JOIN line_accounts la ON la.id = f.line_account_id WHERE f.user_id = ? AND f.line_account_id != ? AND f.is_following = 1'
-          ).bind(friendRecord.user_id, lineAccountId).all<{ line_user_id: string; channel_access_token: string }>();
+            'SELECT f.line_user_id, f.line_account_id, la.channel_access_token FROM friends f INNER JOIN line_accounts la ON la.id = f.line_account_id WHERE f.user_id = ? AND f.line_account_id != ? AND f.is_following = 1'
+          ).bind(friendRecord.user_id, lineAccountId).all<{ line_user_id: string; line_account_id: string; channel_access_token: string }>();
 
           for (const other of otherFriends.results) {
+            if (await isLineUserBlocked(db, other.line_user_id, other.line_account_id)) continue;
             const otherClient = new LineClient(other.channel_access_token);
             const { buildMessage: bm } = await import('../services/step-delivery.js');
             await otherClient.pushMessage(other.line_user_id, [bm('flex', JSON.stringify({
@@ -577,6 +944,7 @@ async function handleEvent(
           }
 
           // Reply on Account ② confirming
+          await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
           await lineClient.replyMessage(event.replyToken, [buildMessage('flex', JSON.stringify({
             type: 'bubble',
             body: { type: 'box', layout: 'vertical', paddingAll: '20px',
@@ -615,10 +983,9 @@ async function handleEvent(
     let matched = false;
     let replyTokenConsumed = false;
     for (const rule of autoReplies.results) {
-      const isMatch =
-        rule.match_type === 'exact'
-          ? incomingText === rule.keyword
-          : incomingText.includes(rule.keyword);
+      const incoming = normalizeKeywordText(incomingText);
+      const keyword = normalizeKeywordText(rule.keyword);
+      const isMatch = rule.match_type === 'exact' ? incoming === keyword : incoming.includes(keyword);
 
       if (isMatch) {
         // silent タイプ: 返信しないが matched=true にして unread / push を抑止する
@@ -636,23 +1003,26 @@ async function handleEvent(
             response_content: rule.response_content,
           });
           const expandedContent = expandVariables(resolved.content, { ...friend, metadata: resolvedMeta2 } as Parameters<typeof expandVariables>[1], workerUrl);
-          const replyMsg = buildMessage(resolved.messageType, expandedContent);
-          await lineClient.replyMessage(event.replyToken, [replyMsg]);
+          const replyMessages = buildAutoReplyMessages(resolved.messageType, expandedContent);
+          await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
+          await lineClient.replyMessage(event.replyToken, replyMessages);
           replyTokenConsumed = true;
 
           // 送信ログ（replyMessage = 無料）— derive content from the built
           // reply message so any cleanEmptyNodes / parse-failure fallback is
           // reflected in the dashboard.
-          const outLogId = crypto.randomUUID();
           const { messageToLogPayload: logPayload2 } = await import('../services/step-delivery.js');
-          const wbAutoReplyPayload = logPayload2(replyMsg);
-          await db
-            .prepare(
-              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, created_at)
-               VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?)`,
-            )
-            .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, jstNow())
-            .run();
+          for (const replyMsg of replyMessages) {
+            const outLogId = crypto.randomUUID();
+            const wbAutoReplyPayload = logPayload2(replyMsg);
+            await db
+              .prepare(
+                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+                 VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
+              )
+              .bind(outLogId, friend.id, wbAutoReplyPayload.messageType, wbAutoReplyPayload.content, lineAccountId ?? null, jstNow())
+              .run();
+          }
         } catch (err) {
           console.error('Failed to send auto-reply', err);
         }
@@ -664,7 +1034,7 @@ async function handleEvent(
 
     // auto_replies にマッチしなかった = 自発メッセージ → unread にする
     if (!matched) {
-      await upsertChatOnMessage(db, friend.id);
+      await upsertChatOnMessage(db, friend.id, lineAccountId);
     }
 
     // イベントバス発火: message_received
@@ -677,6 +1047,26 @@ async function handleEvent(
 
     return;
   }
+}
+
+async function logBlockedIncomingEvent(
+  db: D1Database,
+  friend: Friend,
+  event: WebhookEvent,
+  lineAccountId: string | null,
+): Promise<void> {
+  if (event.type !== 'message' && event.type !== 'postback') return;
+  const messageType = event.type === 'postback' ? 'text' : event.message.type;
+  const content = event.type === 'postback'
+    ? event.postback.data
+    : event.message.type === 'text' ? event.message.text : JSON.stringify(event.message);
+  await db.prepare(`
+    INSERT INTO messages_log (id, friend_id, direction, message_type, content,
+      broadcast_id, scenario_step_id, source, line_account_id, created_at)
+    VALUES (?, ?, 'incoming', ?, ?, NULL, NULL, ?, ?, ?)
+  `).bind(crypto.randomUUID(), friend.id, messageType, content,
+    event.type === 'postback' ? 'postback' : 'user', lineAccountId, jstNow()).run();
+  await upsertChatOnMessage(db, friend.id, lineAccountId);
 }
 
 /**
@@ -695,6 +1085,44 @@ async function resolveAutoReplyContent(
     }
   }
   return { messageType: rule.response_type, content: rule.response_content };
+}
+
+function buildAutoReplyMessages(
+  messageType: string,
+  messageContent: string,
+): ReturnType<typeof buildMessage>[] {
+  if (messageType !== 'text_image') {
+    return [buildMessage(messageType, messageContent)];
+  }
+
+  try {
+    const parsed = JSON.parse(messageContent) as {
+      text?: unknown;
+      image?: {
+        originalContentUrl?: unknown;
+        previewImageUrl?: unknown;
+      } | null;
+    };
+    const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+    const originalContentUrl = typeof parsed.image?.originalContentUrl === 'string'
+      ? parsed.image.originalContentUrl
+      : '';
+    const previewImageUrl = typeof parsed.image?.previewImageUrl === 'string'
+      ? parsed.image.previewImageUrl
+      : originalContentUrl;
+    const messages: ReturnType<typeof buildMessage>[] = [];
+
+    if (text) {
+      messages.push(buildMessage('text', text));
+    }
+    if (originalContentUrl) {
+      messages.push(buildMessage('image', JSON.stringify({ originalContentUrl, previewImageUrl })));
+    }
+
+    return messages.length > 0 ? messages : [buildMessage('text', messageContent)];
+  } catch {
+    return [buildMessage('text', messageContent)];
+  }
 }
 
 export { webhook };

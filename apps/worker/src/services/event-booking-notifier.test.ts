@@ -24,9 +24,83 @@ describe('renderEventNotificationText', () => {
     expect(text).toContain('変更・キャンセルは予約履歴画面');
   });
 
+  test('即時確定通知の末尾に教室からの案内を追加できる', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      messageExtra: ' 持ち物は水筒です。\nhttps://example.com/guide ',
+    });
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('持ち物は水筒です。');
+    expect(text).toContain('https://example.com/guide');
+    expect(text.endsWith('https://example.com/guide')).toBe(true);
+  });
+
+  test('キャンセル待ち受付は順位と48時間期限を案内する', () => {
+    const text = renderEventNotificationText('waitlisted', {
+      ...baseCtx,
+      waitlistPosition: 2,
+      cancelDeadlineHoursBefore: 48,
+    });
+    expect(text).toContain('キャンセル待ちを受け付けました');
+    expect(text).toContain('現在の順番: 2番目');
+    expect(text).toContain('開始48時間前まで');
+    expect(text).toContain('受付順に本予約へ自動で繰り上がります');
+  });
+
+  test('自動繰り上げは本予約確定とキャンセル期限を案内する', () => {
+    const text = renderEventNotificationText('waitlist_promoted', {
+      ...baseCtx,
+      cancelDeadlineHoursBefore: 48,
+    });
+    expect(text).toContain('本予約へ繰り上がりました');
+    expect(text).toContain('この予約は確定しています');
+    expect(text).toContain('キャンセルは開始48時間前まで');
+  });
+
+  test('受付メッセージに予約履歴URLを含められる', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      bookingHistoryUrl: 'https://liff.line.me/2000000000-abc?page=event-me',
+    });
+    expect(text).toContain('予約履歴はこちら');
+    expect(text).toContain('https://liff.line.me/2000000000-abc?page=event-me');
+    expect(text).not.toContain('面談予約はこちら');
+  });
+
+  test('複数日程は1通の中でまとめて表示できる', () => {
+    const text = renderEventNotificationText('received_pending', {
+      ...baseCtx,
+      startsAtJstList: ['2026-06-01 10:00', '2026-06-02 10:00'],
+      bookingHistoryUrl: 'https://liff.line.me/2000000000-abc?page=event-me',
+    });
+    expect(text).toContain('日時:\n・2026-06-01 10:00\n・2026-06-02 10:00');
+    expect(text).toContain('予約履歴はこちら');
+  });
+
   test('後追い承認確定', () => {
     const text = renderEventNotificationText('confirmed', baseCtx);
     expect(text).toContain('予約が確定しました');
+  });
+
+  test('後追い承認時に運営コメントとURLを追加できる', () => {
+    const text = renderEventNotificationText('confirmed', {
+      ...baseCtx,
+      approvalComment: '事前にこちらをご確認ください。\nhttps://example.com/preparation',
+    });
+    expect(text).toContain('運営からのご案内:');
+    expect(text).toContain('事前にこちらをご確認ください。');
+    expect(text).toContain('https://example.com/preparation');
+    expect(text.indexOf('運営からのご案内:')).toBeLessThan(
+      text.indexOf('変更・キャンセルは予約履歴画面'),
+    );
+  });
+
+  test('受付時は承認コメントを表示しない', () => {
+    const text = renderEventNotificationText('received_pending', {
+      ...baseCtx,
+      approvalComment: '承認後だけ表示するコメント',
+    });
+    expect(text).not.toContain('承認後だけ表示するコメント');
   });
 
   test('拒否は固定文面（reason は含まない）', () => {
@@ -42,17 +116,33 @@ describe('renderEventNotificationText', () => {
   });
 
   test('前日リマインダ', () => {
-    const text = renderEventNotificationText('reminder_day_before', baseCtx);
+    const text = renderEventNotificationText('reminder_day_before', {
+      ...baseCtx,
+      messageExtra: '入口で受付をお願いします。',
+    });
     expect(text).toContain('明日イベントが開催');
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('入口で受付をお願いします。');
   });
 
   test('開始 N 時間前リマインダ', () => {
     const text = renderEventNotificationText('reminder_hours_before', {
       ...baseCtx,
       hoursBefore: 2,
+      messageExtra: 'お気をつけてお越しください。',
     });
     expect(text).toContain('まもなくイベント開始');
     expect(text).toContain('あと 2 時間');
+    expect(text).toContain('教室からのご案内:');
+    expect(text).toContain('お気をつけてお越しください。');
+  });
+
+  test('空白だけの追加案内では見出しを表示しない', () => {
+    const text = renderEventNotificationText('received_confirmed', {
+      ...baseCtx,
+      messageExtra: '   \n  ',
+    });
+    expect(text).not.toContain('教室からのご案内:');
   });
 
   test('venue が無くてもクラッシュしない', () => {

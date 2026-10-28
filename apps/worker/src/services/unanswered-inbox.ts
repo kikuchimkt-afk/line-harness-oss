@@ -178,6 +178,7 @@ export interface UnansweredCount {
 export interface UnansweredInboxOptions {
   q?: string;
   account?: string;
+  accountIds?: readonly string[];
   minWaitMinutes?: number;
   page?: number;
   pageSize?: number;
@@ -203,6 +204,10 @@ interface RawIncomingRow {
 
 function applyFilters(rows: UnansweredRow[], opts: UnansweredInboxOptions): UnansweredRow[] {
   let filtered = rows;
+  if (opts.accountIds) {
+    const allowed = new Set(opts.accountIds);
+    filtered = filtered.filter((r) => allowed.has(r.accountId));
+  }
   if (opts.account) {
     filtered = filtered.filter((r) => r.accountId === opts.account);
   }
@@ -326,13 +331,19 @@ export async function computeUnansweredInbox(
  * /api/chats?unansweredOnly=true で chat list を絞るのに使う。
  * 判定ロジックは getAllUnansweredRows と同じ source of truth。
  */
-export async function getUnansweredFriendIds(db: D1Database): Promise<Set<string>> {
-  const rows = await getAllUnansweredRows(db);
+export async function getUnansweredFriendIds(
+  db: D1Database,
+  opts: Pick<UnansweredInboxOptions, 'account' | 'accountIds'> = {},
+): Promise<Set<string>> {
+  const rows = applyFilters(await getAllUnansweredRows(db), opts);
   return new Set(rows.map((r) => r.friendId));
 }
 
-export async function countUnanswered(db: D1Database): Promise<UnansweredCount> {
-  const allRows = await getAllUnansweredRows(db);
+export async function countUnanswered(
+  db: D1Database,
+  opts: Pick<UnansweredInboxOptions, 'account' | 'accountIds'> = {},
+): Promise<UnansweredCount> {
+  const allRows = applyFilters(await getAllUnansweredRows(db), opts);
 
   const byAccountMap = new Map<string, { accountName: string; count: number }>();
   let oldest: string | null = null;

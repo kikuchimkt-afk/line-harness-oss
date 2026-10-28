@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { Tag } from '@line-crm/shared'
-import { api, eventsApi, type ApiBroadcast, type EventListItem } from '@/lib/api'
+import { api, eventsApi, type ApiBroadcast, type EventListItem, type FriendListItem } from '@/lib/api'
 import { useAccount } from '@/contexts/account-context'
 import FlexPreviewComponent from '@/components/flex-preview'
 import ImageUploader from '@/components/shared/image-uploader'
@@ -26,6 +27,7 @@ interface FormState {
   messageContent: string
   targetType: ApiBroadcast['targetType']
   targetTagId: string
+  targetFriendIds: string[]
   scheduledAt: string
   sendNow: boolean
   accountIds: string[]
@@ -34,23 +36,14 @@ interface FormState {
 
 export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFormProps) {
   const { selectedAccountId } = useAccount()
-  // 「リンクするイベント」セレクタ用: 公開中の events を取得して
-  // 選択された event の LIFF URL (テンプレ) を message に挿入する。
   const [linkableEvents, setLinkableEvents] = useState<EventListItem[]>([])
-  useEffect(() => {
-    if (!selectedAccountId) return
-    let cancelled = false
-    eventsApi.listEvents(selectedAccountId)
-      .then((r) => { if (!cancelled) setLinkableEvents(r.items.filter((e) => e.is_published === 1)) })
-      .catch(() => { /* silent */ })
-    return () => { cancelled = true }
-  }, [selectedAccountId])
   const [form, setForm] = useState<FormState>({
     title: '',
     messageType: 'text',
     messageContent: '',
     targetType: 'all',
     targetTagId: '',
+    targetFriendIds: [],
     scheduledAt: '',
     sendNow: true,
     accountIds: [],
@@ -58,6 +51,98 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [recipientSearch, setRecipientSearch] = useState('')
+  const [recipientTagId, setRecipientTagId] = useState('')
+  const [recipientItems, setRecipientItems] = useState<FriendListItem[]>([])
+  const [recipientLoading, setRecipientLoading] = useState(false)
+  const [recipientError, setRecipientError] = useState('')
+
+  useEffect(() => {
+    if (!selectedAccountId) return
+    let cancelled = false
+    eventsApi.listEvents(selectedAccountId)
+      .then((r) => {
+        if (!cancelled) setLinkableEvents(r.items.filter((e) => e.is_published === 1))
+      })
+      .catch(() => {
+        if (!cancelled) setLinkableEvents([])
+      })
+    return () => { cancelled = true }
+  }, [selectedAccountId])
+
+  useEffect(() => {
+    if (form.targetType !== 'friends' || !selectedAccountId) return
+
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setRecipientLoading(true)
+      setRecipientError('')
+      api.friends.list({
+        accountId: selectedAccountId,
+        search: recipientSearch.trim() || undefined,
+        tagId: recipientTagId || undefined,
+        includeTags: true,
+        includeChatStatus: false,
+        limit: 500,
+        sort: 'oldest',
+      })
+        .then((res) => {
+          if (cancelled) return
+          if (res.success) {
+            setRecipientItems(res.data.items)
+          } else {
+            setRecipientError(res.error || '友だちの取得に失敗しました')
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setRecipientError('友だちの取得に失敗しました')
+        })
+        .finally(() => {
+          if (!cancelled) setRecipientLoading(false)
+        })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [form.targetType, selectedAccountId, recipientSearch, recipientTagId])
+
+  const selectedFriendSet = useMemo(() => new Set(form.targetFriendIds), [form.targetFriendIds])
+  const selectableFriends = useMemo(
+    () => recipientItems.filter((friend) => friend.isFollowing),
+    [recipientItems],
+  )
+
+  const setTargetType = (targetType: ApiBroadcast['targetType']) => {
+    setForm((prev) => ({
+      ...prev,
+      targetType,
+      targetTagId: targetType === 'tag' || targetType === 'multi-account-dedup' ? prev.targetTagId : '',
+      targetFriendIds: targetType === 'friends' ? prev.targetFriendIds : [],
+    }))
+  }
+
+  const toggleFriend = (friendId: string) => {
+    setForm((prev) => {
+      const next = new Set(prev.targetFriendIds)
+      if (next.has(friendId)) next.delete(friendId)
+      else next.add(friendId)
+      return { ...prev, targetFriendIds: Array.from(next) }
+    })
+  }
+
+  const selectVisibleFriends = () => {
+    setForm((prev) => {
+      const next = new Set(prev.targetFriendIds)
+      selectableFriends.forEach((friend) => next.add(friend.id))
+      return { ...prev, targetFriendIds: Array.from(next) }
+    })
+  }
+
+  const clearSelectedFriends = () => {
+    setForm((prev) => ({ ...prev, targetFriendIds: [] }))
+  }
 
   const handleSave = async () => {
     if (!form.title.trim()) { setError('配信タイトルを入力してください'); return }
@@ -65,12 +150,20 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
     if (form.messageType === 'flex') {
       try { JSON.parse(form.messageContent) } catch { setError('FlexメッセージのJSONが無効です'); return }
     }
+    if (form.targetType === 'tag' && !form.targetTagId) {
+      setError('対象タグを選択してください')
+      return
+    }
+    if (form.targetType === 'friends' && form.targetFriendIds.length === 0) {
+      setError('送信する友だちを1人以上選択してください')
+      return
+    }
     if (!form.sendNow && !form.scheduledAt) {
       setError('予約配信の場合は配信日時を指定してください')
       return
     }
     if (form.targetType === 'multi-account-dedup' && form.accountIds.length === 0) {
-      setError('複数アカ重複除外: 配信先アカウントを 1 つ以上選択してください')
+      setError('複数アカ重複除外の配信先アカウントを1つ以上選択してください')
       return
     }
 
@@ -82,7 +175,6 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
         messageType: form.messageType,
         messageContent: form.messageContent,
         targetType: form.targetType,
-        // tag mode: required; multi-account-dedup mode: optional narrowing filter; else: null
         targetTagId:
           form.targetType === 'tag'
             ? form.targetTagId || null
@@ -93,8 +185,7 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
         lineAccountId: form.targetType === 'multi-account-dedup' ? null : (selectedAccountId || null),
         accountIds: form.targetType === 'multi-account-dedup' ? form.accountIds : undefined,
         dedupPriority: form.targetType === 'multi-account-dedup' ? form.dedupPriority : undefined,
-        // datetime-local returns YYYY-MM-DDTHH:mm in JST wall-clock time
-        // Append +09:00 so new Date() parses correctly for epoch comparisons
+        targetFriendIds: form.targetType === 'friends' ? form.targetFriendIds : undefined,
         scheduledAt: form.sendNow || !form.scheduledAt
           ? null
           : form.scheduledAt + ':00.000+09:00',
@@ -112,28 +203,26 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+    <div className="bg-white/82 backdrop-blur rounded-lg shadow-sm border border-pink-200 p-6 mb-6">
       <h2 className="text-sm font-semibold text-gray-800 mb-5">新規配信を作成</h2>
 
-      <div className="space-y-4 max-w-lg">
-        {/* Title */}
+      <div className="space-y-4 max-w-2xl">
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">
-            配信タイトル <span className="text-red-500">*</span>
+            配信タイトル <span className="text-pink-500">*</span>
           </label>
           <input
             type="text"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+            className="w-full border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white/80 focus:outline-none focus:ring-2 focus:ring-pink-200"
             placeholder="例: 3月のキャンペーン告知"
             value={form.title}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
           />
         </div>
 
-        {/* Message type */}
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-2">メッセージ種別</label>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {(Object.keys(messageTypeLabels) as ApiBroadcast['messageType'][]).map((type) => (
               <button
                 key={type}
@@ -141,8 +230,8 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
                 onClick={() => setForm({ ...form, messageType: type })}
                 className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
                   form.messageType === type
-                    ? 'border-green-500 text-green-700 bg-green-50'
-                    : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
+                    ? 'border-pink-300 text-pink-700 bg-pink-50'
+                    : 'border-pink-100 text-gray-600 bg-white/80 hover:border-pink-200'
                 }`}
               >
                 {messageTypeLabels[type]}
@@ -151,16 +240,14 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
           </div>
         </div>
 
-        {/* Message content */}
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">
-            メッセージ内容 <span className="text-red-500">*</span>
+            メッセージ内容 <span className="text-pink-500">*</span>
             {(form.messageType === 'flex' || form.messageType === 'image') && (
               <span className="ml-1 text-gray-400">(JSON形式)</span>
             )}
           </label>
 
-          {/* Image helper: ImageUploader that auto-generates the required LINE image JSON */}
           {form.messageType === 'image' && (
             <div className="mb-2">
               <ImageUploader
@@ -169,14 +256,26 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
                   try {
                     const parsed = JSON.parse(form.messageContent) as { originalContentUrl?: string; previewImageUrl?: string }
                     if (parsed.originalContentUrl) {
-                      return { mode: 'line-image' as const, originalContentUrl: parsed.originalContentUrl, previewImageUrl: parsed.previewImageUrl ?? parsed.originalContentUrl }
+                      return {
+                        mode: 'line-image' as const,
+                        originalContentUrl: parsed.originalContentUrl,
+                        previewImageUrl: parsed.previewImageUrl ?? parsed.originalContentUrl,
+                      }
                     }
-                  } catch { /* ignore */ }
+                  } catch {
+                    // ignore
+                  }
                   return null
                 })()}
                 onChange={(v) => {
                   if (v?.mode === 'line-image') {
-                    setForm((prev) => ({ ...prev, messageContent: JSON.stringify({ originalContentUrl: v.originalContentUrl, previewImageUrl: v.previewImageUrl }) }))
+                    setForm((prev) => ({
+                      ...prev,
+                      messageContent: JSON.stringify({
+                        originalContentUrl: v.originalContentUrl,
+                        previewImageUrl: v.previewImageUrl,
+                      }),
+                    }))
                   } else {
                     setForm((prev) => ({ ...prev, messageContent: '' }))
                   }
@@ -186,7 +285,6 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
             </div>
           )}
 
-          {/* リンクするイベント: 選択で {{liff_id}} 入りテンプレ URL を本文末尾に挿入 */}
           {linkableEvents.length > 0 && form.messageType === 'text' && (
             <div className="mb-2">
               <label className="block text-xs font-medium text-gray-600 mb-1">
@@ -200,15 +298,13 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
                   const url = `https://liff.line.me/{{liff_id}}/?page=event&id=${id}`
                   setForm((prev) => ({
                     ...prev,
-                    messageContent: prev.messageContent
-                      ? `${prev.messageContent}\n${url}`
-                      : url,
+                    messageContent: prev.messageContent ? `${prev.messageContent}\n${url}` : url,
                   }))
                   e.target.value = ''
                 }}
-                className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+                className="border border-pink-200 rounded-lg px-2 py-1.5 text-sm w-full bg-white/80"
               >
-                <option value="">— 選択しない —</option>
+                <option value="">-- 選択しない --</option>
                 {linkableEvents.map((ev) => (
                   <option key={ev.id} value={ev.id}>
                     {ev.name} ({ev.target_type === 'multi-account-dedup' ? 'multi' : 'single'})
@@ -216,12 +312,13 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
                 ))}
               </select>
               <p className="text-xs text-gray-500 mt-1">
-                選ぶと本文末尾にテンプレ URL を挿入。{'{{liff_id}}'} は配信時に各友だちのアカに対応した値に自動置換されます。
+                選ぶと本文末尾にイベントURLを挿入します。
               </p>
             </div>
           )}
+
           <textarea
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-y"
+            className="w-full border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white/80 focus:outline-none focus:ring-2 focus:ring-pink-200 resize-y"
             rows={form.messageType === 'flex' ? 8 : form.messageType === 'image' ? 3 : 4}
             placeholder={
               form.messageType === 'text'
@@ -235,7 +332,7 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
             style={{ fontFamily: form.messageType !== 'text' ? 'monospace' : 'inherit' }}
           />
           {form.messageType === 'image' && (
-            <p className="text-xs text-gray-400 mt-1">上のURLフォームか、直接JSONを編集できます</p>
+            <p className="text-xs text-gray-400 mt-1">上のURLフォームか、直接JSONを編集できます。</p>
           )}
           {form.messageType === 'flex' && form.messageContent && (() => {
             try { JSON.parse(form.messageContent); return true } catch { return false }
@@ -247,47 +344,26 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
           )}
         </div>
 
-        {/* Target */}
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-2">配信対象</label>
           <div className="flex flex-wrap gap-2 mb-2">
-            <button
-              type="button"
-              onClick={() => setForm({ ...form, targetType: 'all', targetTagId: '' })}
-              className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
-                form.targetType === 'all'
-                  ? 'border-green-500 text-green-700 bg-green-50'
-                  : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
-              }`}
-            >
+            <TargetButton active={form.targetType === 'all'} onClick={() => setTargetType('all')}>
               全員
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm({ ...form, targetType: 'tag' })}
-              className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
-                form.targetType === 'tag'
-                  ? 'border-green-500 text-green-700 bg-green-50'
-                  : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
-              }`}
-            >
+            </TargetButton>
+            <TargetButton active={form.targetType === 'friends'} onClick={() => setTargetType('friends')}>
+              送信先を選択
+            </TargetButton>
+            <TargetButton active={form.targetType === 'tag'} onClick={() => setTargetType('tag')}>
               タグで絞り込み
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm({ ...form, targetType: 'multi-account-dedup', targetTagId: '' })}
-              className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
-                form.targetType === 'multi-account-dedup'
-                  ? 'border-green-500 text-green-700 bg-green-50'
-                  : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
-              }`}
-            >
+            </TargetButton>
+            <TargetButton active={form.targetType === 'multi-account-dedup'} onClick={() => setTargetType('multi-account-dedup')}>
               複数アカ重複除外
-            </button>
+            </TargetButton>
           </div>
+
           {form.targetType === 'tag' && (
             <select
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
+              className="w-full border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white/80 focus:outline-none focus:ring-2 focus:ring-pink-200"
               value={form.targetTagId}
               onChange={(e) => setForm({ ...form, targetTagId: e.target.value })}
             >
@@ -297,6 +373,98 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
               ))}
             </select>
           )}
+
+          {form.targetType === 'friends' && (
+            <div className="rounded-lg border border-pink-200 bg-white/70 p-3 space-y-3">
+              <div className="grid gap-2 md:grid-cols-[1fr_180px]">
+                <input
+                  type="search"
+                  value={recipientSearch}
+                  onChange={(e) => setRecipientSearch(e.target.value)}
+                  placeholder="友だち名を検索"
+                  className="border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-pink-200"
+                />
+                <select
+                  value={recipientTagId}
+                  onChange={(e) => setRecipientTagId(e.target.value)}
+                  className="border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-pink-200"
+                >
+                  <option value="">すべてのタグ</option>
+                  {tags.map((tag) => (
+                    <option key={tag.id} value={tag.id}>{tag.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectVisibleFriends}
+                  disabled={selectableFriends.length === 0}
+                  className="px-3 py-1.5 min-h-[40px] text-xs font-medium rounded-md border border-pink-200 text-pink-700 bg-pink-50 hover:bg-pink-100 disabled:opacity-50"
+                >
+                  表示中を全員選択
+                </button>
+                <button
+                  type="button"
+                  onClick={clearSelectedFriends}
+                  disabled={form.targetFriendIds.length === 0}
+                  className="px-3 py-1.5 min-h-[40px] text-xs font-medium rounded-md border border-gray-200 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50"
+                >
+                  全員解除
+                </button>
+                <span className="text-xs text-gray-500">
+                  選択中 {form.targetFriendIds.length.toLocaleString('ja-JP')}人
+                  {selectableFriends.length > 0 && ` / 表示中 ${selectableFriends.length.toLocaleString('ja-JP')}人`}
+                </span>
+              </div>
+
+              <div className="max-h-72 overflow-y-auto rounded-lg border border-pink-100 bg-white">
+                {recipientLoading ? (
+                  <div className="p-4 text-sm text-gray-500">読み込み中...</div>
+                ) : recipientError ? (
+                  <div className="p-4 text-sm text-red-600">{recipientError}</div>
+                ) : selectableFriends.length === 0 ? (
+                  <div className="p-4 text-sm text-gray-500">対象の友だちは見つかりませんでした。</div>
+                ) : (
+                  selectableFriends.map((friend) => (
+                    <label
+                      key={friend.id}
+                      className="flex items-center gap-3 border-b border-pink-50 px-3 py-2 last:border-b-0 hover:bg-pink-50/60"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedFriendSet.has(friend.id)}
+                        onChange={() => toggleFriend(friend.id)}
+                        className="h-4 w-4 accent-pink-500"
+                      />
+                      {friend.pictureUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={friend.pictureUrl} alt="" className="h-9 w-9 rounded-full object-cover" />
+                      ) : (
+                        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-pink-100 text-xs font-semibold text-pink-600">
+                          {friend.displayName?.slice(0, 1) || '?'}
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-gray-800">{friend.displayName || '名前なし'}</span>
+                        {friend.tags.length > 0 && (
+                          <span className="mt-0.5 flex flex-wrap gap-1">
+                            {friend.tags.slice(0, 3).map((tag) => (
+                              <span key={tag.id} className="rounded-full bg-pink-50 px-2 py-0.5 text-[10px] text-pink-700">
+                                {tag.name}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
           {form.targetType === 'multi-account-dedup' && (
             <MultiAccountDedupSection
               accountIds={form.accountIds}
@@ -310,65 +478,69 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
           )}
         </div>
 
-        {/* Schedule */}
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-2">配信タイミング</label>
           <div className="flex flex-wrap gap-2 mb-2">
-            <button
-              type="button"
-              onClick={() => setForm({ ...form, sendNow: true, scheduledAt: '' })}
-              className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
-                form.sendNow
-                  ? 'border-green-500 text-green-700 bg-green-50'
-                  : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
-              }`}
-            >
+            <TargetButton active={form.sendNow} onClick={() => setForm({ ...form, sendNow: true, scheduledAt: '' })}>
               下書きとして保存
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm({ ...form, sendNow: false })}
-              className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
-                !form.sendNow
-                  ? 'border-green-500 text-green-700 bg-green-50'
-                  : 'border-gray-300 text-gray-600 bg-white hover:border-gray-400'
-              }`}
-            >
+            </TargetButton>
+            <TargetButton active={!form.sendNow} onClick={() => setForm({ ...form, sendNow: false })}>
               予約配信
-            </button>
+            </TargetButton>
           </div>
           {!form.sendNow && (
             <input
               type="datetime-local"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              className="w-full border border-pink-200 rounded-lg px-3 py-2 text-sm bg-white/80 focus:outline-none focus:ring-2 focus:ring-pink-200"
               value={form.scheduledAt}
               onChange={(e) => setForm({ ...form, scheduledAt: e.target.value })}
             />
           )}
         </div>
 
-        {/* Error */}
         {error && <p className="text-xs text-red-600">{error}</p>}
 
-        {/* Actions */}
         <div className="flex gap-2 pt-1">
           <button
             onClick={handleSave}
             disabled={saving}
-            className="px-4 py-2 min-h-[44px] text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-opacity"
-            style={{ backgroundColor: '#06C755' }}
+            className="px-4 py-2 min-h-[44px] text-sm font-medium text-pink-700 bg-pink-100 hover:bg-pink-200 rounded-lg disabled:opacity-50 transition-colors"
           >
             {saving ? '作成中...' : '作成'}
           </button>
           <button
             onClick={onCancel}
             disabled={saving}
-            className="px-4 py-2 min-h-[44px] text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+            className="px-4 py-2 min-h-[44px] text-sm font-medium text-gray-600 bg-white/80 hover:bg-gray-100 rounded-lg border border-gray-200 transition-colors"
           >
             キャンセル
           </button>
         </div>
       </div>
     </div>
+  )
+}
+
+function TargetButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-1.5 min-h-[44px] text-xs font-medium rounded-md border transition-colors ${
+        active
+          ? 'border-pink-300 text-pink-700 bg-pink-50'
+          : 'border-pink-100 text-gray-600 bg-white/80 hover:border-pink-200'
+      }`}
+    >
+      {children}
+    </button>
   )
 }

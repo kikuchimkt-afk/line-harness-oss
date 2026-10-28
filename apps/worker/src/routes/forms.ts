@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import {
   getForms,
   getFormsWithStats,
@@ -8,18 +8,37 @@ import {
   deleteForm,
   getFormSubmissions,
   createFormSubmission,
+  deleteFormSubmission,
   jstNow,
 } from '@line-crm/db';
-import { getFriendByLineUserId, getFriendById } from '@line-crm/db';
-import { addTagToFriend, enrollFriendInScenario } from '@line-crm/db';
+import { getFriendById } from '@line-crm/db';
+import { enrollFriendInScenario } from '@line-crm/db';
 import type {
   Form as DbForm,
   FormSubmission as DbFormSubmission,
   FormUsedByAccount,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
+import { resolveFormCallerFriend } from '../services/form-caller-auth.js';
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
+import { addTagWithBlockEnforcement } from '../services/block-tag-attach.js';
 
 const forms = new Hono<Env>();
+const FORM_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
+const FORM_NOTICE_MAX_ANSWERS = 8;
+const FORM_NOTICE_VALUE_MAX_LENGTH = 160;
+
+async function resolveCustomerFormFriend(c: Context<Env>) {
+  const caller = await resolveFormCallerFriend(c.env.DB, c.req.header('Authorization'), c.env.LINE_LOGIN_CHANNEL_ID);
+  if (!caller.authenticated) {
+    return { friend: null, error: c.json({ success: false, error: 'LINEのログイン情報を確認できませんでした。公式LINEから開き直してください。' }, 401) };
+  }
+  if (!caller.friend) return { friend: null, error: c.json({ success: false, error: 'Friend not found' }, 404) };
+  if (await isFriendBlocked(c.env.DB, caller.friend.id, caller.friend.line_account_id)) {
+    return { friend: null, error: c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403) };
+  }
+  return { friend: caller.friend, error: null };
+}
 
 function serializeForm(
   row: DbForm,
@@ -56,6 +75,120 @@ function serializeSubmission(row: DbFormSubmission & { friend_name?: string | nu
     data: JSON.parse(row.data || '{}') as Record<string, unknown>,
     createdAt: row.created_at,
   };
+}
+
+type FormFieldForNotice = {
+  name: string;
+  label: string;
+};
+
+type FormNoticeRecipient = {
+  id: string;
+  line_user_id: string;
+};
+
+function formatNoticeValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-';
+  const text = Array.isArray(value)
+    ? value.join(', ')
+    : typeof value === 'object'
+      ? JSON.stringify(value)
+      : String(value);
+  return text.length > FORM_NOTICE_VALUE_MAX_LENGTH
+    ? `${text.slice(0, FORM_NOTICE_VALUE_MAX_LENGTH)}...`
+    : text;
+}
+
+async function notifyFormSubmissionRecipients(
+  db: D1Database,
+  defaultAccessToken: string,
+  params: {
+    formName: string;
+    formFields: FormFieldForNotice[];
+    friendId: string;
+    submissionData: Record<string, unknown>;
+  },
+): Promise<void> {
+  try {
+    const friend = await getFriendById(db, params.friendId);
+    if (!friend) return;
+    const lineAccountId = (friend as unknown as { line_account_id?: string | null }).line_account_id;
+    if (!lineAccountId) return;
+
+    const setting = await db
+      .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+      .bind(lineAccountId, FORM_NOTICE_RECIPIENTS_KEY)
+      .first<{ value: string | null }>();
+
+    let recipientIds: string[] = [];
+    if (setting?.value) {
+      try {
+        const parsed = JSON.parse(setting.value);
+        recipientIds = Array.isArray(parsed)
+          ? parsed
+              .filter((id): id is string => typeof id === 'string')
+              .map((id) => id.trim())
+              .filter((id) => id.length > 0 && id !== params.friendId)
+          : [];
+      } catch {
+        recipientIds = [];
+      }
+    }
+    recipientIds = [...new Set(recipientIds)];
+    if (recipientIds.length === 0) return;
+
+    const account = await db
+      .prepare(`SELECT name, channel_access_token FROM line_accounts WHERE id = ?`)
+      .bind(lineAccountId)
+      .first<{ name: string | null; channel_access_token: string | null }>();
+
+    const placeholders = recipientIds.map(() => '?').join(',');
+    const recipients = await db
+      .prepare(
+        `SELECT id, line_user_id
+         FROM friends
+         WHERE line_account_id = ?
+           AND is_following = 1
+           AND id IN (${placeholders})`,
+      )
+      .bind(lineAccountId, ...recipientIds)
+      .all<FormNoticeRecipient>();
+    if (recipients.results.length === 0) return;
+
+    const fieldLabelByName = new Map(params.formFields.map((field) => [field.name, field.label]));
+    const answerLines = Object.entries(params.submissionData)
+      .slice(0, FORM_NOTICE_MAX_ANSWERS)
+      .map(([key, value]) => {
+        const label = fieldLabelByName.get(key) || key;
+        return `・${label}: ${formatNoticeValue(value)}`;
+      });
+
+    const text = [
+      '📝 フォームが送信されました',
+      '',
+      `アカウント：${account?.name ?? 'LINE公式アカウント'}`,
+      `フォーム：${params.formName}`,
+      `回答者：${friend.display_name || '名前なし'}`,
+      '',
+      ...answerLines,
+      '',
+      'L Harnessのフォーム回答で確認してください。',
+    ].join('\n');
+
+    const { LineClient } = await import('@line-crm/line-sdk');
+    const lineClient = new LineClient(account?.channel_access_token || defaultAccessToken);
+
+    for (const recipient of recipients.results) {
+      try {
+        if (await isFriendBlocked(db, recipient.id, lineAccountId)) continue;
+        await lineClient.pushTextMessage(recipient.line_user_id, text);
+      } catch (err) {
+        console.error(`[forms] submit notice failed recipient=${recipient.id}`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[forms] submit notice failed', err);
+  }
 }
 
 // GET /api/forms — list all forms (with submission stats + delivering accounts)
@@ -213,20 +346,35 @@ forms.get('/api/forms/:id/submissions', async (c) => {
   }
 });
 
-// POST /api/forms/:id/opened — record form open event (public, used by LIFF)
+// DELETE /api/forms/:formId/submissions/:submissionId — delete one submission
+forms.delete('/api/forms/:formId/submissions/:submissionId', async (c) => {
+  try {
+    const formId = c.req.param('formId');
+    const submissionId = c.req.param('submissionId');
+    const form = await getFormById(c.env.DB, formId);
+    if (!form) {
+      return c.json({ success: false, error: 'Form not found' }, 404);
+    }
+
+    const deleted = await deleteFormSubmission(c.env.DB, formId, submissionId);
+    if (!deleted) {
+      return c.json({ success: false, error: 'Submission not found' }, 404);
+    }
+
+    return c.json({ success: true, data: null });
+  } catch (err) {
+    console.error('DELETE /api/forms/:formId/submissions/:submissionId error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
+// POST /api/forms/:id/opened — record an authenticated LIFF form open.
 forms.post('/api/forms/:id/opened', async (c) => {
   try {
     const formId = c.req.param('id');
-    const body = await c.req.json<{ lineUserId?: string; friendId?: string }>();
-    const lineUserId = body.lineUserId;
-    const friendId = body.friendId;
-
-    // Resolve friend
-    let friend = friendId
-      ? await getFriendById(c.env.DB, friendId)
-      : lineUserId
-        ? await getFriendByLineUserId(c.env.DB, lineUserId)
-        : null;
+    const caller = await resolveCustomerFormFriend(c);
+    if (caller.error) return caller.error;
+    const friend = caller.friend;
 
     const now = jstNow();
     await c.env.DB.prepare(
@@ -242,22 +390,18 @@ forms.post('/api/forms/:id/opened', async (c) => {
     return c.json({ success: true });
   } catch (err) {
     console.error('POST /api/forms/:id/opened error:', err);
-    return c.json({ success: true }); // non-blocking, always succeed
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
-// POST /api/forms/:id/partial — save survey answers without x_username (public, used by LIFF page 1)
+// POST /api/forms/:id/partial — save authenticated LIFF page-1 survey answers.
 forms.post('/api/forms/:id/partial', async (c) => {
   try {
     const formId = c.req.param('id');
+    const caller = await resolveCustomerFormFriend(c);
+    if (caller.error) return caller.error;
     const body = await c.req.json<{ lineUserId?: string; friendId?: string; data?: Record<string, unknown> }>();
-
-    // Resolve friend
-    let friend = body.friendId
-      ? await getFriendById(c.env.DB, body.friendId)
-      : body.lineUserId
-        ? await getFriendByLineUserId(c.env.DB, body.lineUserId)
-        : null;
+    const friend = caller.friend;
 
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
@@ -277,10 +421,12 @@ forms.post('/api/forms/:id/partial', async (c) => {
   }
 });
 
-// POST /api/forms/:id/submit — submit form (public, used by LIFF)
+// POST /api/forms/:id/submit — submit an authenticated LIFF form.
 forms.post('/api/forms/:id/submit', async (c) => {
   try {
     const formId = c.req.param('id');
+    const caller = await resolveCustomerFormFriend(c);
+    if (caller.error) return caller.error;
     const form = await getFormById(c.env.DB, formId);
     if (!form) {
       return c.json({ success: false, error: 'Form not found' }, 404);
@@ -319,14 +465,8 @@ forms.post('/api/forms/:id/submit', async (c) => {
       }
     }
 
-    // Resolve friend by lineUserId or friendId
-    let friendId: string | null = body.friendId ?? null;
-    if (!friendId && body.lineUserId) {
-      const friend = await getFriendByLineUserId(c.env.DB, body.lineUserId);
-      if (friend) {
-        friendId = friend.id;
-      }
-    }
+    // Never accept a caller-supplied friend/LINE ID for a customer write.
+    const friendId = caller.friend!.id;
 
     // Webhook gate — skip if client pre-verified via repliers endpoint
     delete submissionData._webhookVerified;
@@ -336,6 +476,10 @@ forms.post('/api/forms/:id/submit', async (c) => {
     if (form.on_submit_webhook_url && !skipWebhook) {
       const webhookResult = await callFormWebhook(form, submissionData);
       webhookData = webhookResult.data as Record<string, unknown> | null;
+      // An external gate may take time; recheck before storing or responding.
+      if (await isFriendBlocked(c.env.DB, friendId, caller.friend!.line_account_id)) {
+        return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+      }
       if (!webhookResult.passed) {
         // Webhook rejected — send fail message and stop
         if (form.on_submit_webhook_fail_message && friendId) {
@@ -350,6 +494,9 @@ forms.post('/api/forms/:id/submit', async (c) => {
                 if (account) accessToken = account.channel_access_token;
               }
               const lineClient = new LineClient(accessToken);
+              if (await isFriendBlocked(c.env.DB, friend.id, friend.line_account_id)) {
+                return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+              }
               await lineClient.pushMessage(friend.line_user_id, [{ type: 'text', text: form.on_submit_webhook_fail_message }]);
               await c.env.DB
                 .prepare(
@@ -373,7 +520,10 @@ forms.post('/api/forms/:id/submit', async (c) => {
       }
     }
 
-    // Save submission (friendId null if not resolved — avoids FK constraint)
+    if (await isFriendBlocked(c.env.DB, friendId, caller.friend!.line_account_id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
+    // Save only the verified caller's submission.
     const submission = await createFormSubmission(c.env.DB, {
       formId,
       friendId: friendId || null,
@@ -384,6 +534,15 @@ forms.post('/api/forms/:id/submit', async (c) => {
     if (friendId) {
       const db = c.env.DB;
       const now = jstNow();
+
+      // Apply control tags before launching concurrent side effects. Otherwise
+      // a form could enroll or confirm after its own block tag was attached.
+      if (form.on_submit_tag_id) {
+        await addTagWithBlockEnforcement(db, friendId, form.on_submit_tag_id);
+      }
+      if (await isFriendBlocked(db, friendId, caller.friend!.line_account_id)) {
+        return c.json({ success: true, data: serializeSubmission(submission) }, 201);
+      }
 
       // Resolve reward template per-campaign.
       //
@@ -416,12 +575,22 @@ forms.post('/api/forms/:id/submit', async (c) => {
 
       const sideEffects: Promise<unknown>[] = [];
 
+      sideEffects.push(
+        notifyFormSubmissionRecipients(db, c.env.LINE_CHANNEL_ACCESS_TOKEN, {
+          formName: form.name,
+          formFields: fields,
+          friendId,
+          submissionData,
+        }),
+      );
+
       // Save response data to friend's metadata
       if (form.save_to_metadata) {
         sideEffects.push(
           (async () => {
             const friend = await getFriendById(db, friendId!);
             if (!friend) return;
+            if (await isFriendBlocked(db, friend.id, friend.line_account_id)) return;
             const existing = JSON.parse(friend.metadata || '{}') as Record<string, unknown>;
             const merged = { ...existing, ...submissionData };
             await db
@@ -432,14 +601,13 @@ forms.post('/api/forms/:id/submit', async (c) => {
         );
       }
 
-      // Add tag
-      if (form.on_submit_tag_id) {
-        sideEffects.push(addTagToFriend(db, friendId, form.on_submit_tag_id));
-      }
-
       // Enroll in scenario
       if (form.on_submit_scenario_id) {
-        sideEffects.push(enrollFriendInScenario(db, friendId, form.on_submit_scenario_id));
+        sideEffects.push((async () => {
+          if (!(await isFriendBlocked(db, friendId, caller.friend!.line_account_id))) {
+            await enrollFriendInScenario(db, friendId, form.on_submit_scenario_id!);
+          }
+        })());
       }
 
       // If webhook returned a join_url (e.g. Meet Harness), send a Flex button to the user
@@ -484,6 +652,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
                 paddingAll: '16px',
               },
             };
+            if (await isFriendBlocked(db, friend.id, friend.line_account_id)) return;
             await lineClient.pushMessage(friend.line_user_id, [
               { type: 'flex', altText: 'ヒアリングの準備ができました', contents: meetFlex },
             ]);
@@ -579,6 +748,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
             messages.push(buildMessage('flex', JSON.stringify(resultFlex)));
           }
 
+          if (await isFriendBlocked(db, friend.id, friend.line_account_id)) return;
           await lineClient.pushMessage(friend.line_user_id, messages);
 
           // Mirror every pushed message into messages_log so the dashboard chat

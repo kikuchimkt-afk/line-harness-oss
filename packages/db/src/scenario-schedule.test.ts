@@ -20,6 +20,30 @@ describe('computeNextDeliveryAt', () => {
       const result = computeNextDeliveryAt(scenario, step, { enrolledAt, previousDeliveredAt: enrolledAt, now });
       expect(result.toISOString()).toBe(enrolledAt.toISOString());
     });
+
+    it('schedules for N days after previous step at delivery_time when set', () => {
+      const scenario: ScenarioRow = { delivery_mode: 'relative' };
+      const step: StepRow = { delay_minutes: 0, offset_days: 1, offset_minutes: null, delivery_time: '17:00' };
+      const previous = new Date('2026-05-09T15:00:00+09:00');
+      const result = computeNextDeliveryAt(scenario, step, {
+        enrolledAt,
+        previousDeliveredAt: previous,
+        now: previous,
+      });
+      expect(result.toISOString()).toBe(new Date('2026-05-10T17:00:00+09:00').toISOString());
+    });
+
+    it('moves 0 days clock time to the next day when the time already passed after previous step', () => {
+      const scenario: ScenarioRow = { delivery_mode: 'relative' };
+      const step: StepRow = { delay_minutes: 0, offset_days: 0, offset_minutes: null, delivery_time: '17:00' };
+      const previous = new Date('2026-05-09T20:00:00+09:00');
+      const result = computeNextDeliveryAt(scenario, step, {
+        enrolledAt,
+        previousDeliveredAt: previous,
+        now: previous,
+      });
+      expect(result.toISOString()).toBe(new Date('2026-05-10T17:00:00+09:00').toISOString());
+    });
   });
 
   describe('elapsed mode', () => {

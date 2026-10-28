@@ -35,6 +35,29 @@ const notifierMocks = {
 };
 vi.mock('../services/event-booking-notifier.js', () => notifierMocks);
 
+const decisionNotificationMocks = {
+  enqueueEventBookingDecisionNotification: vi.fn(),
+};
+vi.mock(
+  '../services/event-booking-decision-notifications.js',
+  () => decisionNotificationMocks,
+);
+
+const adminNotifierMocks = {
+  buildEventAdminBookingUrl: vi.fn(
+    (base: string | undefined, eventId: string) =>
+      base ? `${base}/events/bookings?id=${eventId}` : null,
+  ),
+  notifyEventBookingAdminRecipients: vi.fn(),
+};
+vi.mock('../services/event-booking-admin-notifier.js', () => adminNotifierMocks);
+
+const waitlistMocks = {
+  isBeforeEventWaitlistCutoff: vi.fn(() => true),
+  promoteEventWaitlist: vi.fn(async () => ({ promotedBookingIds: [], reason: 'no_waitlist' })),
+};
+vi.mock('../services/event-booking-waitlist.js', () => waitlistMocks);
+
 const { default: events } = await import('./events.js');
 
 type TestEnv = {
@@ -50,9 +73,11 @@ interface EventRow {
   venue_url: string | null;
   image_url: string | null;
   description: string | null;
+  detail_url: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -65,6 +90,9 @@ interface EventRow {
   target_type?: 'single' | 'multi-account-dedup';
   account_ids?: string | null;
   dedup_priority?: string | null;
+  booking_form_fields?: string | null;
+  confirmation_message_extra?: string | null;
+  reminder_message_extra?: string | null;
   [k: string]: unknown;
 }
 
@@ -76,6 +104,7 @@ interface SlotRow {
   capacity: number | null;
   is_active: number;
   sort_order: number;
+  visibility_conditions?: string | null;
   deleted_at: string | null;
 }
 
@@ -85,6 +114,7 @@ interface BookingRow {
   status: string;
   slot_id?: string;
   friend_id?: string;
+  form_answers?: string;
 }
 
 interface LineAccount {
@@ -98,6 +128,7 @@ interface FriendRow {
   id: string;
   line_account_id: string;
   line_user_id: string;
+  display_name?: string | null;
   user_id?: string | null;
   picture_url?: string | null;
 }
@@ -149,6 +180,7 @@ function makeEventDb(state: {
             if (sql.includes('user_id') || sql.includes('picture_url')) {
               return {
                 id: f.id,
+                display_name: f.display_name ?? null,
                 user_id: f.user_id ?? null,
                 picture_url: f.picture_url ?? null,
               } as T;
@@ -192,13 +224,21 @@ function makeEventDb(state: {
               venue_name: e.venue_name,
               venue_url: e.venue_url,
               slot_starts_at: s.starts_at,
+              event_id: b.event_id,
+              friend_id: (b as Record<string, unknown>).friend_id,
+              line_account_id: (b as Record<string, unknown>).line_account_id,
               channel_access_token: la.channel_access_token ?? '',
+              liff_id: la.liff_id ?? null,
               line_user_id: f.line_user_id,
             } as T;
           }
-          // booking action loader: SELECT id, line_account_id, event_id, slot_id, friend_id, status, decided_at FROM event_bookings WHERE id = ? AND event_id = ?
+          // booking action loader with the event's default confirmation message.
           // (multi-account 対応で line_account_id 制約を削除)
-          if (sql.includes('FROM event_bookings\n        WHERE id = ? AND event_id = ?')) {
+          if (
+            sql.includes('FROM event_bookings b') &&
+            sql.includes('e.confirmation_message_extra') &&
+            sql.includes('WHERE b.id = ? AND b.event_id = ?')
+          ) {
             const [id, event_id] = bound as [string, string];
             const b = (state.bookings ?? []).find(
               (x) =>
@@ -206,6 +246,7 @@ function makeEventDb(state: {
                 (x as Record<string, unknown>).event_id === event_id,
             );
             if (!b) return null as T | null;
+            const e = state.events.find((event) => event.id === event_id);
             return {
               id: b.id,
               line_account_id: (b as Record<string, unknown>).line_account_id as string,
@@ -214,6 +255,7 @@ function makeEventDb(state: {
               friend_id: (b as Record<string, unknown>).friend_id as string,
               status: b.status,
               decided_at: ((b as Record<string, unknown>).decided_at as string | null) ?? null,
+              confirmation_message_extra: e?.confirmation_message_extra ?? null,
             } as T;
           }
           // SELECT * FROM event_bookings WHERE id = ?
@@ -255,7 +297,7 @@ function makeEventDb(state: {
                 (x) =>
                   x.event_id === event_id &&
                   (x as Record<string, unknown>).identity_key === idKey &&
-                  (x.status === 'requested' || x.status === 'confirmed'),
+                  (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
               );
             if (matches.length === 0) return null as T | null;
             const b = matches[0];
@@ -274,7 +316,7 @@ function makeEventDb(state: {
               (x) =>
                 x.event_id === event_id &&
                 (x as Record<string, unknown>).identity_key === idKey &&
-                (x.status === 'requested' || x.status === 'confirmed'),
+                (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
             ).length;
             return { c } as T;
           }
@@ -288,7 +330,7 @@ function makeEventDb(state: {
               (x) =>
                 x.event_id === event_id &&
                 (x as Record<string, unknown>).identity_key === idKey &&
-                (x.status === 'requested' || x.status === 'confirmed'),
+                (x.status === 'requested' || x.status === 'waitlisted' || x.status === 'confirmed'),
             );
             if (!b) return null as T | null;
             const s = (state.slots ?? []).find((x) => x.id === (b as Record<string, unknown>).slot_id);
@@ -311,6 +353,7 @@ function makeEventDb(state: {
             return {
               id: b.id,
               status: b.status,
+              slot_id: (b as Record<string, unknown>).slot_id,
               cancel_deadline_hours_before: e.cancel_deadline_hours_before,
               slot_starts_at: s.starts_at,
             } as T;
@@ -357,8 +400,9 @@ function makeEventDb(state: {
             }
             return e.line_account_id === account;
           };
+          const selectsEventId = sql.includes('SELECT id FROM events') || sql.includes('SELECT id, waitlist_enabled');
           // LIFF SELECT id FROM events ... AND is_published = 1
-          if (sql.includes('SELECT id FROM events') && sql.includes('is_published')) {
+          if (selectsEventId && sql.includes('is_published')) {
             const [id, account, account2] = bound as [string, string, string?];
             const acct = account2 ?? account;
             const e = state.events.find(
@@ -367,13 +411,13 @@ function makeEventDb(state: {
             return (e ? { id: e.id } : null) as T | null;
           }
           // admin SELECT id FROM events
-          if (sql.includes('SELECT id FROM events')) {
+          if (selectsEventId) {
             const [id, account, account2] = bound as [string, string, string?];
             const acct = account2 ?? account;
             const e = state.events.find(
               (x) => x.id === id && x.deleted_at == null && eventMatchesAccount(x, acct),
             );
-            return (e ? { id: e.id } : null) as T | null;
+            return (e ?? null) as T | null;
           }
           // LIFF SELECT * FROM events ... AND is_published = 1
           if (sql.includes('SELECT * FROM events') && sql.includes('is_published')) {
@@ -448,11 +492,64 @@ function makeEventDb(state: {
                   pending_count,
                 };
               })
-              .sort((a, b) =>
-                a.sort_order !== b.sort_order
+              .sort((a, b) => {
+                if (sql.includes('WHEN substr(e.updated_at, -1) = \'Z\'')) {
+                  const timestamp = (value: string): number =>
+                    Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}+09:00`);
+                  return (
+                    timestamp(b.updated_at) - timestamp(a.updated_at) ||
+                    timestamp(b.created_at) - timestamp(a.created_at) ||
+                    a.id.localeCompare(b.id)
+                  );
+                }
+                return a.sort_order !== b.sort_order
                   ? a.sort_order - b.sort_order
-                  : b.created_at.localeCompare(a.created_at),
-              );
+                  : b.created_at.localeCompare(a.created_at);
+              });
+            return { results: items as unknown as T[] };
+          }
+          // notification summary JOIN used by LIFF multi-booking and admin bulk decisions.
+          if (sql.includes('FROM event_bookings b') && sql.includes('channel_access_token')) {
+            const event_id = bound[0] as string;
+            const hasCallerFilter = sql.includes('f.line_user_id = ?');
+            const accountFilter = hasCallerFilter ? (bound[1] as string) : null;
+            const lineUserFilter = hasCallerFilter ? (bound[2] as string) : null;
+            const idStart = hasCallerFilter ? 3 : 1;
+            const ids = new Set((bound.slice(idStart) as string[]).filter(Boolean));
+            const items = (state.bookings ?? [])
+              .filter((b) => b.event_id === event_id && ids.has(b.id))
+              .filter((b) => (accountFilter ? (b as Record<string, unknown>).line_account_id === accountFilter : true))
+              .map((b) => {
+                const e = state.events.find((x) => x.id === b.event_id);
+                const s = (state.slots ?? []).find((x) => x.id === (b as Record<string, unknown>).slot_id);
+                const la = (state.accounts ?? []).find((x) => x.id === (b as Record<string, unknown>).line_account_id);
+                const f = (state.friends ?? []).find((x) => x.id === (b as Record<string, unknown>).friend_id);
+                if (!e || !s || !la || !f) return null;
+                if (lineUserFilter && f.line_user_id !== lineUserFilter) return null;
+                return {
+                  id: b.id,
+                  line_account_id: (b as Record<string, unknown>).line_account_id,
+                  event_id: b.event_id,
+                  slot_id: (b as Record<string, unknown>).slot_id,
+                  friend_id: (b as Record<string, unknown>).friend_id,
+                  status: b.status,
+                  decided_at: ((b as Record<string, unknown>).decided_at as string | null) ?? null,
+                  event_name: e.name,
+                  venue_name: e.venue_name,
+                  venue_url: e.venue_url,
+                  reminder_day_before_enabled: e.reminder_day_before_enabled,
+                  reminder_hours_before: e.reminder_hours_before,
+                  cancel_deadline_hours_before: e.cancel_deadline_hours_before,
+                  confirmation_message_extra: e.confirmation_message_extra ?? null,
+                  slot_starts_at: s.starts_at,
+                  channel_access_token: la.channel_access_token ?? '',
+                   liff_id: la.liff_id ?? null,
+                   line_user_id: f.line_user_id,
+                   friend_display_name: f.display_name ?? null,
+                 };
+              })
+              .filter((item): item is NonNullable<typeof item> => item !== null)
+              .sort((a, b) => a.slot_starts_at.localeCompare(b.slot_starts_at));
             return { results: items as unknown as T[] };
           }
           // admin bookings list: SELECT b.*, s.starts_at, ..., friends.display_name FROM event_bookings b JOIN event_slots s ...
@@ -482,7 +579,7 @@ function makeEventDb(state: {
           // LIFF history JOIN: FROM event_bookings b JOIN events e JOIN event_slots s
           if (sql.includes('FROM event_bookings b') && sql.includes('event_name')) {
             const [friend_id, account_id, nowIso] = bound as [string, string, string];
-            const isUpcoming = sql.includes("status IN ('requested','confirmed')\n            AND s.starts_at >=");
+            const isUpcoming = sql.includes("status IN ('requested','waitlisted','confirmed')\n            AND s.starts_at >=");
             const items = (state.bookings ?? [])
               .filter((b) => {
                 const r = b as Record<string, unknown>;
@@ -510,7 +607,7 @@ function makeEventDb(state: {
               })
               .filter((r): r is NonNullable<typeof r> => r !== null)
               .filter((r) => {
-                const isActive = r.status === 'requested' || r.status === 'confirmed';
+                const isActive = r.status === 'requested' || r.status === 'waitlisted' || r.status === 'confirmed';
                 if (isUpcoming) return isActive && r.slot_starts_at >= nowIso;
                 return !isActive || r.slot_starts_at < nowIso;
               })
@@ -532,6 +629,18 @@ function makeEventDb(state: {
                 ).length;
                 return { ...s, active_count };
               })
+              .sort((a, b) =>
+                a.sort_order !== b.sort_order
+                  ? a.sort_order - b.sort_order
+                  : a.starts_at.localeCompare(b.starts_at),
+              );
+            return { results: items as unknown as T[] };
+          }
+          // duplicate event: copy source slots
+          if (sql.includes('FROM event_slots') && sql.includes('visibility_conditions')) {
+            const [event_id] = bound as [string];
+            const items = (state.slots ?? [])
+              .filter((s) => s.event_id === event_id && s.deleted_at == null)
               .sort((a, b) =>
                 a.sort_order !== b.sort_order
                   ? a.sort_order - b.sort_order
@@ -597,24 +706,32 @@ function makeEventDb(state: {
           }
           if (sql.startsWith('INSERT INTO event_bookings')) {
             const [
-              id, line_account_id, event_id, slot_id, friend_id, status, customer_note, _requested_at, identity_key,
-            ] = bound as [string, string, string, string, string, string, string | null, string, string | undefined];
+              id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, _requested_at, identity_key,
+            ] = bound as [string, string, string, string, string, string, string | null, string, string, string | undefined];
+            if (sql.includes('WHERE (SELECT COUNT(*)')) {
+              const capacity = bound[bound.length - 1] as number;
+              const occupied = (state.bookings ?? []).filter((b) =>
+                b.slot_id === slot_id && (b.status === 'requested' || b.status === 'confirmed'),
+              ).length;
+              if (occupied >= capacity) return { success: true, meta: { changes: 0 } };
+            }
             (state.bookings ?? []).push({
               id, event_id, status,
               slot_id, friend_id,
               line_account_id,
               customer_note,
+              form_answers,
               identity_key,
             } as BookingRow & Record<string, unknown>);
             return { success: true, meta: { changes: 1 } };
           }
           if (sql.startsWith('INSERT INTO event_slots')) {
             const [
-              id, event_id, starts_at, ends_at, capacity, is_active, sort_order,
-            ] = bound as [string, string, string, string, number | null, number, number];
+              id, event_id, starts_at, ends_at, capacity, is_active, sort_order, visibility_conditions,
+            ] = bound as [string, string, string, string, number | null, number, number, string | null | undefined];
             (state.slots ?? []).push({
               id, event_id, starts_at, ends_at, capacity,
-              is_active, sort_order, deleted_at: null,
+              is_active, sort_order, visibility_conditions: visibility_conditions ?? null, deleted_at: null,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -647,17 +764,18 @@ function makeEventDb(state: {
             const [
               id, line_account_id, name, venue_name, venue_url, image_url,
               description, description_centered,
-              max_bookings_per_friend, requires_approval, cancel_deadline_hours_before,
+              max_bookings_per_friend, requires_approval, waitlist_enabled, cancel_deadline_hours_before,
               reminder_day_before_enabled, reminder_hours_before,
               is_published, sort_order,
-              target_type, account_ids, dedup_priority,
+              target_type, account_ids, dedup_priority, booking_form_fields,
+              confirmation_message_extra, detail_url,
             ] = bound as [
               string, string, string, string | null, string | null, string | null,
               string | null, number,
-              number | null, number, number | null,
+              number | null, number, number, number | null,
               number, number | null,
               number, number,
-              string, string | null, string | null,
+              string, string | null, string | null, string, string | null, string | null,
             ];
             const now = new Date().toISOString();
             state.events.push({
@@ -671,6 +789,7 @@ function makeEventDb(state: {
               description_centered,
               max_bookings_per_friend,
               requires_approval,
+              waitlist_enabled,
               cancel_deadline_hours_before,
               reminder_day_before_enabled,
               reminder_hours_before,
@@ -683,6 +802,9 @@ function makeEventDb(state: {
               target_type: target_type as 'single' | 'multi-account-dedup',
               account_ids,
               dedup_priority,
+              booking_form_fields,
+              confirmation_message_extra,
+              detail_url,
             });
             return { success: true, meta: { changes: 1 } };
           }
@@ -727,6 +849,9 @@ function makeEventDb(state: {
       };
       return stmt;
     },
+    async batch(statements: Array<{ run(): Promise<unknown> }>) {
+      return Promise.all(statements.map((statement) => statement.run()));
+    },
   } as unknown as D1Database;
   return db;
 }
@@ -750,6 +875,15 @@ beforeEach(() => {
   for (const fn of Object.values(idempotencyMocks)) fn.mockReset();
   for (const fn of Object.values(reminderMocks)) fn.mockReset();
   for (const fn of Object.values(notifierMocks)) fn.mockReset();
+  for (const fn of Object.values(decisionNotificationMocks)) fn.mockReset();
+  for (const fn of Object.values(adminNotifierMocks)) fn.mockReset();
+  for (const fn of Object.values(waitlistMocks)) fn.mockReset();
+  waitlistMocks.isBeforeEventWaitlistCutoff.mockReturnValue(true);
+  waitlistMocks.promoteEventWaitlist.mockResolvedValue({ promotedBookingIds: [], reason: 'no_waitlist' });
+  adminNotifierMocks.buildEventAdminBookingUrl.mockImplementation(
+    (base: string | undefined, eventId: string) =>
+      base ? `${base}/events/bookings?id=${eventId}` : null,
+  );
   reminderMocks.computeRemindersForBooking.mockReturnValue([]);
 });
 
@@ -769,6 +903,8 @@ describe('POST /api/events/admin/events', () => {
     expect(body.is_published).toBe(0);
     expect(body.requires_approval).toBe(0);
     expect(body.reminder_day_before_enabled).toBe(1);
+    expect(body.booking_form_fields).toBe('[]');
+    expect(body.detail_url).toBeNull();
     expect(state.events).toHaveLength(1);
   });
 
@@ -783,6 +919,7 @@ describe('POST /api/events/admin/events', () => {
         venue_name: '渋谷',
         venue_url: 'https://example.com',
         description: 'hello',
+        detail_url: 'https://ecc-preschool-autumn-events.vercel.app/lessons',
         description_centered: 1,
         max_bookings_per_friend: 1,
         requires_approval: 1,
@@ -791,6 +928,11 @@ describe('POST /api/events/admin/events', () => {
         reminder_hours_before: 2,
         is_published: 1,
         sort_order: 5,
+        booking_form_fields: [
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+          { id: 'content', label: '内容', type: 'checkbox', required: true, options: ['宿題', '英検'] },
+        ],
+        confirmation_message_extra: '教材はこちらです。\nhttps://example.com/materials',
       }),
     });
     expect(res.status).toBe(201);
@@ -798,6 +940,11 @@ describe('POST /api/events/admin/events', () => {
     expect(body.requires_approval).toBe(1);
     expect(body.cancel_deadline_hours_before).toBe(12);
     expect(body.is_published).toBe(1);
+    expect(body.detail_url).toBe('https://ecc-preschool-autumn-events.vercel.app/lessons');
+    expect(JSON.parse(body.booking_form_fields ?? '[]')).toHaveLength(2);
+    expect(body.confirmation_message_extra).toBe(
+      '教材はこちらです。\nhttps://example.com/materials',
+    );
   });
 
   test('400 when account_id missing', async () => {
@@ -844,6 +991,37 @@ describe('POST /api/events/admin/events', () => {
     expect(body.error).toBe('invalid_description');
   });
 
+  test.each([
+    'http://example.com/lessons',
+    '/lessons',
+    'example.com/lessons',
+    'https://',
+    'https://user:pass@example.com/lessons',
+  ])('422 when detail_url is not an absolute HTTPS URL: %s', async (detail_url) => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'X', detail_url }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
+  });
+
+  test('422 when detail_url exceeds 2048 characters', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'X',
+        detail_url: `https://example.com/${'a'.repeat(2030)}`,
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
+  });
+
   test('422 when requires_approval is not 0/1', async () => {
     const app = setupApp({ events: [] });
     const res = await app.request('/api/events/admin/events?account_id=la1', {
@@ -864,6 +1042,17 @@ describe('POST /api/events/admin/events', () => {
     expect(res.status).toBe(422);
   });
 
+  test('422 when waitlist is enabled without a positive shared cutoff', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'X', waitlist_enabled: 1, cancel_deadline_hours_before: null }),
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()) as { error: string }).toEqual({ error: 'waitlist_requires_cancel_deadline' });
+  });
+
   test('multi-account-dedup creates event with account_ids JSON', async () => {
     const state = { events: [] as EventRow[] };
     const app = setupApp(state);
@@ -882,6 +1071,69 @@ describe('POST /api/events/admin/events', () => {
     expect(typeof body.account_ids === 'string' ? JSON.parse(body.account_ids) : body.account_ids).toEqual(['la1', 'la2']);
     // sentinel: line_account_id = account_ids[0]
     expect(body.line_account_id).toBe('la1');
+  });
+
+  test('422 when confirmation_message_extra is longer than 2000 characters', async () => {
+    const app = setupApp({ events: [] });
+    const res = await app.request('/api/events/admin/events?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'X',
+        confirmation_message_extra: 'a'.repeat(2001),
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_confirmation_message_extra' });
+  });
+
+  test('POST duplicate creates unpublished copy with slots but no bookings', async () => {
+    const visibility = JSON.stringify([{ fieldId: 'level', operator: 'in', values: ['5級'] }]);
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          name: 'Original',
+          is_published: 1,
+          detail_url: 'https://example.com/original-lessons',
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T11:00:00Z',
+          capacity: 4,
+          is_active: 1,
+          sort_order: 2,
+          visibility_conditions: visibility,
+          deleted_at: null,
+        },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', status: 'confirmed' },
+      ],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/duplicate?account_id=la1', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as EventRow;
+    expect(body.id).not.toBe('e1');
+    expect(body.name).toBe('Original のコピー');
+    expect(body.is_published).toBe(0);
+    expect(body.detail_url).toBe('https://example.com/original-lessons');
+    expect(state.events).toHaveLength(2);
+    expect(state.bookings).toHaveLength(1);
+    const copiedSlot = state.slots.find((slot) => slot.event_id === body.id);
+    expect(copiedSlot?.capacity).toBe(4);
+    expect(copiedSlot?.visibility_conditions).toBe(visibility);
   });
 
   test('422 invalid_target_type', async () => {
@@ -922,6 +1174,66 @@ describe('GET /api/events/admin/events', () => {
     const body = (await res.json()) as { items: EventRow[] };
     expect(body.items).toHaveLength(2);
     expect(body.items.map((e) => e.id).sort()).toEqual(['e1', 'e2']);
+  });
+
+  test('lists most recently edited events first with deterministic ties', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'older',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-09-20T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'timezone-naive-jst',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000',
+          // 09:30 JST = 00:30 UTC. This must stay below the 01:00 UTC item.
+          updated_at: '2026-09-21T09:30:00.000',
+        }),
+        baseEvent({
+          id: 'timezone-utc',
+          line_account_id: 'la1',
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-09-21T01:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'tie-b',
+          line_account_id: 'la1',
+          created_at: '2026-02-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'newer-created',
+          line_account_id: 'la1',
+          created_at: '2026-03-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+        baseEvent({
+          id: 'tie-a',
+          line_account_id: 'la1',
+          created_at: '2026-02-01T00:00:00.000Z',
+          updated_at: '2026-09-21T00:00:00.000Z',
+        }),
+      ],
+      slots: [],
+      bookings: [],
+    };
+    const app = setupApp(state);
+
+    const res = await app.request('/api/events/admin/events?account_id=la1');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: EventRow[] };
+    expect(body.items.map((event) => event.id)).toEqual([
+      'timezone-utc',
+      'timezone-naive-jst',
+      'newer-created',
+      'tie-a',
+      'tie-b',
+      'older',
+    ]);
   });
 
   test('lists includes multi-account event when account in account_ids', async () => {
@@ -1023,6 +1335,79 @@ describe('PUT /api/events/admin/events/:id', () => {
     expect(state.events[0].requires_approval).toBe(1);
   });
 
+  test('updates and clears detail_url', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', detail_url: null })],
+    };
+    const app = setupApp(state);
+    const update = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: '  https://example.com/lesson  ' }),
+    });
+    expect(update.status).toBe(200);
+    expect(state.events[0].detail_url).toBe('https://example.com/lesson');
+
+    const clear = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: null }),
+    });
+    expect(clear.status).toBe(200);
+    expect(state.events[0].detail_url).toBeNull();
+  });
+
+  test('422 when updating detail_url to a non-HTTPS URL', async () => {
+    const state = { events: [baseEvent({ id: 'e1', line_account_id: 'la1' })] };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ detail_url: 'javascript:alert(1)' }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_detail_url' });
+  });
+
+  test('enables waitlisting with an existing positive cancellation deadline', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        waitlist_enabled: 0,
+        cancel_deadline_hours_before: 48,
+      })],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ waitlist_enabled: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect(state.events[0].waitlist_enabled).toBe(1);
+    expect(state.events[0].cancel_deadline_hours_before).toBe(48);
+  });
+
+  test('does not enable waitlisting when the existing cancellation deadline is empty', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        waitlist_enabled: 0,
+        cancel_deadline_hours_before: null,
+      })],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ waitlist_enabled: 1 }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'waitlist_requires_cancel_deadline' });
+  });
+
   test('404 for cross-account update', async () => {
     const state = { events: [baseEvent({ id: 'e1', line_account_id: 'la2' })] };
     const app = setupApp(state);
@@ -1098,7 +1483,7 @@ describe('event_slots admin', () => {
 
   test('POST creates multiple slots', async () => {
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [] as SlotRow[],
     };
     const app = setupApp(state);
@@ -1116,6 +1501,34 @@ describe('event_slots admin', () => {
     const body = (await res.json()) as { items: SlotRow[] };
     expect(body.items).toHaveLength(2);
     expect(state.slots).toHaveLength(2);
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
+  });
+
+  test('POST stores slot visibility conditions', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [] as SlotRow[],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        slots: [
+          {
+            starts_at: '2099-06-01T10:00:00Z',
+            ends_at: '2099-06-01T12:00:00Z',
+            capacity: 5,
+            visibility_conditions: [{ fieldId: 'level', operator: 'in', values: ['5級'] }],
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '{}')).toEqual({
+      logic: 'and',
+      conditions: [{ fieldId: 'level', operator: 'in', values: ['5級'] }],
+    });
   });
 
   test('POST 422 when slots empty', async () => {
@@ -1159,7 +1572,7 @@ describe('event_slots admin', () => {
 
   test('PUT updates slot fields', async () => {
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
     };
     const app = setupApp(state);
@@ -1171,6 +1584,36 @@ describe('event_slots admin', () => {
     expect(res.status).toBe(200);
     expect(state.slots[0].capacity).toBe(10);
     expect(state.slots[0].is_active).toBe(0);
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
+  });
+
+  test('PUT updates slot visibility conditions', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, visibility_conditions: null, deleted_at: null }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots/s1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        visibility_conditions: {
+          logic: 'or',
+          conditions: [
+            { fieldId: 'level', operator: 'in', values: ['4級'] },
+            { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+          ],
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(state.slots[0].visibility_conditions ?? '{}')).toEqual({
+      logic: 'or',
+      conditions: [
+        { fieldId: 'level', operator: 'in', values: ['4級'] },
+        { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+      ],
+    });
   });
 
   test('PUT 422 when range becomes invalid (only ends_at provided)', async () => {
@@ -1187,9 +1630,32 @@ describe('event_slots admin', () => {
     expect(res.status).toBe(422);
   });
 
-  test('DELETE soft-deletes when no active bookings', async () => {
+  test('PUT 409 when capacity is lower than active booking count', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', status: 'confirmed' },
+        { id: 'b2', event_id: 'e1', slot_id: 's1', status: 'requested' },
+        { id: 'b3', event_id: 'e1', slot_id: 's1', status: 'waitlisted' },
+      ],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/slots/s1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ capacity: 1 }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('capacity_below_active_bookings');
+    expect(state.slots[0].capacity).toBe(5);
+  });
+
+  test('DELETE soft-deletes when no active bookings', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', updated_at: '2000-01-01T00:00:00.000Z' })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
       bookings: [],
     };
@@ -1199,6 +1665,7 @@ describe('event_slots admin', () => {
     });
     expect(res.status).toBe(204);
     expect(state.slots[0].deleted_at).not.toBeNull();
+    expect(state.events[0].updated_at).not.toBe('2000-01-01T00:00:00.000Z');
   });
 
   test('DELETE 409 when active bookings exist', async () => {
@@ -1232,6 +1699,19 @@ describe('event_slots admin', () => {
 });
 
 describe('LIFF event detail', () => {
+  test('does not expose private confirmation instructions before booking', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1,
+        confirmation_message_extra: 'PRIVATE_CALLER_NUMBER', reminder_message_extra: 'PRIVATE_REMINDER' })],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+    };
+    const res = await setupApp(state).request('/api/liff/events/e1?liffId=L1');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).not.toHaveProperty('confirmation_message_extra');
+    expect(body).not.toHaveProperty('reminder_message_extra');
+    expect(JSON.stringify(body)).not.toContain('PRIVATE_');
+  });
   test('GET returns published event', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1 })],
@@ -1240,6 +1720,24 @@ describe('LIFF event detail', () => {
     const app = setupApp(state);
     const res = await app.request('/api/liff/events/e1?liffId=L1');
     expect(res.status).toBe(200);
+  });
+
+  test('GET exposes the lesson detail URL for the booking screen', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        detail_url: 'https://example.com/lesson',
+      })],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1?liffId=L1');
+    expect(res.status).toBe(200);
+    expect((await res.json()) as EventRow).toMatchObject({
+      detail_url: 'https://example.com/lesson',
+    });
   });
 
   test('GET 404 when not published', async () => {
@@ -1393,9 +1891,16 @@ describe('LIFF event slots', () => {
 });
 
 describe('LIFF POST /api/liff/events/:id/bookings', () => {
-  test('creates confirmed booking when requires_approval=0', async () => {
+  test('creates confirmed booking and passes the event message when requires_approval=0', async () => {
+    const confirmationMessage = '当日は水筒をお持ちください。';
     const state = {
-      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 0 })],
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        requires_approval: 0,
+        confirmation_message_extra: confirmationMessage,
+      })],
       slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
       bookings: [],
       accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
@@ -1415,9 +1920,85 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(state.bookings).toHaveLength(1);
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: 'received_confirmed' }),
+      expect.objectContaining({
+        kind: 'received_confirmed',
+        ctx: expect.objectContaining({ messageExtra: confirmationMessage }),
+      }),
+    );
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledTimes(1);
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        bookingFriendId: 'f1',
+        eventName: 'X',
+        startsAtJstList: ['2099-06-01 19:00'],
+        status: 'confirmed',
+      }),
     );
     expect(idempotencyMocks.finalizeEventIdempotencyResponse).toHaveBeenCalled();
+  });
+
+  test('stores form_answers for custom booking fields', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        booking_form_fields: JSON.stringify([
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+          { id: 'content', label: '内容', type: 'checkbox', required: true, options: ['宿題', '英検'] },
+        ]),
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({
+        slot_id: 's1',
+        form_answers: { student_name: '山田太郎', content: ['宿題', '英検'] },
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(JSON.parse(state.bookings[0].form_answers ?? '{}')).toEqual({
+      student_name: '山田太郎',
+      content: ['宿題', '英検'],
+    });
+  });
+
+  test('422 when required custom booking field is missing', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        booking_form_fields: JSON.stringify([
+          { id: 'student_name', label: '生徒名', type: 'text', required: true },
+        ]),
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 5, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1', form_answers: {} }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('missing_required_form_answer');
+    expect(state.bookings).toHaveLength(0);
   });
 
   test('creates requested booking when requires_approval=1', async () => {
@@ -1443,6 +2024,144 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'received_pending' }),
     );
+  });
+
+  test('suppresses per-slot notification when summary flow is used', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 1 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1', suppress_notification: true }),
+    });
+    expect(res.status).toBe(201);
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).not.toHaveBeenCalled();
+  });
+
+  test('POST summary sends one notification for multiple successful bookings', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 1 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings/summary?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ booking_ids: ['b1', 'b2'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'received_pending',
+        ctx: expect.objectContaining({
+          startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
+        }),
+      }),
+    );
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledTimes(1);
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        bookingFriendId: 'f1',
+        eventName: 'X',
+        startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
+        status: 'requested',
+      }),
+    );
+  });
+
+  test('POST summary passes the event message to an auto-confirmed grouped notification', async () => {
+    const confirmationMessage = '教材は教室でお渡しします。';
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        requires_approval: 0,
+        confirmation_message_extra: confirmationMessage,
+      })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings/summary?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ booking_ids: ['b1', 'b2'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'received_confirmed',
+        ctx: expect.objectContaining({ messageExtra: confirmationMessage }),
+      }),
+    );
+  });
+
+  test('POST summary does not send duplicate notices for a cached idempotency key', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, requires_approval: 1 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({
+      kind: 'cached',
+      status: 200,
+      body: { ok: true, count: 2 },
+    });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings/summary?liffId=L1', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'Authorization': 'Bearer t',
+        'Idempotency-Key': 'summary-1',
+      },
+      body: JSON.stringify({ booking_ids: ['b1', 'b2'] }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(adminNotifierMocks.notifyEventBookingAdminRecipients).not.toHaveBeenCalled();
   });
 
   test('returns idempotent cached response on repeat', async () => {
@@ -1494,6 +2213,26 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(res.status).toBe(400);
   });
 
+  test('simultaneous requests cannot confirm two people in a one-person slot', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, max_bookings_per_friend: null, waitlist_enabled: 0 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T11:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [] as BookingRow[], accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const request = (key: string) => app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key, Authorization: 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+    const responses = await Promise.all([request('race1'), request('race2')]);
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(state.bookings).toHaveLength(1);
+    expect(state.bookings[0].status).toBe('confirmed');
+  });
+
   test('409 slot_full when capacity reached', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1 })],
@@ -1513,6 +2252,155 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('slot_full');
+  });
+
+  test('creates a FIFO waitlist booking instead of rejecting a full slot', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        is_published: 1,
+        waitlist_enabled: 1,
+        cancel_deadline_hours_before: 48,
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'fx', status: 'confirmed' } as BookingRow],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'wait-1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { status: string; waitlist_position: number };
+    expect(body.status).toBe('waitlisted');
+    expect(body.waitlist_position).toBe(1);
+    expect(state.bookings.at(-1)?.status).toBe('waitlisted');
+  });
+
+  test('does not accept a waitlist registration at or after the cutoff', async () => {
+    waitlistMocks.isBeforeEventWaitlistCutoff.mockReturnValue(false);
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, waitlist_enabled: 1, cancel_deadline_hours_before: 48 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'fx', status: 'confirmed' } as BookingRow],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'wait-closed', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toEqual({ error: 'waitlist_closed' });
+  });
+
+  test('OR slot visibility accepts a booking when any condition matches', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          is_published: 1,
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+            { id: 'school', label: '教室', type: 'select', required: true, options: ['藍住教室', '北島中央'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T12:00:00Z',
+          capacity: null,
+          is_active: 1,
+          sort_order: 0,
+          visibility_conditions: JSON.stringify({
+            logic: 'or',
+            conditions: [
+              { fieldId: 'level', operator: 'in', values: ['5級'] },
+              { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+            ],
+          }),
+          deleted_at: null,
+        },
+      ],
+      bookings: [],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({
+        slot_id: 's1',
+        form_answers: { level: '4級', school: '藍住教室' },
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(state.bookings).toHaveLength(1);
+  });
+
+  test('409 slot_condition_mismatch when legacy AND conditions are not all matched', async () => {
+    const state = {
+      events: [
+        baseEvent({
+          id: 'e1',
+          line_account_id: 'la1',
+          is_published: 1,
+          booking_form_fields: JSON.stringify([
+            { id: 'level', label: '級', type: 'select', required: true, options: ['5級', '4級'] },
+            { id: 'school', label: '教室', type: 'select', required: true, options: ['藍住教室', '北島中央'] },
+          ]),
+        }),
+      ],
+      slots: [
+        {
+          id: 's1',
+          event_id: 'e1',
+          starts_at: '2099-06-01T10:00:00Z',
+          ends_at: '2099-06-01T12:00:00Z',
+          capacity: null,
+          is_active: 1,
+          sort_order: 0,
+          visibility_conditions: JSON.stringify([
+            { fieldId: 'level', operator: 'in', values: ['4級'] },
+            { fieldId: 'school', operator: 'in', values: ['藍住教室'] },
+          ]),
+          deleted_at: null,
+        },
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's1', form_answers: { level: '4級', school: '北島中央' } }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('slot_condition_mismatch');
+    expect(state.bookings ?? []).toHaveLength(0);
   });
 
   test('409 over_friend_limit when max_bookings_per_friend (>1) reached', async () => {
@@ -1541,6 +2429,31 @@ describe('LIFF POST /api/liff/events/:id/bookings', () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('over_friend_limit');
+  });
+
+  test('allows multiple bookings when max_bookings_per_friend is null', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, max_bookings_per_friend: null })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'confirmed', identity_key: 'uid:U1-uuid' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1', user_id: 'U1-uuid' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    idempotencyMocks.reserveEventIdempotency.mockResolvedValue({ kind: 'inserted' });
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/e1/bookings?liffId=L1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k1', 'Authorization': 'Bearer t' },
+      body: JSON.stringify({ slot_id: 's2' }),
+    });
+    expect(res.status).toBe(201);
+    expect(state.bookings).toHaveLength(2);
   });
 
   test('410 slot_started for past slot', async () => {
@@ -1710,6 +2623,30 @@ describe('LIFF POST /api/liff/events/me/:bookingId/cancel', () => {
     expect(res.status).toBe(200);
     expect(state.bookings[0].status).toBe('cancelled');
     expect(reminderMocks.cancelPendingRemindersFor).toHaveBeenCalledWith(expect.anything(), 'b1');
+    expect(waitlistMocks.promoteEventWaitlist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ slotId: 's1' }),
+    );
+  });
+
+  test('waitlisted booking can be cancelled before the same deadline', async () => {
+    const futureMs = Date.now() + 7 * 24 * 3600_000;
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', is_published: 1, waitlist_enabled: 1, cancel_deadline_hours_before: 48 })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: new Date(futureMs).toISOString(), ends_at: new Date(futureMs + 7200_000).toISOString(), capacity: 1, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'waitlisted' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1 }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    liffAuthMocks.verifyCallerLineUserId.mockResolvedValue('U1');
+    const app = setupApp(state);
+    const res = await app.request('/api/liff/events/me/b1/cancel?liffId=L1', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer t' },
+    });
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('cancelled');
+    expect(waitlistMocks.promoteEventWaitlist).not.toHaveBeenCalled();
   });
 
   test('403 cancel_not_allowed when cancel_deadline_hours_before is null', async () => {
@@ -1838,6 +2775,91 @@ describe('admin bookings management', () => {
     expect(body.items.map((x) => x.id)).toEqual(['b1']);
   });
 
+  test('POST bulk-decide confirms multiple bookings and sends one grouped notification', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', reminder_day_before_enabled: 1, reminder_hours_before: 2 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null },
+        { id: 's2', event_id: 'e1', starts_at: '2099-06-02T10:00:00Z', ends_at: '2099-06-02T12:00:00Z', capacity: null, is_active: 1, sort_order: 1, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+        { id: 'b2', event_id: 'e1', slot_id: 's2', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/bulk-decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'confirm',
+        booking_ids: ['b1', 'b2'],
+        comment: '事前資料はこちらです。\nhttps://example.com/materials',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { updated: number; skipped: number };
+    expect(body).toMatchObject({ updated: 2, skipped: 0 });
+    expect(state.bookings.map((booking) => booking.status)).toEqual(['confirmed', 'confirmed']);
+    expect(
+      state.bookings.map((booking) => (booking as Record<string, unknown>).internal_note),
+    ).toEqual([
+      '[approval comment] 事前資料はこちらです。\nhttps://example.com/materials',
+      '[approval comment] 事前資料はこちらです。\nhttps://example.com/materials',
+    ]);
+    expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalledTimes(2);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledTimes(1);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({
+          bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
+          startsAtJstList: ['2099-06-01 19:00', '2099-06-02 19:00'],
+          approvalComment: '事前資料はこちらです。\nhttps://example.com/materials',
+        }),
+      }),
+    );
+  });
+
+  test('POST bulk-decide keeps rejection and waitlist promotion when LINE notification fails', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1', waitlist_enabled: 1 })],
+      slots: [
+        { id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: 1, is_active: 1, sort_order: 0, deleted_at: null },
+      ],
+      bookings: [
+        { id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>,
+      ],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    notifierMocks.sendEventBookingNotification.mockRejectedValueOnce(
+      new Error('LINE API error: 429 Too Many Requests'),
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const app = setupApp(state);
+
+    const res = await app.request('/api/events/admin/events/e1/bookings/bulk-decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'reject', booking_ids: ['b1'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('rejected');
+    expect(waitlistMocks.promoteEventWaitlist).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ slotId: 's1' }),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[event-booking] bulk decision notification failed',
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
+  });
+
   test('POST decide confirm transitions to confirmed and creates reminders', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1', reminder_day_before_enabled: 1, reminder_hours_before: 2 })],
@@ -1850,14 +2872,166 @@ describe('admin bookings management', () => {
     const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'confirm' }),
+      body: JSON.stringify({
+        action: 'confirm',
+        comment: '前日までにご確認ください。\nhttps://example.com/guide',
+      }),
     });
     expect(res.status).toBe(200);
     expect(state.bookings[0].status).toBe('confirmed');
+    expect((state.bookings[0] as Record<string, unknown>).internal_note).toBe(
+      '[approval comment] 前日までにご確認ください。\nhttps://example.com/guide',
+    );
     expect(reminderMocks.computeRemindersForBooking).toHaveBeenCalled();
     expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: 'confirmed' }),
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({
+          bookingHistoryUrl: 'https://liff.line.me/L1?page=event-me',
+          approvalComment: '前日までにご確認ください。\nhttps://example.com/guide',
+        }),
+      }),
     );
+  });
+
+  test('POST decide can schedule a muted confirmation notification', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'confirm',
+        notify_at: '2099-05-10T00:00:00.000Z',
+        notification_disabled: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('confirmed');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+    expect(
+      decisionNotificationMocks.enqueueEventBookingDecisionNotification,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        lineAccountId: 'la1',
+        eventId: 'e1',
+        friendId: 'f1',
+        kind: 'confirmed',
+        scheduledAt: '2099-05-10T00:00:00.000Z',
+        notificationDisabled: true,
+      }),
+    );
+  });
+
+  test('POST decide passes mute option to an immediate rejection notification', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'reject',
+        reason: '日程の再調整が必要です',
+        notification_disabled: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'rejected',
+        notificationDisabled: true,
+      }),
+    );
+  });
+
+  test('POST decide uses the event default message when comment is omitted', async () => {
+    const defaultMessage = '👇️教材PDFのダウンロードはこちら👇️\nhttps://eiken-study-materials-lp.vercel.app/';
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        confirmation_message_extra: defaultMessage,
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm' }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({ approvalComment: defaultMessage }),
+      }),
+    );
+  });
+
+  test('POST decide allows an explicit blank comment to skip the event default', async () => {
+    const state = {
+      events: [baseEvent({
+        id: 'e1',
+        line_account_id: 'la1',
+        confirmation_message_extra: '通常は送る案内',
+      })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', comment: '' }),
+    });
+    expect(res.status).toBe(200);
+    expect(notifierMocks.sendEventBookingNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'confirmed',
+        ctx: expect.objectContaining({ approvalComment: undefined }),
+      }),
+    );
+  });
+
+  test('POST decide rejects an approval comment longer than 2000 characters', async () => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status: 'requested' } as BookingRow & Record<string, unknown>],
+      accounts: [{ id: 'la1', liff_id: 'L1', is_active: 1, channel_access_token: 'tok' }],
+      friends: [{ id: 'f1', line_account_id: 'la1', line_user_id: 'U1' }],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1/decide?account_id=la1', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'confirm', comment: 'あ'.repeat(2001) }),
+    });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: 'invalid_approval_comment' });
+    expect(state.bookings[0].status).toBe('requested');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
   });
 
   test('POST decide reject transitions to rejected and appends reason to internal_note', async () => {
@@ -1954,6 +3128,23 @@ describe('admin bookings management', () => {
     expect(state.bookings[0].status).toBe('attended');
   });
 
+  test.each(['attended', 'no_show'])('PUT status=confirmed restores %s→confirmed', async (status) => {
+    const state = {
+      events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
+      slots: [{ id: 's1', event_id: 'e1', starts_at: '2099-06-01T10:00:00Z', ends_at: '2099-06-01T12:00:00Z', capacity: null, is_active: 1, sort_order: 0, deleted_at: null }],
+      bookings: [{ id: 'b1', event_id: 'e1', slot_id: 's1', friend_id: 'f1', line_account_id: 'la1', status } as BookingRow & Record<string, unknown>],
+    };
+    const app = setupApp(state);
+    const res = await app.request('/api/events/admin/events/e1/bookings/b1?account_id=la1', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'confirmed' }),
+    });
+    expect(res.status).toBe(200);
+    expect(state.bookings[0].status).toBe('confirmed');
+    expect(notifierMocks.sendEventBookingNotification).not.toHaveBeenCalled();
+  });
+
   test('PUT status=no_show on requested booking returns 409', async () => {
     const state = {
       events: [baseEvent({ id: 'e1', line_account_id: 'la1' })],
@@ -2001,9 +3192,11 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     venue_url: null,
     image_url: null,
     description: null,
+    detail_url: null,
     description_centered: 0,
     max_bookings_per_friend: null,
     requires_approval: 0,
+    waitlist_enabled: 0,
     cancel_deadline_hours_before: null,
     reminder_day_before_enabled: 1,
     reminder_hours_before: null,
@@ -2016,6 +3209,9 @@ function baseEvent(over: Partial<EventRow>): EventRow {
     target_type: 'single',
     account_ids: null,
     dedup_priority: null,
+    booking_form_fields: '[]',
+    confirmation_message_extra: null,
+    reminder_message_extra: null,
     ...over,
   };
 }

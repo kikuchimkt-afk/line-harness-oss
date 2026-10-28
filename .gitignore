@@ -6,6 +6,7 @@ dist/
 .env
 .env.local
 *.log
+*.tsbuildinfo
 .DS_Store
 .mcp.json
 *.toml.bak
@@ -15,3 +16,5 @@ apps/web/out/
 apps/worker/dist/
 .worktrees/
 .claude/worktrees/
+backups/
+tmp/

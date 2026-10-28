@@ -4,6 +4,7 @@
 
 export type EventBookingStatus =
   | 'requested'
+  | 'waitlisted'
   | 'confirmed'
   | 'rejected'
   | 'cancelled'
@@ -26,6 +27,17 @@ export type EventTargetType = 'single' | 'multi-account-dedup';
 
 export const EVENT_TARGET_TYPES: ReadonlyArray<EventTargetType> = ['single', 'multi-account-dedup'];
 
+export type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+export interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
+}
+
 export interface EventRow {
   id: string;
   line_account_id: string;
@@ -34,9 +46,11 @@ export interface EventRow {
   venue_url: string | null;
   image_url: string | null;
   description: string | null;
+  detail_url: string | null;
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
   reminder_day_before_enabled: number;
   reminder_hours_before: number | null;
@@ -54,6 +68,7 @@ export interface EventRow {
   account_ids: string | null;
   dedup_priority: string | null;
   failed_account_ids: string | null;
+  booking_form_fields: string;
 }
 
 export interface EventSlotRow {
@@ -77,8 +92,10 @@ export interface EventBookingRow {
   friend_id: string;
   status: EventBookingStatus;
   customer_note: string | null;
+  form_answers: string;
   internal_note: string | null;
   requested_at: string;
+  promoted_at: string | null;
   decided_at: string | null;
   decided_by_staff_id: string | null;
   cancelled_at: string | null;
@@ -100,12 +117,27 @@ export interface EventBookingReminderRow {
 
 export const EVENT_NAME_MAX = 255;
 export const EVENT_DESCRIPTION_MAX = 20000;
+export const EVENT_DETAIL_URL_MAX = 2048;
 export const CUSTOMER_NOTE_MAX = 5000;
+export const EVENT_FORM_FIELDS_MAX = 20;
+export const EVENT_FORM_LABEL_MAX = 80;
+export const EVENT_FORM_OPTION_MAX = 80;
+export const EVENT_FORM_PLACEHOLDER_MAX = 120;
+export const EVENT_FORM_ANSWER_MAX = 2000;
+export const EVENT_FORM_ANSWERS_JSON_MAX = 20000;
 export const REQUESTED_EXPIRE_HOURS = 24;
 export const REMINDER_MAX_RETRY = 3;
 export const EVENT_IDEMPOTENCY_TTL_MINUTES = 60 * 24;
 
 export const ACTIVE_BOOKING_STATUSES: ReadonlyArray<EventBookingStatus> = [
   'requested',
+  'confirmed',
+];
+
+// These statuses still belong to the friend and count toward the event's
+// per-person booking limit. `waitlisted` intentionally does not consume a seat.
+export const OPEN_BOOKING_STATUSES: ReadonlyArray<EventBookingStatus> = [
+  'requested',
+  'waitlisted',
   'confirmed',
 ];

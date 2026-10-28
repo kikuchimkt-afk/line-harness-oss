@@ -5,6 +5,7 @@ const lineClientMocks = vi.hoisted(() => ({
   getProfile: vi.fn(),
   replyMessage: vi.fn(),
   pushMessage: vi.fn(),
+  pushTextMessage: vi.fn(),
 }));
 
 // Stub the DB graph — these tests focus on webhook guard behavior and the
@@ -13,6 +14,7 @@ vi.mock('@line-crm/db', () => ({
   upsertFriend: vi.fn(),
   updateFriendFollowStatus: vi.fn(),
   getFriendByLineUserId: vi.fn(),
+  getFriendById: vi.fn(),
   getScenarios: vi.fn(),
   enrollFriendInScenario: vi.fn(),
   getScenarioSteps: vi.fn(),
@@ -44,6 +46,10 @@ vi.mock('../services/event-bus.js', () => ({
 vi.mock('../services/step-delivery.js', () => ({
   buildMessage: vi.fn(),
   expandVariables: vi.fn(),
+  messageToLogPayload: vi.fn((message: { type: string; text?: string }) => ({
+    messageType: message.type,
+    content: message.text ?? JSON.stringify(message),
+  })),
 }));
 
 import { verifySignature } from '@line-crm/line-sdk';
@@ -54,6 +60,7 @@ import {
   computeNextDeliveryAt,
   enrollFriendInScenario,
   getEntryRouteByRefCode,
+  getFriendById,
   getFriendByLineUserId,
   getLineAccounts,
   getMessageTemplateById,
@@ -184,6 +191,147 @@ describe('POST /webhook — DoS defenses (#104)', () => {
 });
 
 describe('POST /webhook — first-contact existing friends', () => {
+  test('sends a LINE notice to configured recipients on new follow', async () => {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'acc-1',
+        channel_id: '201',
+        name: '講師公式',
+        channel_access_token: 'account-token',
+        channel_secret: 'env-default-secret',
+        is_active: 1,
+        country: null,
+        role: null,
+        display_order: 0,
+        created_at: '2026-07-04T09:00:00.000+09:00',
+        updated_at: '2026-07-04T09:00:00.000+09:00',
+        login_channel_id: null,
+        login_channel_secret: null,
+        liff_id: null,
+        token_expires_at: null,
+        og_site_name: null,
+        og_default_image_url: null,
+        og_default_description: null,
+      },
+    ]);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
+    vi.mocked(jstNow).mockReturnValue('2026-07-04T10:20:00.000+09:00');
+    lineClientMocks.getProfile.mockResolvedValue({
+      userId: 'U-new',
+      displayName: '新規さん',
+      pictureUrl: 'https://example.com/new.jpg',
+      statusMessage: null,
+    });
+    vi.mocked(upsertFriend).mockResolvedValue({
+      id: 'friend-new',
+      line_user_id: 'U-new',
+      display_name: '新規さん',
+      picture_url: 'https://example.com/new.jpg',
+      status_message: null,
+      is_following: 1,
+      user_id: null,
+      line_account_id: 'acc-1',
+      metadata: '{}',
+      first_tracked_link_id: null,
+      created_at: '2026-07-04T10:20:00.000+09:00',
+      updated_at: '2026-07-04T10:20:00.000+09:00',
+      ref_code: 'qr-demo',
+    } as any);
+    vi.mocked(getFriendById).mockResolvedValue(null);
+    vi.mocked(getEntryRouteByRefCode).mockResolvedValue({
+      id: 'route-1',
+      ref_code: 'qr-demo',
+      name: '体験レッスンQR',
+      description: null,
+      pool_id: null,
+      intro_template_id: null,
+      run_account_friend_add_scenarios: 1,
+      scenario_id: null,
+      is_active: 1,
+      created_at: '2026-07-04T09:00:00.000+09:00',
+      updated_at: '2026-07-04T09:00:00.000+09:00',
+    } as any);
+    vi.mocked(getScenarios).mockResolvedValue([]);
+
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        const stmt = {
+          bind: vi.fn(() => stmt),
+          first: vi.fn(async () => {
+            if (sql.includes('account_settings')) {
+              return { value: JSON.stringify(['admin-friend']) };
+            }
+            if (sql.includes('line_accounts')) {
+              return { name: '講師公式' };
+            }
+            return null;
+          }),
+          all: vi.fn(async () => {
+            if (sql.includes('FROM friends') && sql.includes('id IN')) {
+              return { results: [{ id: 'admin-friend', line_user_id: 'U-admin' }] };
+            }
+            return { results: [] };
+          }),
+          run: vi.fn().mockResolvedValue({}),
+        };
+        return stmt;
+      }),
+    } as unknown as D1Database;
+
+    const executionCtx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const app = setupApp();
+    const validShapedSignature = 'A'.repeat(43) + '=';
+    const res = await app.request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Line-Signature': validShapedSignature,
+        },
+        body: JSON.stringify({
+          destination: 'bot',
+          events: [
+            {
+              type: 'follow',
+              replyToken: 'reply-token',
+              timestamp: Date.now(),
+              source: { type: 'user', userId: 'U-new' },
+              webhookEventId: 'event-follow-1',
+              deliveryContext: { isRedelivery: false },
+              mode: 'active',
+            },
+          ],
+        }),
+      },
+      { ...baseEnv, DB: db },
+      executionCtx,
+    );
+
+    expect(res.status).toBe(200);
+    const processing = vi.mocked(executionCtx.waitUntil).mock.calls[0]?.[0] as Promise<unknown>;
+    await processing;
+
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('新しい友だちが追加されました'),
+    );
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('友だち：新規さん'),
+    );
+    expect(lineClientMocks.pushTextMessage).toHaveBeenCalledWith(
+      'U-admin',
+      expect.stringContaining('流入元：体験レッスンQR'),
+    );
+  });
+
   test('auto-registers an unknown text-message sender without firing friend_add handling', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
@@ -211,6 +359,7 @@ describe('POST /webhook — first-contact existing friends', () => {
     vi.mocked(upsertChatOnMessage).mockResolvedValue({
       id: 'chat-1',
       friend_id: 'friend-1',
+      line_account_id: null,
       operator_id: null,
       status: 'unread',
       notes: null,
@@ -273,8 +422,9 @@ describe('POST /webhook — first-contact existing friends', () => {
       displayName: 'Existing Friend',
       pictureUrl: 'https://example.com/profile.jpg',
       statusMessage: 'hello',
+      lineAccountId: null,
     });
-    expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1');
+    expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1', null);
     expect(fireEvent).toHaveBeenCalledWith(
       db,
       'message_received',
@@ -295,5 +445,118 @@ describe('POST /webhook — first-contact existing friends', () => {
     expect(addTagToFriend).not.toHaveBeenCalled();
     expect(getEntryRouteByRefCode).not.toHaveBeenCalled();
     expect(getMessageTemplateById).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /webhook — known referral tag on follow', () => {
+  function setupReferralFollow(options: {
+    ref?: string | null;
+    tagId?: string | null;
+    routeExists?: boolean;
+    friendAccountId?: string;
+    tagAlreadyAttached?: boolean;
+    tagWriteFails?: boolean;
+  } = {}) {
+    const ref = options.ref === undefined ? 'fictional-autumn-qr' : options.ref;
+    const tagId = options.tagId === undefined ? 'fictional-source-tag' : options.tagId;
+    const enrolled = new Set<string>();
+    const friend = {
+      id: 'fictional-friend', line_user_id: 'U-fictional', display_name: '架空の生徒',
+      line_account_id: options.friendAccountId ?? 'fictional-account',
+      is_following: 1, ref_code: ref, metadata: '{}', user_id: null,
+    } as any;
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getLineAccounts).mockResolvedValue([{
+      id: 'fictional-account', channel_secret: 'env-default-secret',
+      channel_access_token: 'fictional-account-token', is_active: 1,
+    } as any]);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
+    vi.mocked(getFriendById).mockResolvedValue(friend);
+    vi.mocked(upsertFriend).mockResolvedValue(friend);
+    lineClientMocks.getProfile.mockResolvedValue({ displayName: '架空の生徒' });
+    vi.mocked(jstNow).mockReturnValue('2026-10-12T12:00:00.000+09:00');
+    vi.mocked(getEntryRouteByRefCode).mockResolvedValue(options.routeExists === false ? null : {
+      id: 'fictional-route', ref_code: ref, name: '架空のチラシ', tag_id: tagId,
+      scenario_id: 'fictional-campaign', intro_template_id: null,
+      run_account_friend_add_scenarios: 0, is_active: 1,
+    } as any);
+    // The route and the tag trigger deliberately target the same scenario.
+    vi.mocked(getScenarios).mockResolvedValue([{
+      id: 'fictional-campaign', trigger_type: 'tag_added', trigger_tag_id: tagId,
+      is_active: 1, line_account_id: 'fictional-account',
+    } as any]);
+    vi.mocked(enrollFriendInScenario).mockImplementation(async (_db, _friendId, scenarioId) => {
+      enrolled.add(scenarioId);
+      return null;
+    });
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        let bindings: unknown[] = [];
+        const stmt = {
+          bind: vi.fn((...values: unknown[]) => { bindings = values; return stmt; }),
+          first: vi.fn(async () => sql.includes('FROM friend_scenarios') && enrolled.has(String(bindings[1]))
+            ? { id: 'fictional-enrollment' } : null),
+          all: vi.fn(async () => ({ results: [] })),
+          run: vi.fn(async () => {
+            if (sql.includes('INSERT OR IGNORE INTO friend_tags')) {
+              if (options.tagWriteFails) throw new Error('fictional tag write failure');
+              return { meta: { changes: options.tagAlreadyAttached ? 0 : 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }),
+        };
+        return stmt;
+      }),
+    } as unknown as D1Database;
+    return { db, async dispatch() {
+      const executionCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+      const response = await setupApp().request('/webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' },
+        body: JSON.stringify({ events: [{ type: 'follow', source: { type: 'user', userId: 'U-fictional' }, replyToken: 'fictional-reply' }] }),
+      }, { ...baseEnv, DB: db }, executionCtx);
+      await (vi.mocked(executionCtx.waitUntil).mock.calls[0]?.[0] as Promise<unknown>);
+      expect(response.status).toBe(200);
+    } };
+  }
+
+  test('attaches a known route tag and does not double-enroll its tag-triggered scenario', async () => {
+    const { db, dispatch } = setupReferralFollow();
+    await dispatch();
+    expect(getEntryRouteByRefCode).toHaveBeenCalledWith(db, 'fictional-autumn-qr');
+    expect(getFriendByLineUserId).toHaveBeenCalledWith(db, 'U-fictional', 'fictional-account');
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(enrollFriendInScenario).toHaveBeenCalledWith(db, 'fictional-friend', 'fictional-campaign');
+    expect(fireEvent).toHaveBeenCalledWith(db, 'tag_change', {
+      friendId: 'fictional-friend', eventData: { tagId: 'fictional-source-tag', action: 'add' },
+    });
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    expect(lineClientMocks.pushMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a route without a tag', { tagId: null }],
+    ['an unknown ref', { routeExists: false }],
+    ['no ref', { ref: null }],
+    ['a mismatched friend account', { friendAccountId: 'fictional-other-account' }],
+  ])('does not infer or attach a campaign tag for %s', async (_label, options) => {
+    const { db, dispatch } = setupReferralFollow(options);
+    await dispatch();
+    expect(vi.mocked(db.prepare).mock.calls.some(([sql]) => sql.includes('INSERT OR IGNORE INTO friend_tags'))).toBe(false);
+    expect(vi.mocked(fireEvent).mock.calls.some(([, event]) => event === 'tag_change')).toBe(false);
+  });
+
+  test('does not repeat tag side effects when OAuth already attached the tag', async () => {
+    const { dispatch } = setupReferralFollow({ tagAlreadyAttached: true });
+    await dispatch();
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fireEvent).mock.calls.some(([, event]) => event === 'tag_change')).toBe(false);
+  });
+
+  test('keeps the dedicated enrollment and friend-add event when tag attachment fails', async () => {
+    const { db, dispatch } = setupReferralFollow({ tagWriteFails: true });
+    await dispatch();
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(fireEvent).toHaveBeenCalledWith(db, 'friend_add', expect.objectContaining({ friendId: 'fictional-friend' }), 'fictional-account-token', 'fictional-account');
   });
 });

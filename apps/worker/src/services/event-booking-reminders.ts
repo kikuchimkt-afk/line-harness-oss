@@ -9,6 +9,9 @@ import type {
   EventBookingNotificationSender,
   EventNotificationKind,
 } from './event-booking-notifier.js';
+import type { IndividualNotificationBudget } from './individual-notification-budget.js';
+import { BlockedFriendError } from './friend-block-policy.js';
+import { BLOCKED_OUTBOUND_REASON, isBlockedNotificationTarget } from './blocked-outbound.js';
 
 export interface ComputedReminder {
   kind: EventReminderKind;
@@ -97,6 +100,8 @@ export async function cancelPendingRemindersFor(
 interface DueEventReminderRow {
   id: string;
   booking_id: string;
+  friend_id?: string;
+  line_account_id?: string;
   kind: EventReminderKind;
   retry_count: number;
   event_name: string;
@@ -106,6 +111,7 @@ interface DueEventReminderRow {
   channel_access_token: string;
   line_user_id: string;
   reminder_hours_before: number | null;
+  reminder_message_extra: string | null;
 }
 
 function startsAtJstFmt(utcIso: string): string {
@@ -120,19 +126,22 @@ function notificationKindFor(reminderKind: EventReminderKind): EventNotification
 export interface ProcessDueEventRemindersParams {
   now: Date;
   sender: EventBookingNotificationSender;
+  budget?: IndividualNotificationBudget;
 }
 
 export async function processDueEventReminders(
   db: D1Database,
   params: ProcessDueEventRemindersParams,
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; skipped?: number }> {
   // status: 'pending' or 'failed' (retryable). 'sent' / 'failed_permanent'
   // / 'cancelled' are excluded. Booking must still be confirmed and slot
   // start in the future at processing time.
   const due = await db
     .prepare(
       `SELECT r.id, r.booking_id, r.kind, r.retry_count,
+              b.friend_id, b.line_account_id,
               e.name AS event_name, e.venue_name, e.venue_url, e.reminder_hours_before,
+              e.reminder_message_extra,
               s.starts_at,
               la.channel_access_token,
               f.line_user_id
@@ -146,6 +155,7 @@ export async function processDueEventReminders(
           AND r.scheduled_at <= ?
           AND b.status = 'confirmed'
           AND s.starts_at > ?
+        ORDER BY r.scheduled_at ASC, r.id ASC
         LIMIT 100`,
     )
     .bind(params.now.toISOString(), params.now.toISOString())
@@ -153,34 +163,48 @@ export async function processDueEventReminders(
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
   for (const row of due.results ?? []) {
+    const reservation = params.budget?.reserve();
+    if (params.budget && !reservation) break;
+    let claimedRetry: number | null = null;
     // Optimistic claim: bump retry_count CAS-style on (id, retry_count).
     // If two cron invocations fetched the same row, only one of them wins
     // this UPDATE; the other gets changes=0 and skips. retry_count thus
     // doubles as a claim epoch, sufficient on D1 without a dedicated lock
     // column or a new migration.
-    const claim = await db
-      .prepare(
-        `UPDATE event_booking_reminders
-            SET retry_count = retry_count + 1
-          WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
-      )
-      .bind(row.id, row.retry_count)
-      .run();
-    if ((claim.meta?.changes ?? 0) === 0) continue;
-    const claimedRetry = row.retry_count + 1;
-
     try {
+      if (await isBlockedNotificationTarget(db, row)) {
+        await db.prepare(`UPDATE event_booking_reminders SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
+      const claim = await db
+        .prepare(
+          `UPDATE event_booking_reminders
+              SET retry_count = retry_count + 1
+            WHERE id = ? AND retry_count = ? AND status IN ('pending','failed')`,
+        )
+        .bind(row.id, row.retry_count)
+        .run();
+      if ((claim.meta?.changes ?? 0) === 0) continue;
+      claimedRetry = row.retry_count + 1;
+      reservation?.commit();
+
       await params.sender({
         channelAccessToken: row.channel_access_token,
         toLineUserId: row.line_user_id,
         kind: notificationKindFor(row.kind),
+        db,
+        friendId: row.friend_id,
+        lineAccountId: row.line_account_id,
         ctx: {
           eventName: row.event_name,
           startsAtJst: startsAtJstFmt(row.starts_at),
           venueName: row.venue_name,
           venueUrl: row.venue_url,
           hoursBefore: row.reminder_hours_before ?? 0,
+          messageExtra: row.reminder_message_extra,
         },
       });
       await db
@@ -191,6 +215,12 @@ export async function processDueEventReminders(
         .run();
       sent++;
     } catch (e) {
+      if (e instanceof BlockedFriendError) {
+        await db.prepare(`UPDATE event_booking_reminders SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
+      if (claimedRetry === null) throw e;
       const newStatus = claimedRetry >= REMINDER_MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
         .prepare(
@@ -199,9 +229,11 @@ export async function processDueEventReminders(
         .bind(newStatus, e instanceof Error ? e.message : String(e), row.id)
         .run();
       failed++;
+    } finally {
+      reservation?.release();
     }
   }
-  return { sent, failed };
+  return { sent, failed, ...(skipped ? { skipped } : {}) };
 }
 
 export const _internals = { REMINDER_MAX_RETRY };

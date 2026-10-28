@@ -88,7 +88,20 @@ export interface EventDetail {
   description_centered: number;
   max_bookings_per_friend: number | null;
   requires_approval: number;
+  waitlist_enabled: number;
   cancel_deadline_hours_before: number | null;
+  booking_form_fields?: EventBookingFormField[] | string | null;
+}
+
+export type EventBookingFormFieldType = 'text' | 'textarea' | 'select' | 'checkbox';
+
+export interface EventBookingFormField {
+  id: string;
+  label: string;
+  type: EventBookingFormFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
 }
 
 export interface EventSlot {
@@ -107,11 +120,13 @@ export interface EventBookingMine {
   event_id: string;
   status: string;
   customer_note: string | null;
+  form_answers?: string | Record<string, string | string[]> | null;
   event_name: string;
   event_image_url: string | null;
   venue_name: string | null;
   venue_url: string | null;
   cancel_deadline_hours_before: number | null;
+  waitlist_position?: number | null;
   slot_starts_at: string;
   slot_ends_at: string;
 }
@@ -142,7 +157,11 @@ export const api = {
   getEventSlots: (id: string) => get<{ items: EventSlot[] }>(`/api/liff/events/${id}/slots`),
   createEventBooking: (
     eventId: string,
-    body: { slot_id: string; customer_note?: string | null },
+    body: {
+      slot_id: string;
+      customer_note?: string | null;
+      form_answers?: Record<string, string | string[]>;
+    },
     idempotencyKey: string,
   ) =>
     post<{ id: string; status: string }>(

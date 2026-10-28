@@ -3,6 +3,33 @@ import type { Env } from '../index.js';
 
 const images = new Hono<Env>();
 
+function extensionForImage(key: string, contentType: string): string {
+  const keyMatch = key.toLowerCase().match(/\.(png|jpe?g|gif|webp)$/);
+  if (keyMatch) return keyMatch[1] === 'jpeg' ? 'jpg' : keyMatch[1];
+
+  const byType: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+  };
+  return byType[contentType] ?? 'png';
+}
+
+export function buildAttachmentHeader(filename: string): string {
+  const cleaned = filename
+    .replace(/[\u0000-\u001f\u007f\\/]/g, '_')
+    .trim() || 'LINE-image.png';
+  const ascii = cleaned
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .replace(/["\\]/g, '_');
+  const encoded = encodeURIComponent(cleaned).replace(/[!'()*]/g, (ch) =>
+    `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 // POST /api/images — upload image (base64 or binary)
 images.post('/api/images', async (c) => {
   try {
@@ -82,8 +109,18 @@ images.get('/images/:key', async (c) => {
   }
 
   const headers = new Headers();
-  headers.set('Content-Type', object.httpMetadata?.contentType || 'image/png');
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  const contentType = object.httpMetadata?.contentType || 'image/png';
+  const shouldDownload = c.req.query('download') === '1';
+  headers.set('Content-Type', contentType);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  if (shouldDownload) {
+    const fallbackFilename = `LINE-image.${extensionForImage(key, contentType)}`;
+    const filename = object.customMetadata?.originalFilename || fallbackFilename;
+    headers.set('Content-Disposition', buildAttachmentHeader(filename));
+    headers.set('Cache-Control', 'private, no-store');
+  } else {
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  }
   headers.set('ETag', object.etag);
 
   return new Response(object.body, { headers });

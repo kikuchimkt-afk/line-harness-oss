@@ -1,5 +1,29 @@
 import { describe, expect, test } from 'vitest';
-import { generateBulkSlots } from './bulk-slot-generator.js';
+import { buildTimeSlotChoices, generateBulkSlots } from './bulk-slot-generator.js';
+
+describe('buildTimeSlotChoices', () => {
+  test('builds clickable 30-minute choices inside the selected range', () => {
+    expect(buildTimeSlotChoices('11:00', '13:00')).toEqual([
+      { start: '11:00', end: '11:30' },
+      { start: '11:30', end: '12:00' },
+      { start: '12:00', end: '12:30' },
+      { start: '12:30', end: '13:00' },
+    ]);
+  });
+
+  test('returns empty for reversed or non-30-minute-aligned ranges', () => {
+    expect(buildTimeSlotChoices('13:00', '11:00')).toEqual([]);
+    expect(buildTimeSlotChoices('11:15', '13:00')).toEqual([]);
+    expect(buildTimeSlotChoices('11:00', '13:15')).toEqual([]);
+  });
+
+  test('supports a custom interval without changing bulk slot output', () => {
+    expect(buildTimeSlotChoices('09:00', '11:00', 60)).toEqual([
+      { start: '09:00', end: '10:00' },
+      { start: '10:00', end: '11:00' },
+    ]);
+  });
+});
 
 describe('generateBulkSlots', () => {
   test('weekly Mon/Wed 10:00-12:00 over a 2-week window', () => {

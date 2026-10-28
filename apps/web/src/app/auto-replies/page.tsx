@@ -123,6 +123,7 @@ export default function AutoRepliesPage() {
     if (r.responseType === 'silent') return <span className="text-gray-400 text-xs">silent</span>
     if (r.responseType === 'flex') return <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-medium">📋 flex</span>
     if (r.responseType === 'image') return <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-medium">🖼️ image</span>
+    if (r.responseType === 'text_image') return <span className="px-1.5 py-0.5 rounded bg-pink-100 text-rose-700 text-[10px] font-medium">📝＋🖼️ text+image</span>
     return <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 text-[10px] font-medium">📝 text</span>
   }
 

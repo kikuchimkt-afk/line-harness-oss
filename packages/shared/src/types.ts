@@ -17,6 +17,10 @@ export interface Friend {
   lineUserId: string;
   /** 表示名 */
   displayName: string;
+  /** LINEから取得した元の表示名。L Harness表示名がある場合も残す */
+  lineDisplayName?: string | null;
+  /** L Harness内だけで使う表示名 */
+  harnessDisplayName?: string | null;
   /** プロフィール画像URL */
   pictureUrl: string | null;
   /** ステータスメッセージ */
@@ -110,7 +114,7 @@ export type ScenarioTriggerType = "friend_add" | "tag_added" | "manual";
 
 /**
  * シナリオの配信モード
- * - relative: 前ステップからの相対遅延 (delayMinutes)
+ * - relative: 前ステップからの相対遅延 (delayMinutes) または前ステップ後 N 日後の HH:MM (offsetDays + deliveryTime)
  * - elapsed: 購読開始からの経過時間 (offsetDays + offsetMinutes)
  * - absolute_time: 購読開始から N 日後の HH:MM JST (offsetDays + deliveryTime)
  */
@@ -153,13 +157,13 @@ export interface ScenarioStep {
   scenarioId: string;
   /** ステップ順序 (1始まり) */
   stepOrder: number;
-  /** 前のステップからの遅延時間 (分) — relative mode のみ意味あり、他モードは 0 */
+  /** 前のステップからの遅延時間 (分) — relative mode の分指定で使用、他モードは 0 */
   delayMinutes: number;
-  /** 購読開始からの経過日数 — elapsed / absolute_time mode 用 */
+  /** 経過日数 — elapsed / absolute_time mode、または relative mode の前ステップ後 N 日指定で使用 */
   offsetDays?: number | null;
   /** 経過日数に追加する分 (0..1439) — elapsed mode 用 */
   offsetMinutes?: number | null;
-  /** 配信時刻 "HH:MM" (JST) — absolute_time mode 用 */
+  /** 配信時刻 "HH:MM" (JST) — absolute_time mode、または relative mode の前ステップ後時刻指定で使用 */
   deliveryTime?: string | null;
   /** 参照するテンプレート ID (null = 直接入力モード) */
   templateId?: string | null;
@@ -233,7 +237,7 @@ export interface FriendScenario {
 // -----------------------------------------------------------------------------
 
 /** 配信対象種別 */
-export type BroadcastTargetType = "all" | "tag" | "segment" | "multi-account-dedup";
+export type BroadcastTargetType = "all" | "tag" | "friends" | "segment" | "multi-account-dedup";
 
 /** 配信ステータス */
 export type BroadcastStatus = "draft" | "scheduled" | "sending" | "sent";
@@ -251,6 +255,8 @@ export interface Broadcast {
   targetType: BroadcastTargetType;
   /** 対象タグID (targetType が 'tag' の場合のみ使用) */
   targetTagId: string | null;
+  /** 個別選択した友だちID (targetType が 'friends' の場合のみ使用) */
+  targetFriendIds?: string[] | null;
   /** 配信ステータス */
   status: BroadcastStatus;
   /** 予約配信日時 (ISO 8601、即時配信の場合は null) */
@@ -817,6 +823,7 @@ export interface Automation {
   eventType: AutomationEventType;
   conditions: Record<string, unknown>;
   actions: AutomationAction[];
+  lineAccountId: string | null;
   isActive: boolean;
   priority: number;
   createdAt: string;
@@ -833,6 +840,40 @@ export interface AutomationLog {
   createdAt: string;
 }
 
+export type RichMenuAssignmentStatus =
+  | 'pending'
+  | 'retry_wait'
+  | 'processing'
+  | 'applied'
+  | 'failed_permanent';
+
+export interface RichMenuAssignmentItem {
+  assignmentKey: string;
+  automationId: string | null;
+  automationName: string | null;
+  source: 'automation' | 'manual' | 'backfill';
+  status: RichMenuAssignmentStatus;
+  retryCount: number;
+  maxRetries: number;
+  nextAttemptAt: string | null;
+  lastAttemptAt: string | null;
+  appliedAt: string | null;
+  verifiedAt: string | null;
+  updatedAt: string;
+  reasonLabel: string;
+  canRetry: boolean;
+}
+
+export interface RichMenuAssignmentOverview {
+  summary: {
+    applied: number;
+    waiting: number;
+    needsAttention: number;
+    total: number;
+  };
+  items: RichMenuAssignmentItem[];
+}
+
 // -----------------------------------------------------------------------------
 // スタッフ (StaffMember)
 // -----------------------------------------------------------------------------
@@ -842,6 +883,7 @@ export interface StaffMember {
   email: string | null;
   role: 'owner' | 'admin' | 'staff';
   apiKey: string;
+  lineAccountIds: string[];
   isActive: boolean;
   createdAt: string;
   updatedAt: string;

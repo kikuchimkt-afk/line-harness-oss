@@ -53,7 +53,9 @@ export interface FormWithStats extends Form {
 }
 
 export async function getFormsWithStats(db: D1Database): Promise<FormWithStats[]> {
-  // Single query: forms + last submission + per-account submission counts.
+  // Single query: forms + last submission + accounts that either submitted the
+  // form or currently reference it from an active auto-reply. This keeps a
+  // newly published form visible as "delivering" before its first response.
   // json_group_array returns '[]' (not NULL) when subquery yields no rows.
   const result = await db
     .prepare(
@@ -66,17 +68,33 @@ export async function getFormsWithStats(db: D1Database): Promise<FormWithStats[]
                      'name', la.name,
                      'country', la.country,
                      'displayOrder', la.display_order,
-                     'count', sub.cnt
+                     'count', COALESCE(sub.cnt, 0)
                    )
                  )
-            FROM (
+            FROM line_accounts la
+            LEFT JOIN (
               SELECT fr.line_account_id, COUNT(*) AS cnt
               FROM form_submissions fs
               JOIN friends fr ON fr.id = fs.friend_id
               WHERE fs.form_id = f.id AND fr.line_account_id IS NOT NULL
               GROUP BY fr.line_account_id
-            ) sub
-            JOIN line_accounts la ON la.id = sub.line_account_id) AS used_by_accounts_json
+            ) sub ON sub.line_account_id = la.id
+           WHERE sub.cnt IS NOT NULL
+              OR (
+                la.is_active = 1
+                AND EXISTS (
+                  SELECT 1
+                  FROM auto_replies ar
+                  LEFT JOIN templates t ON t.id = ar.template_id
+                  WHERE ar.is_active = 1
+                    AND ar.response_type <> 'silent'
+                    AND (ar.line_account_id IS NULL OR ar.line_account_id = la.id)
+                    AND (
+                      instr(ar.response_content, f.id) > 0
+                      OR instr(COALESCE(t.message_content, ''), f.id) > 0
+                    )
+                )
+              )) AS used_by_accounts_json
        FROM forms f
        ORDER BY f.created_at DESC`,
     )
@@ -231,7 +249,11 @@ export async function updateForm(
 }
 
 export async function deleteForm(db: D1Database, id: string): Promise<void> {
-  await db.prepare(`DELETE FROM forms WHERE id = ?`).bind(id).run();
+  await db.batch([
+    db.prepare(`DELETE FROM form_opens WHERE form_id = ?`).bind(id),
+    db.prepare(`DELETE FROM form_submissions WHERE form_id = ?`).bind(id),
+    db.prepare(`DELETE FROM forms WHERE id = ?`).bind(id),
+  ]);
 }
 
 // ── Submissions ───────────────────────────────────────────────────────────────
@@ -282,4 +304,35 @@ export async function createFormSubmission(
     .prepare(`SELECT * FROM form_submissions WHERE id = ?`)
     .bind(id)
     .first<FormSubmission>())!;
+}
+
+export async function deleteFormSubmission(
+  db: D1Database,
+  formId: string,
+  submissionId: string,
+): Promise<boolean> {
+  const existing = await db
+    .prepare(`SELECT id FROM form_submissions WHERE id = ? AND form_id = ?`)
+    .bind(submissionId, formId)
+    .first<{ id: string }>();
+  if (!existing) return false;
+
+  await db
+    .prepare(`DELETE FROM form_submissions WHERE id = ? AND form_id = ?`)
+    .bind(submissionId, formId)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE forms
+       SET submit_count = (
+             SELECT COUNT(*) FROM form_submissions WHERE form_id = ?
+           ),
+           updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(formId, jstNow(), formId)
+    .run();
+
+  return true;
 }

@@ -1,5 +1,8 @@
-import { jstNow } from './utils.js';
+import { jstNow, toJstString } from './utils.js';
 // BAN検知 & リカバリ クエリヘルパー
+
+const ACCOUNT_HEALTH_LOG_RETENTION_DAYS = 90;
+const ACCOUNT_HEALTH_LOG_DELETE_BATCH_SIZE = 500;
 
 export interface AccountHealthLogRow {
   id: string;
@@ -39,6 +42,35 @@ export async function createAccountHealthLog(
   await db.prepare(`INSERT INTO account_health_logs (id, line_account_id, error_code, error_count, check_period, risk_level, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, input.lineAccountId, input.errorCode ?? null, input.errorCount, input.checkPeriod, input.riskLevel, now).run();
   return (await db.prepare(`SELECT * FROM account_health_logs WHERE id = ?`).bind(id).first<AccountHealthLogRow>())!;
+}
+
+/**
+ * 90日を超えたヘルスログを、1回あたり最大500件まで古い順に削除する。
+ *
+ * 6時間ごとの定期処理から呼ぶことを想定。削除を1ステートメントに限定し、
+ * D1 Freeプランの行書き込み数を急増させないようにする。
+ * 残件は次回の定期実行で削除される。
+ */
+export async function deleteExpiredAccountHealthLogs(db: D1Database): Promise<number> {
+  const cutoff = toJstString(
+    new Date(Date.now() - ACCOUNT_HEALTH_LOG_RETENTION_DAYS * 24 * 60 * 60_000),
+  ).slice(0, 23);
+
+  const result = await db
+    .prepare(
+      `DELETE FROM account_health_logs
+       WHERE id IN (
+         SELECT id
+         FROM account_health_logs
+         WHERE created_at < ?
+         ORDER BY created_at ASC, id ASC
+         LIMIT ?
+       )`,
+    )
+    .bind(cutoff, ACCOUNT_HEALTH_LOG_DELETE_BATCH_SIZE)
+    .run();
+
+  return result.meta.changes ?? 0;
 }
 
 /** 最新のリスクレベルを取得 */
