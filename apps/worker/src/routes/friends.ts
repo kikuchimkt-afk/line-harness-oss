@@ -610,6 +610,10 @@ friends.post('/api/friends/:id/tags', async (c) => {
       }
     }
 
+    // タグ別リッチメニュー（保存済みの「このタグには、このメニュー」）
+    const { applyTagRichMenuForFriend, safely } = await import('../services/rich-menu-tag-binding.js');
+    await safely('manual add', () => applyTagRichMenuForFriend(db, friendId, body.tagId));
+
     // イベントバス発火: tag_change
     await fireEvent(db, 'tag_change', { friendId, eventData: { tagId: body.tagId, action: 'add' } });
 
@@ -648,6 +652,9 @@ friends.delete('/api/friends/:id/tags/:tagId', async (c) => {
       // is resumed merely by unblocking. Only menu presentation is restored.
       return c.json({ success: true, data: null });
     }
+
+    const { reconcileTagRichMenuAfterRemoval, safely } = await import('../services/rich-menu-tag-binding.js');
+    await safely('manual remove', () => reconcileTagRichMenuAfterRemoval(c.env.DB, friendId, tagId));
 
     // イベントバス発火: tag_change
     await fireEvent(c.env.DB, 'tag_change', { friendId, eventData: { tagId, action: 'remove' } });

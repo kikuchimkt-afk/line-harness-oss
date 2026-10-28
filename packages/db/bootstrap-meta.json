@@ -63,7 +63,8 @@
     "055_event_detail_url.sql",
     "056_rich_menu_assignments.sql",
     "058_liff_pending_ref_attributions.sql",
-    "059_scenario_expiry.sql"
+    "059_scenario_expiry.sql",
+    "060_tag_rich_menu_bindings.sql"
   ],
-  "migrationCount": 64
+  "migrationCount": 65
 }

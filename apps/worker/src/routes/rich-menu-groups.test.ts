@@ -17,6 +17,12 @@ const dbMocks = {
   setPageRichMenuId: vi.fn(),
   markRichMenuGroupPublished: vi.fn(),
   getLineAccountById: vi.fn(),
+  getFollowingLineUserIdsByTag: vi.fn(),
+  getFollowingLineUserIdsByPreferredRichMenuGroup: vi.fn(),
+  upsertTagRichMenuBinding: vi.fn(),
+  deleteTagRichMenuBinding: vi.fn(),
+  getTagRichMenuBinding: vi.fn(),
+  jstNow: vi.fn(() => '2026-10-28T12:00:00.000+09:00'),
 };
 vi.mock('@line-crm/db', () => dbMocks);
 
@@ -500,5 +506,59 @@ describe('POST /api/rich-menu-groups/:groupId/publish', () => {
     const res = await app.request('/api/rich-menu-groups/gid12345-aaaa/publish', { method: 'POST' });
     expect(res.status).toBe(500);
     expect(dbMocks.releasePublishLock).toHaveBeenCalledWith(expect.anything(), 'gid12345-aaaa');
+  });
+});
+
+describe('POST /api/rich-menu-groups/:groupId/apply-to-tag — persistent tag rule', () => {
+  const published = {
+    id: 'g1', account_id: 'acc-1', status: 'published', default_page_id: 'p1',
+    pages: [{ id: 'p1', order_index: 0, line_richmenu_id: 'rm-1' }],
+  };
+  const post = (app: ReturnType<typeof setupApp>, body: unknown) => app.request('/api/rich-menu-groups/g1/apply-to-tag', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.getRichMenuGroupWithPages.mockResolvedValue(published);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'tok' });
+    dbMocks.getFollowingLineUserIdsByTag.mockResolvedValue([]);
+  });
+
+  test('applyToFuture: true saves the rule for friends who get the tag later', async () => {
+    const res = await post(setupApp(), { mode: 'bulk-link', tagId: 'tag-1', applyToFuture: true });
+    expect(res.status).toBe(200);
+    expect(dbMocks.upsertTagRichMenuBinding).toHaveBeenCalledWith(expect.anything(), { accountId: 'acc-1', tagId: 'tag-1', richMenuGroupId: 'g1' });
+    expect((await res.json()).data).toMatchObject({ futureApplied: true, total: 0 });
+  });
+
+  test('applyToFuture: false removes only a rule that points to this group', async () => {
+    dbMocks.getTagRichMenuBinding.mockResolvedValue({ rich_menu_group_id: 'g1' });
+    await post(setupApp(), { mode: 'bulk-link', tagId: 'tag-1', applyToFuture: false });
+    expect(dbMocks.deleteTagRichMenuBinding).toHaveBeenCalledWith(expect.anything(), 'acc-1', 'tag-1');
+
+    vi.clearAllMocks();
+    dbMocks.getRichMenuGroupWithPages.mockResolvedValue(published);
+    dbMocks.getLineAccountById.mockResolvedValue({ id: 'acc-1', channel_access_token: 'tok' });
+    dbMocks.getFollowingLineUserIdsByTag.mockResolvedValue([]);
+    dbMocks.getTagRichMenuBinding.mockResolvedValue({ rich_menu_group_id: 'other-group' });
+    await post(setupApp(), { mode: 'bulk-link', tagId: 'tag-1', applyToFuture: false });
+    expect(dbMocks.deleteTagRichMenuBinding).not.toHaveBeenCalled();
+  });
+
+  test('without applyToFuture it stays a one-off link and saves nothing', async () => {
+    await post(setupApp(), { mode: 'bulk-link', tagId: 'tag-1' });
+    expect(dbMocks.upsertTagRichMenuBinding).not.toHaveBeenCalled();
+    expect(dbMocks.deleteTagRichMenuBinding).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ mode: 'bulk-link', tagId: 'tag-1', applyToFuture: 'yes' }],
+    [{ mode: 'bulk-link', tagId: null, applyToFuture: true }],
+    [{ mode: 'bulk-link', tagId: '   ', applyToFuture: true }],
+  ])('rejects invalid input %j', async (body) => {
+    const res = await post(setupApp(), body);
+    expect(res.status).toBe(400);
+    expect(dbMocks.upsertTagRichMenuBinding).not.toHaveBeenCalled();
   });
 });
