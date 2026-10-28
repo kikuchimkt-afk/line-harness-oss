@@ -60,6 +60,8 @@ import {
   promoteEventWaitlist,
 } from '../services/event-booking-waitlist.js';
 
+import { ensureWeeklyEventSlots } from '../services/event-weekly-slots.js';
+
 const events = new Hono<Env>();
 
 // ----------------------------------------------------------------
@@ -1240,7 +1242,11 @@ events.get('/api/liff/events/:id', async (c) => {
     }
   }
 
-  return c.json({ ...row, my_existing_booking: myExistingBooking });
+  // Private instructions are sent only after required answers and booking.
+  const publicEvent = { ...row };
+  delete publicEvent.confirmation_message_extra;
+  delete publicEvent.reminder_message_extra;
+  return c.json({ ...publicEvent, my_existing_booking: myExistingBooking });
 });
 
 events.get('/api/liff/events/:id/slots', async (c) => {
@@ -1258,6 +1264,7 @@ events.get('/api/liff/events/:id/slots', async (c) => {
     .bind(c.req.param('id'), account_id, account_id)
     .first<{ id: string }>();
   if (!ev) return bad(c, 'not_found', 404);
+  await ensureWeeklyEventSlots(c.env.DB, c.req.param('id'));
   const items = await getSlotsWithRemaining(c.env.DB, c.req.param('id'), {
     only_active: true,
     only_future: true,
@@ -1801,36 +1808,25 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
     }
   }
 
-  // Insert-then-verify pattern: Cloudflare D1 doesn't expose multi-statement
-  // transactions, so we INSERT first, then re-COUNT. If concurrent inserts
-  // pushed us over the limit we DELETE this row and return 409. Determinism
-  // is enforced by the INSERT timestamp (newest row loses).
+  // Capacity check and INSERT are one SQLite write for finite slots without
+  // a waitlist. A preflight COUNT alone can overbook under concurrent requests.
   let status: 'requested' | 'waitlisted' | 'confirmed' = slotIsFull
-    ? 'waitlisted'
-    : event.requires_approval === 1
-      ? 'requested'
-      : 'confirmed';
+    ? 'waitlisted' : event.requires_approval === 1 ? 'requested' : 'confirmed';
   const id = crypto.randomUUID();
   const nowIso = new Date().toISOString();
-  await c.env.DB
-    .prepare(
-      `INSERT INTO event_bookings
-         (id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, requested_at, identity_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      account_id,
-      event.id,
-      slot.id,
-      bookingFriend.id,
-      status,
-      body.customer_note ?? null,
-      JSON.stringify(formAnswers.answers),
-      nowIso,
-      identityKey,
-    )
-    .run();
+  const enforceCapacity = slotRow?.capacity != null && event.waitlist_enabled !== 1;
+  const columns = 'id, line_account_id, event_id, slot_id, friend_id, status, customer_note, form_answers, requested_at, identity_key';
+  const bindings: unknown[] = [id, account_id, event.id, slot.id, bookingFriend.id, status,
+    body.customer_note ?? null, JSON.stringify(formAnswers.answers), nowIso, identityKey];
+  const values = enforceCapacity
+    ? `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM event_bookings
+                 WHERE slot_id = ? AND status IN ('requested','confirmed')) < ?`
+    : 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+  if (enforceCapacity) bindings.push(slot.id, slotRow!.capacity);
+  const inserted = await c.env.DB.prepare(`INSERT INTO event_bookings (${columns}) ${values}`)
+    .bind(...bindings).run();
+  if (enforceCapacity && inserted.meta.changes === 0) return finalize(409, { error: 'slot_full' });
 
   // Verify capacity again. If there is a race winner ahead of us — i.e. an
   // earlier (smaller requested_at, then smaller id) row — we are the loser
