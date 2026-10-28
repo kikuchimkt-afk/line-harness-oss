@@ -1,5 +1,6 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
 import { filterUnblockedRecipients } from './blocked-outbound.js';
+import { resolveBroadcastSender } from './broadcast-sender.js';
 import {
   getBroadcastById,
   getBroadcasts,
@@ -315,6 +316,15 @@ export async function processScheduledBroadcasts(
   );
 
   for (const broadcast of scheduled) {
+    // Resolve the sender before claiming: an invalid sender stays 'scheduled'
+    // (retried next cron) and never falls back to the default account.
+    let deliveryClient: LineClient;
+    try {
+      deliveryClient = await resolveBroadcastSender(db, broadcast, lineClient);
+    } catch {
+      continue;
+    }
+
     try {
       // Optimistic lock: claim this broadcast (scheduled → sending)
       const lockResult = await db
@@ -322,18 +332,6 @@ export async function processScheduledBroadcasts(
         .bind(broadcast.id)
         .run();
       if (!lockResult.meta.changes || lockResult.meta.changes === 0) continue;
-
-      // Resolve correct lineClient for this broadcast's account
-      let deliveryClient = lineClient;
-      const accountId = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
-      if (accountId) {
-        const { getLineAccountById } = await import('@line-crm/db');
-        const account = await getLineAccountById(db, accountId);
-        if (account) {
-          const { LineClient: LC } = await import('@line-crm/line-sdk');
-          deliveryClient = new LC(account.channel_access_token);
-        }
-      }
 
       await processBroadcastSend(db, deliveryClient, broadcast.id, workerUrl);
     } catch (err) {
@@ -360,16 +358,9 @@ export async function processQueuedBroadcasts(
 ): Promise<void> {
   const queued = await getQueuedBroadcasts(db);
   for (const broadcast of queued) {
-    // アカウント別のlineClientを解決
-    const accountId = (broadcast as unknown as Record<string, unknown>).line_account_id as string | null;
-    let client = lineClient;
-    if (accountId) {
-      const { getLineAccountById } = await import('@line-crm/db');
-      const account = await getLineAccountById(db, accountId);
-      if (account) client = new (await import('@line-crm/line-sdk')).LineClient(account.channel_access_token);
-    }
-
     try {
+      // アカウント別のlineClientを解決（無効な送信元では既定アカウントへフォールバックしない）
+      const client = await resolveBroadcastSender(db, broadcast, lineClient);
       await processQueuedBroadcastBatches(db, client, broadcast, workerUrl);
     } catch (err) {
       console.error(`Failed to process queued broadcast ${broadcast.id}:`, err);

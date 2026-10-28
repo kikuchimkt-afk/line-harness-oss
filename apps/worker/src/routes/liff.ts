@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { createLiffQueryReader } from '../lib/liff-query.js';
 import {
   getFriendByLineUserId,
   createUser,
@@ -26,6 +27,19 @@ import { enrollPendingEntryScenarioOnce, hasPendingRefTracking, recoverPendingRe
 import { assertFriendNotBlocked, BlockedFriendError, BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
+
+
+// OAuth state base64 helpers. btoa() only accepts Latin-1, so a single
+// multibyte query param (e.g. utm_campaign=夏キャンペーン) used to throw
+// InvalidCharacterError and turn the whole /auth/line request into a 500.
+// Encode via UTF-8 bytes instead. decodeState is byte-compatible with
+// states produced by the old plain btoa (ASCII-only payloads).
+function encodeState(state: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(state)));
+}
+function decodeState(encoded: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(encoded), (ch) => ch.charCodeAt(0)));
+}
 
 const liffRoutes = new Hono<Env>();
 
@@ -450,7 +464,7 @@ liffRoutes.get('/auth/line', async (c) => {
   // Without these, the form falls back to the gateId baked into the form's
   // onSubmitWebhookUrl (which is stale when a form is reused across campaigns).
   const state = JSON.stringify({ ref, redirect, form: formId, gate: gateParam, xh: xhParam2, gclid, fbclid, twclid, ttclid, utmSource, utmMedium, utmCampaign, account: accountParam || poolAccount, uid: uidParam, ig: igParam });
-  const encodedState = btoa(state);
+  const encodedState = encodeState(state);
   const loginUrl = new URL('https://access.line.me/oauth2/v2.1/authorize');
   loginUrl.searchParams.set('response_type', 'code');
   loginUrl.searchParams.set('client_id', channelId);
@@ -552,21 +566,22 @@ liffRoutes.get('/auth/line', async (c) => {
  * Same query params as /auth/line. No HTML rendering, no smart logic.
  */
 liffRoutes.get('/auth/oauth', async (c) => {
-  const ref = c.req.query('ref') || '';
-  const redirect = c.req.query('redirect') || '';
-  const formId = c.req.query('form') || '';
-  const gateParam = c.req.query('gate') || '';
-  const xhParam = c.req.query('xh') || '';
-  const gclid = c.req.query('gclid') || '';
-  const fbclid = c.req.query('fbclid') || '';
-  const twclid = c.req.query('twclid') || '';
-  const ttclid = c.req.query('ttclid') || '';
-  const utmSource = c.req.query('utm_source') || '';
-  const utmMedium = c.req.query('utm_medium') || '';
-  const utmCampaign = c.req.query('utm_campaign') || '';
-  const accountParam = c.req.query('account') || '';
-  const uidParam = c.req.query('uid') || '';
-  const igParam = c.req.query('ig') || '';
+  const q = createLiffQueryReader((key) => c.req.query(key));
+  const ref = q('ref');
+  const redirect = q('redirect');
+  const formId = q('form');
+  const gateParam = q('gate');
+  const xhParam = q('xh');
+  const gclid = q('gclid');
+  const fbclid = q('fbclid');
+  const twclid = q('twclid');
+  const ttclid = q('ttclid');
+  const utmSource = q('utm_source');
+  const utmMedium = q('utm_medium');
+  const utmCampaign = q('utm_campaign');
+  const accountParam = q('account');
+  const uidParam = q('uid');
+  const igParam = q('ig');
   let poolAccount = '';
   const baseUrl = new URL(c.req.url).origin;
 
@@ -576,7 +591,7 @@ liffRoutes.get('/auth/oauth', async (c) => {
     const account = await getLineAccountByChannelId(c.env.DB, accountParam);
     if (account?.login_channel_id) channelId = account.login_channel_id;
   } else {
-    const poolSlug = c.req.query('pool') || 'main';
+    const poolSlug = q('pool') || 'main';
     const pool = await getTrafficPoolBySlug(c.env.DB, poolSlug);
     if (pool) {
       const account = await getRandomPoolAccount(c.env.DB, pool.id);
@@ -604,7 +619,7 @@ liffRoutes.get('/auth/oauth', async (c) => {
     utmSource, utmMedium, utmCampaign,
     account: accountParam || poolAccount, uid: uidParam, ig: igParam,
   });
-  const encodedState = btoa(state);
+  const encodedState = encodeState(state);
   const loginUrl = new URL('https://access.line.me/oauth2/v2.1/authorize');
   loginUrl.searchParams.set('response_type', 'code');
   loginUrl.searchParams.set('client_id', channelId);
@@ -643,7 +658,7 @@ liffRoutes.get('/auth/callback', async (c) => {
   let uidParam = '';
   let igParam = '';
   try {
-    const parsed = JSON.parse(atob(stateParam));
+    const parsed = JSON.parse(decodeState(stateParam));
     ref = parsed.ref || '';
     redirect = parsed.redirect || '';
     formId = parsed.form || '';

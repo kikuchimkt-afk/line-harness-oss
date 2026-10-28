@@ -266,6 +266,8 @@ export default function Sidebar() {
             {section.items.filter((item) => {
               if (item.href === '/staff' && staffRole !== 'owner') return false
               if (item.href === '/accounts' && staffRole === 'staff') return false
+              // /api/users* is owner/admin only: it spans every account's customer identities.
+              if (item.href === '/users' && staffRole === 'staff') return false
               return true
             }).map((item) => {
               const active = isActive(item.href)

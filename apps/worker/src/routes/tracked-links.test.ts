@@ -98,3 +98,60 @@ describe('GET /t/:linkId tag attribution', () => {
     expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
   });
 });
+
+describe('tracked-link destination safety', () => {
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  const invalidDestinations = [
+    'javascript://instagram.com/%0ainjected=true',
+    'JaVaScRiPt://instagram.com/\ninjected=true',
+    'data:text/html,<script>injected=true</script>',
+    'ftp://instagram.com/profile',
+    '//instagram.com/profile',
+    'not a URL',
+    'https://',
+    'https://bad host/path',
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function create(body: unknown) {
+    return trackedLinks.request('https://worker.example.com/api/tracked-links', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }, { DB: makePolicyDb() }, ctx);
+  }
+
+  it.each(invalidDestinations)('POST rejects %s before writing', async (originalUrl) => {
+    const res = await create({ name: 'link', originalUrl });
+    expect(res.status).toBe(400);
+    expect(dbMocks.createTrackedLink).not.toHaveBeenCalled();
+  });
+
+  it('POST rejects a null body without a server error', async () => {
+    const res = await create(null);
+    expect(res.status).toBe(400);
+    expect(dbMocks.createTrackedLink).not.toHaveBeenCalled();
+  });
+
+  it.each(invalidDestinations)('/t refuses a stored %s without redirecting or tracking', async (originalUrl) => {
+    dbMocks.getTrackedLinkById.mockResolvedValue({ id: 'link-1', original_url: originalUrl, is_active: 1, tag_id: 'tag-1' });
+    const res = await trackedLinks.request('https://worker.example.com/t/link-1?f=friend-1',
+      { redirect: 'manual' }, { DB: makePolicyDb() }, ctx);
+    expect(res.status).toBe(400);
+    expect(res.headers.get('location')).toBeNull();
+    expect(dbMocks.recordLinkClick).not.toHaveBeenCalled();
+  });
+
+  it('app-link redirect page cannot be broken out of with </script>', async () => {
+    const originalUrl = 'https://instagram.com/p/x?q=</script><script>injected=1</script>"\'';
+    dbMocks.getTrackedLinkById.mockResolvedValue({ id: 'link-1', original_url: originalUrl, is_active: 1 });
+    const res = await trackedLinks.request('https://worker.example.com/t/link-1',
+      { headers: { 'user-agent': 'Mozilla/5.0 (iPhone) Safari/605.1.15' } }, { DB: makePolicyDb() }, ctx);
+    const html = await res.text();
+    expect(html).not.toContain('<script>injected=1</script>');
+    expect(html.match(/<script>/g)).toHaveLength(1);
+  });
+});
