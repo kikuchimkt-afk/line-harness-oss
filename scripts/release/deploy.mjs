@@ -29,7 +29,7 @@ if (!['check', 'worker', 'admin', 'all'].includes(mode)) {
 }
 
 const sh = (cmd, args, opts = {}) =>
-  execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 64 * 1024 * 1024, ...opts }).trim();
+  execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 64 * 1024 * 1024, ...opts }).trimEnd();
 const git = (...args) => sh('git', args);
 const wrangler = (args, cwd = WORKER_DIR) => sh('npx', ['wrangler', ...args], { cwd });
 const fail = (message) => { console.error(`\n停止しました: ${message}\n`); process.exit(1); };
@@ -44,13 +44,13 @@ if (!WORKER_URL || !ADMIN_PROJECT) fail('wrangler.toml に WORKER_PUBLIC_URL / A
 
 // ---- guard 1: one line only — a clean main identical to origin/main ----
 git('fetch', '--quiet', 'origin', 'main');
-const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+const branch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
 if (branch !== 'main') fail(`今のブランチは ${branch} です。main をチェックアウトし、PR を統合してから反映してください。`);
 const dirty = git('status', '--porcelain').split('\n').filter(Boolean)
   .map((line) => line.slice(3)).filter((file) => !IGNORED_DIRTY.has(file));
 if (dirty.length) fail(`未コミットの変更があります:\n  ${dirty.join('\n  ')}`);
-const head = git('rev-parse', 'HEAD');
-const originMain = git('rev-parse', 'origin/main');
+const head = git('rev-parse', 'HEAD').trim();
+const originMain = git('rev-parse', 'origin/main').trim();
 if (head !== originMain) fail(`手元の main（${head.slice(0, 7)}）が origin/main（${originMain.slice(0, 7)}）と違います。pull / push で揃えてください。`);
 const subject = git('log', '-1', '--format=%s');
 
