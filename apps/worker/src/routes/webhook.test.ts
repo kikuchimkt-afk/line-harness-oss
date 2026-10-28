@@ -447,3 +447,116 @@ describe('POST /webhook — first-contact existing friends', () => {
     expect(getMessageTemplateById).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /webhook — known referral tag on follow', () => {
+  function setupReferralFollow(options: {
+    ref?: string | null;
+    tagId?: string | null;
+    routeExists?: boolean;
+    friendAccountId?: string;
+    tagAlreadyAttached?: boolean;
+    tagWriteFails?: boolean;
+  } = {}) {
+    const ref = options.ref === undefined ? 'fictional-autumn-qr' : options.ref;
+    const tagId = options.tagId === undefined ? 'fictional-source-tag' : options.tagId;
+    const enrolled = new Set<string>();
+    const friend = {
+      id: 'fictional-friend', line_user_id: 'U-fictional', display_name: '架空の生徒',
+      line_account_id: options.friendAccountId ?? 'fictional-account',
+      is_following: 1, ref_code: ref, metadata: '{}', user_id: null,
+    } as any;
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getLineAccounts).mockResolvedValue([{
+      id: 'fictional-account', channel_secret: 'env-default-secret',
+      channel_access_token: 'fictional-account-token', is_active: 1,
+    } as any]);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue(null);
+    vi.mocked(getFriendById).mockResolvedValue(friend);
+    vi.mocked(upsertFriend).mockResolvedValue(friend);
+    lineClientMocks.getProfile.mockResolvedValue({ displayName: '架空の生徒' });
+    vi.mocked(jstNow).mockReturnValue('2026-10-12T12:00:00.000+09:00');
+    vi.mocked(getEntryRouteByRefCode).mockResolvedValue(options.routeExists === false ? null : {
+      id: 'fictional-route', ref_code: ref, name: '架空のチラシ', tag_id: tagId,
+      scenario_id: 'fictional-campaign', intro_template_id: null,
+      run_account_friend_add_scenarios: 0, is_active: 1,
+    } as any);
+    // The route and the tag trigger deliberately target the same scenario.
+    vi.mocked(getScenarios).mockResolvedValue([{
+      id: 'fictional-campaign', trigger_type: 'tag_added', trigger_tag_id: tagId,
+      is_active: 1, line_account_id: 'fictional-account',
+    } as any]);
+    vi.mocked(enrollFriendInScenario).mockImplementation(async (_db, _friendId, scenarioId) => {
+      enrolled.add(scenarioId);
+      return null;
+    });
+    const db = {
+      prepare: vi.fn((sql: string) => {
+        let bindings: unknown[] = [];
+        const stmt = {
+          bind: vi.fn((...values: unknown[]) => { bindings = values; return stmt; }),
+          first: vi.fn(async () => sql.includes('FROM friend_scenarios') && enrolled.has(String(bindings[1]))
+            ? { id: 'fictional-enrollment' } : null),
+          all: vi.fn(async () => ({ results: [] })),
+          run: vi.fn(async () => {
+            if (sql.includes('INSERT OR IGNORE INTO friend_tags')) {
+              if (options.tagWriteFails) throw new Error('fictional tag write failure');
+              return { meta: { changes: options.tagAlreadyAttached ? 0 : 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }),
+        };
+        return stmt;
+      }),
+    } as unknown as D1Database;
+    return { db, async dispatch() {
+      const executionCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+      const response = await setupApp().request('/webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' },
+        body: JSON.stringify({ events: [{ type: 'follow', source: { type: 'user', userId: 'U-fictional' }, replyToken: 'fictional-reply' }] }),
+      }, { ...baseEnv, DB: db }, executionCtx);
+      await (vi.mocked(executionCtx.waitUntil).mock.calls[0]?.[0] as Promise<unknown>);
+      expect(response.status).toBe(200);
+    } };
+  }
+
+  test('attaches a known route tag and does not double-enroll its tag-triggered scenario', async () => {
+    const { db, dispatch } = setupReferralFollow();
+    await dispatch();
+    expect(getEntryRouteByRefCode).toHaveBeenCalledWith(db, 'fictional-autumn-qr');
+    expect(getFriendByLineUserId).toHaveBeenCalledWith(db, 'U-fictional', 'fictional-account');
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(enrollFriendInScenario).toHaveBeenCalledWith(db, 'fictional-friend', 'fictional-campaign');
+    expect(fireEvent).toHaveBeenCalledWith(db, 'tag_change', {
+      friendId: 'fictional-friend', eventData: { tagId: 'fictional-source-tag', action: 'add' },
+    });
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    expect(lineClientMocks.pushMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a route without a tag', { tagId: null }],
+    ['an unknown ref', { routeExists: false }],
+    ['no ref', { ref: null }],
+    ['a mismatched friend account', { friendAccountId: 'fictional-other-account' }],
+  ])('does not infer or attach a campaign tag for %s', async (_label, options) => {
+    const { db, dispatch } = setupReferralFollow(options);
+    await dispatch();
+    expect(vi.mocked(db.prepare).mock.calls.some(([sql]) => sql.includes('INSERT OR IGNORE INTO friend_tags'))).toBe(false);
+    expect(vi.mocked(fireEvent).mock.calls.some(([, event]) => event === 'tag_change')).toBe(false);
+  });
+
+  test('does not repeat tag side effects when OAuth already attached the tag', async () => {
+    const { dispatch } = setupReferralFollow({ tagAlreadyAttached: true });
+    await dispatch();
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fireEvent).mock.calls.some(([, event]) => event === 'tag_change')).toBe(false);
+  });
+
+  test('keeps the dedicated enrollment and friend-add event when tag attachment fails', async () => {
+    const { db, dispatch } = setupReferralFollow({ tagWriteFails: true });
+    await dispatch();
+    expect(enrollFriendInScenario).toHaveBeenCalledTimes(1);
+    expect(fireEvent).toHaveBeenCalledWith(db, 'friend_add', expect.objectContaining({ friendId: 'fictional-friend' }), 'fictional-account-token', 'fictional-account');
+  });
+});

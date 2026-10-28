@@ -22,6 +22,7 @@ import {
 import { buildIntroMessage } from '../services/intro-message.js';
 import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
 import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { enrollPendingEntryScenarioOnce, hasPendingRefTracking, recoverPendingRefAttribution, savePendingRefAttribution } from '../services/liff-pending-ref-attribution.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
 
@@ -118,7 +119,7 @@ async function applyRefAttribution(
   ref: string,
   friend: { id: string; line_account_id?: string | null },
   lineUserId: string,
-  options?: { accountChannelId?: string | null },
+  options?: { accountChannelId?: string | null; pendingEntryRoute?: boolean },
 ): Promise<void> {
   if (!ref || ref.startsWith('xh:')) return;
   const db = c.env.DB;
@@ -131,6 +132,15 @@ async function applyRefAttribution(
   }
   const effectiveTagId = route?.tag_id ?? trackedLink?.tag_id ?? null;
   const effectiveScenarioId = route?.scenario_id ?? trackedLink?.scenario_id ?? null;
+  const pendingEntryRoute = Boolean(options?.pendingEntryRoute && route);
+
+  if (pendingEntryRoute && effectiveScenarioId) {
+    // Enroll before tag side effects: a tag_added rule targeting the same
+    // scenario must see this durable history and cannot restart the run.
+    // A DB exception is retryable; do not fall through to a legacy tag-trigger
+    // enrollment if the atomic enrollment could not be established.
+    await enrollPendingEntryScenarioOnce(db, friend.id, effectiveScenarioId, friend.line_account_id);
+  }
 
   if (effectiveTagId) {
     try {
@@ -140,6 +150,11 @@ async function applyRefAttribution(
     }
   }
   if (effectiveScenarioId) {
+    if (pendingEntryRoute) {
+      // A verified pre-follow entry is a single run, not an every-click push.
+      // Returning after Cron already sent/claimed step 1 must not replay it.
+      return;
+    }
     try {
       const {
         enrollFriendInScenario,
@@ -1200,11 +1215,46 @@ liffRoutes.post('/api/liff/link', async (c) => {
       dbAccounts,
       verifiedLoginChannelId,
     );
-    const friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
-    if (!friend) {
-      console.warn(`[liff/link] friend not found ref=${body.ref ?? ''} loginChannel=${verifiedLoginChannelId} account=${verifiedLineAccountId ?? 'unresolved'}`);
-      return c.json({ success: false, error: 'Friend not found' }, 404);
+    let friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
+    let recoveredPendingInRequest = false;
+    if (!friend || friend.is_following === 0) {
+      // LIFF runs before friend-add. Persist only a known entry route scoped
+      // to the verified account, so follow can finish attribution even when
+      // the parent never returns from LINE to this browser tab.
+      if (body.ref && !body.ref.startsWith('xh:')) {
+        const entryRoute = await getEntryRouteByRefCode(db, body.ref);
+        if (!entryRoute) {
+          // Modern tracked-link/affiliate refs are not entry_routes. Keep
+          // their established post-follow flow, but never infer/store an
+          // entry route for them. The client may still show friend-add.
+          return c.json({ success: Boolean(friend), error: !friend ? 'Friend not found' : undefined,
+            data: { entryRefRequired: false, awaitingFriendship: true } }, friend ? 202 : 404);
+        }
+        const saved = await savePendingRefAttribution(db, verifiedLineAccountId, lineUserId, body.ref);
+        if (!saved) {
+          return c.json({ success: false, error: 'Entry route is not available for this account', data: { entryRefRequired: true } }, 400);
+        }
+        // Close the race where follow upsert happened between the first
+        // lookup and the pending INSERT. No message is sent unless follow
+        // is already confirmed by the account-scoped friends row.
+        friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
+        if (friend?.is_following === 1) {
+          body.ref = await recoverPendingRefAttribution(db, friend, verifiedLineAccountId, lineUserId) ?? undefined;
+          recoveredPendingInRequest = true;
+        } else {
+          return c.json({ success: true, data: { pendingAttribution: true, entryRefRequired: true, awaitingFriendship: true } }, 202);
+        }
+      } else {
+        if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
+        return c.json({ success: true, data: { awaitingFriendship: true } }, 202);
+      }
     }
+
+    const pendingEntryRoute = body.ref && !body.ref.startsWith('xh:')
+      ? await hasPendingRefTracking(db, friend.id, verifiedLineAccountId, body.ref)
+      : false;
+    const skipPendingTracking = pendingEntryRoute &&
+      (recoveredPendingInRequest || !friend.user_id);
 
     // IG cross-link: runs regardless of already-linked vs new-link branch so
     // existing friends still get ig_igsid wired when they hit this endpoint
@@ -1222,7 +1272,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
       // would otherwise miss tracked-link campaigns triggered by /api/liff/link.
       // Mirror the new-link branch's recordRefTracking call so analytics
       // (/api/analytics/ref-summary) include LIFF hits from existing friends.
-      if (body.ref && !body.ref.startsWith('xh:')) {
+      if (body.ref && !body.ref.startsWith('xh:') && !skipPendingTracking) {
         try {
           const route = await getEntryRouteByRefCode(db, body.ref);
           await recordRefTracking(db, {
@@ -1234,7 +1284,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
         } catch { /* silent */ }
       }
       if (body.ref) {
-        await applyRefAttribution(c, body.ref, friend, lineUserId);
+        await applyRefAttribution(c, body.ref, friend, lineUserId, { pendingEntryRoute });
       }
       // X Harness token resolution for already-linked friends
       if (body.ref && body.ref.startsWith('xh:')) {
@@ -1294,18 +1344,20 @@ liffRoutes.post('/api/liff/link', async (c) => {
         .bind(body.ref, friend.id).run();
 
       // Record ref tracking
-      try {
-        const route = await getEntryRouteByRefCode(db, body.ref);
-        await recordRefTracking(db, {
-          refCode: body.ref,
-          friendId: friend.id,
-          entryRouteId: route?.id ?? null,
-          sourceUrl: null,
-        });
-      } catch { /* silent */ }
+      if (!skipPendingTracking) {
+        try {
+          const route = await getEntryRouteByRefCode(db, body.ref);
+          await recordRefTracking(db, {
+            refCode: body.ref,
+            friendId: friend.id,
+            entryRouteId: route?.id ?? null,
+            sourceUrl: null,
+          });
+        } catch { /* silent */ }
+      }
 
       // Apply ref attribution (tag + scenario push) for newly-linked friends
-      await applyRefAttribution(c, body.ref, friend, lineUserId);
+      await applyRefAttribution(c, body.ref, friend, lineUserId, { pendingEntryRoute });
     }
 
     // X Harness token resolution: ref starting with "xh:" links X account to LINE friend

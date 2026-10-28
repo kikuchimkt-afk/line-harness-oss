@@ -22,6 +22,8 @@ import {
 } from '@line-crm/db';
 import type { EntryRoute, Friend } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
+import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { enrollPendingEntryScenarioOnce, hasPendingRefTracking, recoverPendingRefAttribution } from '../services/liff-pending-ref-attribution.js';
 import { buildMessage, expandVariables, messageToLogPayload } from '../services/step-delivery.js';
 import type { Env } from '../index.js';
 
@@ -480,6 +482,9 @@ async function handleEvent(
     const { getFriendById } = await import('@line-crm/db');
     let friendRefCode = (friend as { ref_code?: string | null }).ref_code ?? null;
     if (!friendRefCode) {
+      friendRefCode = await recoverPendingRefAttribution(db, friend, lineAccountId, userId);
+    }
+    if (!friendRefCode) {
       for (let attempt = 0; attempt < 5; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 200));
         const refreshed = await getFriendById(db, friend.id);
@@ -488,6 +493,10 @@ async function handleEvent(
           friendRefCode = refreshedRef;
           break;
         }
+        // A LIFF pending write can race this follow upsert. Check the same
+        // account/user key during the existing bounded callback retry.
+        friendRefCode = await recoverPendingRefAttribution(db, friend, lineAccountId, userId);
+        if (friendRefCode) break;
       }
     }
     const referralRoute: EntryRoute | null = friendRefCode
@@ -612,12 +621,46 @@ async function handleEvent(
       }
 
       // Dedicated scenario enrollment from referral link
+      let pendingEntryMode = false;
+      let pendingClassificationCompleted = false;
+      let pendingEnrollmentFailed = false;
       if (referralRoute.scenario_id) {
         try {
-          await enrollFriendInScenario(db, friend.id, referralRoute.scenario_id);
+          pendingEntryMode = await hasPendingRefTracking(db, friend.id, lineAccountId, friendRefCode!);
+          pendingClassificationCompleted = true;
+          if (pendingEntryMode) {
+            await enrollPendingEntryScenarioOnce(db, friend.id, referralRoute.scenario_id, lineAccountId);
+          } else {
+            await enrollFriendInScenario(db, friend.id, referralRoute.scenario_id);
+          }
           console.log(`[follow] referral scenario enrolled scenario=${referralRoute.scenario_id}`);
         } catch (err) {
+          // An unavailable proof query is not evidence of a legacy route.
+          // Fail closed until classification succeeds, rather than silently
+          // falling back to tag-trigger enrollment after a database error.
+          pendingEnrollmentFailed = !pendingClassificationCompleted || pendingEntryMode;
           console.error('[follow] referral scenario enrollment failed', err);
+        }
+      }
+
+      // Follow can finish before the user returns to LIFF. Apply the known
+      // referral tag here too, without inferring a campaign from a missing ref.
+      // Enroll the dedicated scenario first: the tag helper then sees that row
+      // and does not enroll it again if a tag_added trigger targets the same one.
+      if (referralRoute.tag_id) {
+        if (pendingEnrollmentFailed) {
+          // The verified ref/tracking proof survives. A later LIFF return
+          // can retry the atomic enrollment; do not let tag_added fall back
+          // to the legacy enrollment path after this pending-mode failure.
+          console.error(`[follow] pending referral tag deferred after enrollment failure route=${referralRoute.id}`);
+        } else if (friend.line_account_id !== lineAccountId) {
+          console.error(`[follow] referral tag skipped: account mismatch route=${referralRoute.id}`);
+        } else {
+          try {
+            await attachTagAndFireSideEffects(db, friend.id, referralRoute.tag_id);
+          } catch (err) {
+            console.error(`[follow] referral tag attach failed route=${referralRoute.id}:`, err);
+          }
         }
       }
     }

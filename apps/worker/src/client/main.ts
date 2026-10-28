@@ -109,12 +109,12 @@ async function linkCurrentFriend(
     }),
   });
 
-  if (response.ok) {
-    const data = await response.json() as { success: boolean; data?: { userId?: string } };
-    if (data?.data?.userId) saveUuid(data.data.userId);
-  }
-
-  return { ok: response.ok, status: response.status };
+  const data = await response.json().catch(() => null) as {
+    success?: boolean; data?: { userId?: string; entryRefRequired?: boolean };
+  } | null;
+  const ok = response.ok && data?.success === true;
+  if (ok && data?.data?.userId) saveUuid(data.data.userId);
+  return { ok, status: response.status, entryRefRequired: data?.data?.entryRefRequired };
 }
 
 function escapeHtml(str: string): string {
@@ -163,6 +163,10 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
       const linkResult = await retryLiffLinkAfterFriendAdd(
         () => linkCurrentFriend(profile),
       );
+      if (requiresLinkRetry(linkResult)) {
+        showEntryRefRetry();
+        return;
+      }
       warnIfLinkFailed(linkResult);
       continueAsFriend(profile, false);
     } catch {
@@ -182,9 +186,36 @@ function showLinking() {
   `;
 }
 
-// LINE has already confirmed the friendship at this point. Attribution
-// (/api/liff/link) is best-effort: a failure must never strand the user on an
-// error screen instead of the Official Account talk room.
+function requiresLinkRetry(result: LiffLinkAttemptResult | null | void): boolean {
+  if (result?.ok) return false;
+  if (result?.status === 401) return true;
+  // A verified 404 for a non-entry ref keeps the previous friend-add flow.
+  // Network/auth/storage failures are not a server classification and must
+  // not be treated as a successful campaign registration.
+  if (result?.entryRefRequired === false) return false;
+  const ref = getRef();
+  return !!ref && !ref.startsWith('xh:');
+}
+
+function showEntryRefRetry() {
+  const container = document.getElementById('app')!;
+  container.innerHTML = `
+    <div class="card">
+      <h2>案内の準備を確認しています</h2>
+      <p class="message">このリンクからのご案内を保存できませんでした。<br>通信をご確認のうえ、もう一度お試しください。</p>
+      <button type="button" class="add-friend-btn" id="retryEntryRefBtn">もう一度確認する</button>
+      <p class="sub-message">解決しない場合は、公式LINEのトークからご相談ください。</p>
+    </div>
+  `;
+  document.getElementById('retryEntryRefBtn')!.addEventListener('click', () => {
+    showLinking();
+    void linkAndAddFlow();
+  }, { once: true });
+}
+
+// Without an account-scoped entry campaign, UUID linkage remains best-effort.
+// Known entry refs instead stay on a retryable screen if durable saving fails,
+// so the UI does not claim a successful campaign registration.
 function warnIfLinkFailed(linkResult: LiffLinkAttemptResult | null | void) {
   if (linkResult?.ok) return;
   console.warn('[liff] friend link failed', linkResult ? linkResult.status : 'network');
@@ -307,9 +338,18 @@ async function linkAndAddFlow() {
 
     // 5. Friendship check — the key decision point
     if (!friendship.friendFlag) {
-      // Not a friend yet → show friend-add button
+      // A campaign ref must be durably saved before leaving for LINE. If
+      // saving failed, do not claim completion or silently lose the source.
+      if (requiresLinkRetry(linkResult)) {
+        showEntryRefRetry();
+        return;
+      }
       showFriendAdd(profile);
     } else {
+      if (requiresLinkRetry(linkResult)) {
+        showEntryRefRetry();
+        return;
+      }
       warnIfLinkFailed(linkResult);
       // The rich-menu application button should land on the form itself;
       // replacing the URL also makes refreshes stay on the form page.

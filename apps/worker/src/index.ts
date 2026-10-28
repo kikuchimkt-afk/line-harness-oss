@@ -14,6 +14,7 @@ import { processScheduledBroadcasts, processQueuedBroadcasts } from './services/
 import { processReminderDeliveries } from './services/reminder-delivery.js';
 import { checkAccountHealth } from './services/ban-monitor.js';
 import { refreshLineAccessTokens } from './services/token-refresh.js';
+import { cleanupExpiredPendingRefs } from './services/liff-pending-ref-attribution.js';
 import { processInsightFetch } from './services/insight-fetcher.js';
 import { processDueReminders } from './services/booking-reminders.js';
 import { runExpirer } from './services/booking-expirer.js';
@@ -664,6 +665,7 @@ async function scheduled(
   jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
   jobs.push(checkAccountHealth(env.DB));
   jobs.push(refreshLineAccessTokens(env.DB));
+  jobs.push(cleanupExpiredPendingRefs(env.DB, now.getTime()));
 
   await Promise.allSettled(jobs);
 
