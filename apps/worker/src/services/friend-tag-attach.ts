@@ -52,6 +52,9 @@ export async function attachTagAndFireSideEffects(
     }
   }
 
+  const { applyTagRichMenuForFriend, safely } = await import('./rich-menu-tag-binding.js');
+  await safely('auto add', () => applyTagRichMenuForFriend(db, friendId, tagId));
+
   await fireEvent(db, 'tag_change', { friendId, eventData: { tagId, action: 'add' } });
   return { added: true };
 }

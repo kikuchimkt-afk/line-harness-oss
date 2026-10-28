@@ -308,12 +308,18 @@ async function executeAction(
         await cancelBlockedFriendOutboundWork(db, friendId!);
         const { applyBlockedRichMenuForFriend } = await import('./rich-menu-assignment.js');
         await applyBlockedRichMenuForFriend(db, friendId!);
+      } else {
+        const { applyTagRichMenuForFriend, safely } = await import('./rich-menu-tag-binding.js');
+        await safely('automation add', () => applyTagRichMenuForFriend(db, friendId!, action.params.tagId));
       }
       break;
 
-    case 'remove_tag':
+    case 'remove_tag': {
       await removeTagFromFriend(db, friendId!, action.params.tagId);
+      const { reconcileTagRichMenuAfterRemoval, safely } = await import('./rich-menu-tag-binding.js');
+      await safely('automation remove', () => reconcileTagRichMenuAfterRemoval(db, friendId!, action.params.tagId));
       break;
+    }
 
     case 'start_scenario':
       if (action.params.restart === 'true') {

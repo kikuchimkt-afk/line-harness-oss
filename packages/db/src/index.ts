@@ -36,3 +36,4 @@ export * from './rich-menus';
 export function createDb(d1: D1Database): D1Database {
   return d1;
 }
+export * from './rich-menu-bindings';

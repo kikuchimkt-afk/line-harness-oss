@@ -9,7 +9,11 @@ export async function addTagWithBlockEnforcement(
 ): Promise<boolean> {
   const { addTagToFriend } = await import('@line-crm/db');
   await addTagToFriend(db, friendId, tagId);
-  if (!(await isFriendBlocked(db, friendId))) return false;
+  if (!(await isFriendBlocked(db, friendId))) {
+    const { applyTagRichMenuForFriend, safely } = await import('./rich-menu-tag-binding.js');
+    await safely('form add', () => applyTagRichMenuForFriend(db, friendId, tagId));
+    return false;
+  }
 
   await stopBlockedFriendWork(db, friendId);
   const { cancelBlockedFriendOutboundWork } = await import('./blocked-outbound.js');

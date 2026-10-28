@@ -687,6 +687,11 @@ async function handleEvent(
       }
     }
 
+    // A re-follow does not add the tag again, so re-evaluate persistent
+    // tag-to-rich-menu bindings explicitly (blocked friends are skipped).
+    const { applyPreferredTagRichMenu, safely } = await import('../services/rich-menu-tag-binding.js');
+    await safely('follow', () => applyPreferredTagRichMenu(db, friend.id));
+
     // イベントバス発火: friend_add（replyToken は Step 0 で使用済みの可能性あり）
     await fireEvent(db, 'friend_add', { friendId: friend.id, eventData: { displayName: friend.display_name } }, lineAccessToken, lineAccountId);
     return;
