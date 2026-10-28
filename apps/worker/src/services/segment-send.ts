@@ -11,6 +11,7 @@ import { calculateStaggerDelay, sleep, addMessageVariation } from './stealth.js'
 import { buildSegmentQuery } from './segment-query.js';
 import type { SegmentCondition } from './segment-query.js';
 import { buildMessage } from './broadcast.js';
+import { filterUnblockedRecipients } from './blocked-outbound.js';
 
 const MULTICAST_BATCH_SIZE = 500;
 
@@ -53,7 +54,7 @@ export async function processSegmentSend(
       .bind(...finalBindings)
       .all<FriendRow>();
 
-    const friends = queryResult.results ?? [];
+    const friends = await filterUnblockedRecipients(db, queryResult.results ?? []);
     totalCount = friends.length;
 
     const now = jstNow();
@@ -62,8 +63,7 @@ export async function processSegmentSend(
 
     for (let i = 0; i < friends.length; i += MULTICAST_BATCH_SIZE) {
       const batchIndex = Math.floor(i / MULTICAST_BATCH_SIZE);
-      const batch = friends.slice(i, i + MULTICAST_BATCH_SIZE);
-      const lineUserIds = batch.map((f) => f.line_user_id);
+      let batch = friends.slice(i, i + MULTICAST_BATCH_SIZE);
 
       // Stealth: stagger delays between batches
       if (batchIndex > 0) {
@@ -78,7 +78,9 @@ export async function processSegmentSend(
       }
 
       try {
-        await lineClient.multicast(lineUserIds, [batchMessage], [unit]);
+        batch = await filterUnblockedRecipients(db, batch);
+        if (!batch.length) continue;
+        await lineClient.multicast(batch.map(f => f.line_user_id), [batchMessage], [unit]);
         successCount += batch.length;
 
         // Log successfully sent messages (batch insert for performance)

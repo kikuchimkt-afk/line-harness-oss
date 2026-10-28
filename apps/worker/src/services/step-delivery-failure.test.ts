@@ -76,6 +76,7 @@ describe('scenario delivery failure recovery', () => {
       prepare: (sql: string) => ({
         bind: (...args: unknown[]) => ({
           first: async () => sql.includes('SELECT delivery_mode') ? { delivery_mode: 'relative' } : null,
+          all: async () => ({ results: [] }),
           run: async () => {
             updates.push({ sql, args });
             return { meta: { changes: 1 } };

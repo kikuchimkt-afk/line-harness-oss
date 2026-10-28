@@ -26,6 +26,7 @@ import { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { sendAdConversions } from './ad-conversion.js';
 import { applyDesiredRichMenu } from './rich-menu-assignment.js';
+import { assertFriendNotBlocked, isFriendBlocked, stopBlockedFriendWork } from './friend-block-policy.js';
 
 export interface EventPayload {
   friendId?: string;
@@ -51,6 +52,7 @@ export async function fireEvent(
   lineAccessToken?: string,
   lineAccountId?: string | null,
 ): Promise<void> {
+  if (payload.friendId && await isFriendBlocked(db, payload.friendId)) return;
   // Phase 1: fire webhooks, apply scoring rules, and ad conversion postback concurrently.
   const phase1: Promise<unknown>[] = [
     fireOutgoingWebhooks(db, eventType, payload),
@@ -142,6 +144,7 @@ async function fireOutgoingWebhooks(
           headers['X-Webhook-Signature'] = hexSignature;
         }
 
+        if (payload.friendId && await isFriendBlocked(db, payload.friendId)) return;
         await fetch(wh.url, { method: 'POST', headers, body });
       } catch (err) {
         console.error(`送信Webhook ${wh.id} への通知失敗:`, err);
@@ -280,6 +283,7 @@ async function executeAction(
   automationId?: string | null,
 ): Promise<void> {
   const friendId = payload.friendId;
+  if (friendId) await assertFriendNotBlocked(db, friendId);
   if (!friendId && action.type !== 'send_webhook') {
     throw new Error('friendId is required for this action');
   }
@@ -287,6 +291,13 @@ async function executeAction(
   switch (action.type) {
     case 'add_tag':
       await addTagToFriend(db, friendId!, action.params.tagId);
+      if (await isFriendBlocked(db, friendId!)) {
+        await stopBlockedFriendWork(db, friendId!);
+        const { cancelBlockedFriendOutboundWork } = await import('./blocked-outbound.js');
+        await cancelBlockedFriendOutboundWork(db, friendId!);
+        const { applyBlockedRichMenuForFriend } = await import('./rich-menu-assignment.js');
+        await applyBlockedRichMenuForFriend(db, friendId!);
+      }
       break;
 
     case 'remove_tag':
@@ -344,6 +355,7 @@ async function executeAction(
       }
 
       let deliveryType: 'reply' | 'push';
+      await assertFriendNotBlocked(db, friendId);
       if (payload.replyToken) {
         try {
           await lineClient.replyMessage(payload.replyToken, [msg]);
@@ -353,6 +365,7 @@ async function executeAction(
           const errMsg = err instanceof Error ? err.message : String(err);
           const isTokenError = errMsg.includes('400') || errMsg.includes('Invalid reply token');
           if (isTokenError) {
+            await assertFriendNotBlocked(db, friendId);
             await lineClient.pushMessage(friend.line_user_id, [msg]);
             deliveryType = 'push';
           } else {

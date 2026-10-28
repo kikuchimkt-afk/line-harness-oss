@@ -20,6 +20,7 @@ import {
   saveIdempotencyResponse,
 } from '../services/booking-idempotency.js';
 import { sendBookingNotification } from '../services/booking-notifier.js';
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 import {
   DEFAULT_ACCOUNT_SETTINGS,
   IDEMPOTENCY_TTL_MINUTES,
@@ -294,6 +295,9 @@ booking.post('/api/liff/booking/requests', async (c) => {
   }
   const friendId = await resolveFriendId(c, callerLineUserId, accountId);
   if (!friendId) return c.json({ error: 'friend_not_found' }, 404);
+  if (await isFriendBlocked(c.env.DB, friendId, accountId)) {
+    return c.json({ error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+  }
 
   // Idempotency lookup は account+friend スコープ。同じ key を別 caller が送っても
   // それぞれの caller のキャッシュを返す（=cross-tenant leak 防止）。

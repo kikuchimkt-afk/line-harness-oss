@@ -1,5 +1,6 @@
 import { URL_TOKEN_SQL } from '../lib/url-token.js';
 
+import { filterUnblockedFriendIds } from './friend-block-policy.js';
 export interface DedupPreviewPerAccount {
   accountId: string;
   accountName: string;
@@ -138,13 +139,15 @@ export async function computeDedupBroadcastPreview(
 
   // Aggregate per-account.
   const sendCountByAccount = new Map<string, RankedRow[]>();
-  for (const row of rankedRows.results ?? []) {
+  const eligibleIds = new Set(await filterUnblockedFriendIds(db, (rankedRows.results ?? []).map(r => r.friend_id)));
+  const eligibleRankedRows = (rankedRows.results ?? []).filter(r => eligibleIds.has(r.friend_id));
+  for (const row of eligibleRankedRows) {
     const list = sendCountByAccount.get(row.line_account_id) ?? [];
     list.push(row);
     sendCountByAccount.set(row.line_account_id, list);
   }
 
-  const uniqueRecipients = (rankedRows.results ?? []).length;
+  const uniqueRecipients = eligibleRankedRows.length;
   const reduction = totalSelected - uniqueRecipients;
   const reductionRate = totalSelected > 0 ? reduction / totalSelected : 0;
 
@@ -343,7 +346,7 @@ export async function processMultiAccountDedupBroadcast(
     try {
       for (let i = 0; i < remaining.length; i += MULTICAST_BATCH_SIZE) {
         const batchIdx = Math.floor(i / MULTICAST_BATCH_SIZE);
-        const batch = remaining.slice(i, i + MULTICAST_BATCH_SIZE);
+        let batch = remaining.slice(i, i + MULTICAST_BATCH_SIZE);
 
         if (batchIdx > 0) {
           await sleep(calculateStaggerDelay(remaining.length, batchIdx));
@@ -354,6 +357,9 @@ export async function processMultiAccountDedupBroadcast(
           batchMessage = { ...message, text: addMessageVariation(message.text, batchIdx) } as Message;
         }
 
+        const allowedIds = new Set(await filterUnblockedFriendIds(db, batch.map(r => r.friendId), account.id));
+        batch = batch.filter(r => allowedIds.has(r.friendId));
+        if (!batch.length) continue;
         await client.multicast(batch.map((r) => r.lineUserId), [batchMessage], [unit]);
 
         // multicast 成功直後に identKey を sent set へ追加。

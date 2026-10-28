@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { isFriendBlocked } from '../services/friend-block-policy.js';
 import {
   getBroadcasts,
   getBroadcastById,
@@ -879,10 +880,12 @@ broadcasts.post('/api/broadcasts/:id/test-send', async (c) => {
 
     let sent = 0;
     let failed = 0;
+    let skipped = 0;
     const now = new Date(Date.now() + 9 * 60 * 60_000).toISOString().replace('Z', '+09:00');
 
     for (const friend of friends.results) {
       try {
+        if (await isFriendBlocked(c.env.DB, friend.id)) { skipped += 1; continue; }
         await lineClient.pushMessage(friend.line_user_id, [message]);
         sent++;
         await c.env.DB.prepare(
@@ -895,7 +898,7 @@ broadcasts.post('/api/broadcasts/:id/test-send', async (c) => {
       }
     }
 
-    return c.json({ success: true, sent, failed });
+    return c.json({ success: true, sent, failed, skipped });
   } catch (err) {
     console.error('POST /api/broadcasts/:id/test-send error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

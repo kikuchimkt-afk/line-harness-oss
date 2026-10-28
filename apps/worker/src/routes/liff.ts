@@ -7,7 +7,6 @@ import {
   upsertFriend,
   getEntryRouteByRefCode,
   recordRefTracking,
-  addTagToFriend,
   getLineAccountByChannelId,
   getLineAccountById,
   getLineAccounts,
@@ -22,11 +21,20 @@ import {
 import { buildIntroMessage } from '../services/intro-message.js';
 import { resolveLineAccountIdForLoginChannel } from '../services/liff-account-resolution.js';
 import { attachTagAndFireSideEffects } from '../services/friend-tag-attach.js';
+import { addTagWithBlockEnforcement } from '../services/block-tag-attach.js';
 import { enrollPendingEntryScenarioOnce, hasPendingRefTracking, recoverPendingRefAttribution, savePendingRefAttribution } from '../services/liff-pending-ref-attribution.js';
+import { assertFriendNotBlocked, BlockedFriendError, BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 import { safeRedirectTarget } from '../lib/safe-redirect.js';
 import type { Env } from '../index.js';
 
 const liffRoutes = new Hono<Env>();
+
+async function getVerifiedAccountFriend(db: D1Database, lineUserId: string, accountId: string | null) {
+  if (accountId) return getFriendByLineUserId(db, lineUserId, accountId);
+  // The DB getter's null means all accounts; legacy customer auth must not.
+  return db.prepare('SELECT * FROM friends WHERE line_user_id = ? AND line_account_id IS NULL')
+    .bind(lineUserId).first<Awaited<ReturnType<typeof getFriendByLineUserId>>>();
+}
 
 // Persist ig_igsid on the LINE friend and notify IG Harness.
 // Used anywhere a LIFF/OAuth flow resolves with a known IGSID so existing
@@ -123,6 +131,7 @@ async function applyRefAttribution(
 ): Promise<void> {
   if (!ref || ref.startsWith('xh:')) return;
   const db = c.env.DB;
+  await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
 
   const route = await getEntryRouteByRefCode(db, ref);
   let trackedLink: Awaited<ReturnType<typeof getTrackedLinkById>> = null;
@@ -165,7 +174,6 @@ async function applyRefAttribution(
         getFriendById,
         computeNextDeliveryAt,
         resolveStepContent,
-        addTagToFriend,
       } = await import('@line-crm/db');
       const { LineClient } = await import('@line-crm/line-sdk');
       const { buildMessage, expandVariables, resolveMetadata } = await import('../services/step-delivery.js');
@@ -236,6 +244,7 @@ async function applyRefAttribution(
         c.env.WORKER_URL,
       );
       const pushedMessage = buildMessage(resolved.messageType, expanded);
+      await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
       await lineClient.pushMessage(lineUserId, [pushedMessage]);
 
       // Log the push so the cooldown above sees it on subsequent calls,
@@ -300,7 +309,7 @@ async function applyRefAttribution(
         // 到達タグ付与 (advance / complete の後)
         if (firstStep.on_reach_tag_id) {
           try {
-            await addTagToFriend(db, friend.id, firstStep.on_reach_tag_id);
+            await addTagWithBlockEnforcement(db, friend.id, firstStep.on_reach_tag_id);
           } catch (err) {
             console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
           }
@@ -717,6 +726,15 @@ liffRoutes.get('/auth/callback', async (c) => {
       picture?: string;
     }>();
 
+    const db = c.env.DB;
+    const lineUserId = verified.sub;
+    const loginAccounts = (await getLineAccounts(db)).filter((account) => account.is_active !== 0);
+    const matchedLineAccountId = resolveLineAccountIdForLoginChannel(loginAccounts, loginChannelId);
+    const knownFriend = await getVerifiedAccountFriend(db, lineUserId, matchedLineAccountId);
+    if (knownFriend && await isFriendBlocked(db, knownFriend.id, knownFriend.line_account_id)) {
+      return c.html(errorPage(BLOCKED_FRIEND_MESSAGE), 403);
+    }
+
     // Get profile via access token
     const profileRes = await fetch('https://api.line.me/v2/profile', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
@@ -734,12 +752,6 @@ liffRoutes.get('/auth/callback', async (c) => {
       pictureUrl = profile.pictureUrl || null;
     }
 
-    const db = c.env.DB;
-    const lineUserId = verified.sub;
-    const matchedLineAccountId = accountParam
-      ? (await getLineAccountByChannelId(db, accountParam))?.id ?? null
-      : null;
-
     // Upsert friend (may not exist yet if webhook hasn't fired)
     const friend = await upsertFriend(db, {
       lineUserId,
@@ -748,6 +760,7 @@ liffRoutes.get('/auth/callback', async (c) => {
       statusMessage: null,
       lineAccountId: matchedLineAccountId,
     });
+    await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
 
     // IG cross-platform UUID linkage (OAuth path — new friends & returning users
     // going through /auth/callback). Existing friends who bypass OAuth hit the
@@ -896,10 +909,10 @@ liffRoutes.get('/auth/callback', async (c) => {
       const {
         computeNextDeliveryAt: computeNextLiff,
         resolveStepContent: resolveStepLiff,
-        addTagToFriend: addTagLiff,
       } = await import('@line-crm/db');
       const scenarios = runAccountScenariosLiff ? await getScenarios(db) : [];
       for (const scenario of scenarios) {
+        await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
         const scenarioAccountMatch = !scenario.line_account_id || !matchedAccountId || scenario.line_account_id === matchedAccountId;
         if (scenario.trigger_type === 'friend_add' && scenario.is_active && scenarioAccountMatch) {
           const enrollment = await enroll(db, friend.id, scenario.id);
@@ -926,6 +939,7 @@ liffRoutes.get('/auth/callback', async (c) => {
                   c.env.WORKER_URL,
                 );
                 const pushedMessage = buildMessage(resolved.messageType, expandedContent);
+                await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
                 await lineClient.pushMessage(lineUserId, [pushedMessage]);
 
                 // messages_log への記録 (到達率分母に含めるため)
@@ -953,7 +967,7 @@ liffRoutes.get('/auth/callback', async (c) => {
                 // 到達タグ付与 (push 後)
                 if (firstStep.on_reach_tag_id) {
                   try {
-                    await addTagLiff(db, friend.id, firstStep.on_reach_tag_id);
+                    await addTagWithBlockEnforcement(db, friend.id, firstStep.on_reach_tag_id);
                   } catch (err) {
                     console.error(`[scenario] tag attach failed step=${firstStep.id}:`, err);
                   }
@@ -971,6 +985,7 @@ liffRoutes.get('/auth/callback', async (c) => {
     // marketing/LP and app/deep-link redirects stay allowed (intentional
     // feature); javascript:/data:/protocol-relative targets are rejected.
     const safeRedirect = safeRedirectTarget(redirect);
+    await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
     if (safeRedirect) {
       return c.redirect(safeRedirect);
     }
@@ -1035,6 +1050,7 @@ liffRoutes.get('/auth/callback', async (c) => {
         const introMessage = buildIntroMessage(introTemplate, formLiffUrl);
 
         const lineClient = new LineClient(accessToken);
+        await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
         await lineClient.pushMessage(friend.line_user_id, [introMessage as any]);
       } catch (err) {
         console.error('Form link push error (non-blocking):', err);
@@ -1079,6 +1095,7 @@ liffRoutes.get('/auth/callback', async (c) => {
     return c.html(completionPage(displayName, pictureUrl, ref));
 
   } catch (err) {
+    if (err instanceof BlockedFriendError) return c.html(errorPage(BLOCKED_FRIEND_MESSAGE), 403);
     console.error('Auth callback error:', err);
     return c.html(errorPage('Internal error'));
   }
@@ -1130,18 +1147,36 @@ liffRoutes.get('/api/liff/config', async (c) => {
 
 // ─── Existing LIFF endpoints ────────────────────────────────────
 
-// POST /api/liff/profile - get friend by LINE userId (public, no auth)
+// POST /api/liff/profile - verified customer profile, account-scoped.
 liffRoutes.post('/api/liff/profile', async (c) => {
   try {
-    const body = await c.req.json<{ lineUserId: string }>();
+    const body = await c.req.json<{ lineUserId: string; idToken?: string }>();
     if (!body.lineUserId) {
       return c.json({ success: false, error: 'lineUserId is required' }, 400);
     }
 
-    const friend = await getFriendByLineUserId(c.env.DB, body.lineUserId);
+    if (!body.idToken) return c.json({ success: false, error: 'idToken is required' }, 401);
+    const accounts = (await getLineAccounts(c.env.DB)).filter((account) => account.is_active !== 0);
+    const channels = [...new Set([c.env.LINE_LOGIN_CHANNEL_ID, ...accounts.map((a) => a.login_channel_id)].filter(Boolean))];
+    let verifiedChannel: string | null = null;
+    for (const channel of channels) {
+      const response = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ id_token: body.idToken, client_id: channel! }),
+      });
+      if (!response.ok) continue;
+      const identity = await response.json<{ sub: string }>();
+      if (identity.sub !== body.lineUserId) return c.json({ success: false, error: 'Token mismatch' }, 403);
+      verifiedChannel = channel!;
+      break;
+    }
+    if (!verifiedChannel) return c.json({ success: false, error: 'Invalid ID token' }, 401);
+    const accountId = resolveLineAccountIdForLoginChannel(accounts, verifiedChannel);
+    const friend = await getVerifiedAccountFriend(c.env.DB, body.lineUserId, accountId);
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    await assertFriendNotBlocked(c.env.DB, friend.id, friend.line_account_id);
 
     return c.json({
       success: true,
@@ -1153,6 +1188,7 @@ liffRoutes.post('/api/liff/profile', async (c) => {
       },
     });
   } catch (err) {
+    if (err instanceof BlockedFriendError) return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: err.code }, 403);
     console.error('POST /api/liff/profile error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
@@ -1175,7 +1211,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
 
     // Try verifying with default Login channel, then DB accounts
     const loginChannelIds = c.env.LINE_LOGIN_CHANNEL_ID ? [c.env.LINE_LOGIN_CHANNEL_ID] : [];
-    const dbAccounts = await getLineAccounts(c.env.DB);
+    const dbAccounts = (await getLineAccounts(c.env.DB)).filter((account) => account.is_active !== 0);
     for (const acct of dbAccounts) {
       if (acct.login_channel_id && !loginChannelIds.includes(acct.login_channel_id)) {
         loginChannelIds.push(acct.login_channel_id);
@@ -1215,7 +1251,8 @@ liffRoutes.post('/api/liff/link', async (c) => {
       dbAccounts,
       verifiedLoginChannelId,
     );
-    let friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
+    let friend = await getVerifiedAccountFriend(db, lineUserId, verifiedLineAccountId);
+    if (friend) await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
     let recoveredPendingInRequest = false;
     if (!friend || friend.is_following === 0) {
       // LIFF runs before friend-add. Persist only a known entry route scoped
@@ -1237,7 +1274,8 @@ liffRoutes.post('/api/liff/link', async (c) => {
         // Close the race where follow upsert happened between the first
         // lookup and the pending INSERT. No message is sent unless follow
         // is already confirmed by the account-scoped friends row.
-        friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
+        friend = await getVerifiedAccountFriend(db, lineUserId, verifiedLineAccountId);
+        if (friend) await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
         if (friend?.is_following === 1) {
           body.ref = await recoverPendingRefAttribution(db, friend, verifiedLineAccountId, lineUserId) ?? undefined;
           recoveredPendingInRequest = true;
@@ -1391,6 +1429,7 @@ liffRoutes.post('/api/liff/link', async (c) => {
       data: { userId, friendId: friend.id, alreadyLinked: false },
     });
   } catch (err) {
+    if (err instanceof BlockedFriendError) return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: err.code }, 403);
     console.error('POST /api/liff/link error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
@@ -1708,6 +1747,7 @@ async function applyXHarnessActions(
   friendId: string,
   result: XHarnessTokenResult,
 ): Promise<void> {
+  await assertFriendNotBlocked(db, friendId);
   // Add tag if specified
   if (result.tag) {
     try {
@@ -1725,8 +1765,7 @@ async function applyXHarnessActions(
           .first<{ id: string }>();
       }
       if (tagRow) {
-        const { addTagToFriend } = await import('@line-crm/db');
-        await addTagToFriend(db, friendId, tagRow.id);
+        await addTagWithBlockEnforcement(db, friendId, tagRow.id);
         console.log(`X Harness: added tag "${result.tag}" to friend ${friendId}`);
       }
     } catch (err) {
@@ -1737,6 +1776,7 @@ async function applyXHarnessActions(
   // Start scenario if specified
   if (result.scenarioId) {
     try {
+      await assertFriendNotBlocked(db, friendId);
       const { enrollFriendInScenario } = await import('@line-crm/db');
       await enrollFriendInScenario(db, friendId, result.scenarioId);
       console.log(`X Harness: enrolled friend ${friendId} in scenario ${result.scenarioId}`);
@@ -1807,7 +1847,7 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
     }
 
     // Verify idToken — ensures caller is the actual user
-    const dbAccounts = await getLineAccounts(c.env.DB);
+    const dbAccounts = (await getLineAccounts(c.env.DB)).filter((account) => account.is_active !== 0);
     let verifiedLoginChannelId: string | null = null;
     {
       const loginChannelIds = [c.env.LINE_LOGIN_CHANNEL_ID];
@@ -1841,10 +1881,11 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
       dbAccounts,
       verifiedLoginChannelId,
     );
-    const friend = await getFriendByLineUserId(db, lineUserId, verifiedLineAccountId);
+    const friend = await getVerifiedAccountFriend(db, lineUserId, verifiedLineAccountId);
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
 
     // IG cross-link for LIFF flows that hit this endpoint (existing friends
     // tapping a reward DM URL).
@@ -1902,10 +1943,12 @@ liffRoutes.post('/api/liff/send-form-link', async (c) => {
     const introMessage = buildIntroMessage(introTemplate, formLiffUrl);
 
     const lineClient = new LineClient(accessToken);
+    await assertFriendNotBlocked(db, friend.id, friend.line_account_id);
     await lineClient.pushMessage(lineUserId, [introMessage as any]);
 
     return c.json({ success: true });
   } catch (err) {
+    if (err instanceof BlockedFriendError) return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: err.code }, 403);
     console.error('POST /api/liff/send-form-link error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }

@@ -1,4 +1,5 @@
 import { LineClient } from '@line-crm/line-sdk';
+import { isFriendBlocked } from './friend-block-policy.js';
 
 const EVENT_NOTICE_RECIPIENTS_KEY = 'incoming_notice_recipients';
 
@@ -125,6 +126,7 @@ export async function notifyEventBookingAdminRecipients(
   let sent = 0;
   for (const recipient of recipients.results) {
     try {
+      if (await isFriendBlocked(params.db, recipient.id)) continue;
       await sendText(recipient.line_user_id, text);
       sent += 1;
     } catch (err) {

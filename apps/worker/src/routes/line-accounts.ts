@@ -16,8 +16,31 @@ import {
   filterAccessibleLineAccounts,
 } from '../middleware/account-access.js';
 import type { Env } from '../index.js';
+import { ensureBlockedMenuForAccount } from '../services/blocked-menu-setup.js';
 
 const lineAccounts = new Hono<Env>();
+
+type BlockSetupResponse = {
+  status: 'ready' | 'pending' | 'retry_wait' | 'inactive';
+  code?: string;
+};
+
+// Account registration/credential changes must succeed even if LINE is
+// temporarily unavailable. The setup service stores retry state itself and
+// reads the latest persisted credentials; never pass request secrets to it.
+// Only a bounded, non-secret status/code may cross this response boundary.
+async function initializeBlockSetup(db: D1Database, accountId: string): Promise<BlockSetupResponse> {
+  try {
+    const result = await ensureBlockedMenuForAccount(db, accountId);
+    const code = typeof result.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(result.code)
+      ? result.code
+      : undefined;
+    return { status: result.status, ...(code ? { code } : {}) };
+  } catch {
+    console.warn('[line-accounts] block setup deferred: BLOCK_SETUP_FAILED');
+    return { status: 'pending', code: 'BLOCK_SETUP_FAILED' };
+  }
+}
 
 function serializeLineAccount(row: DbLineAccount) {
   return {
@@ -332,7 +355,8 @@ lineAccounts.post('/api/line-accounts', requireRole('owner'), async (c) => {
       console.error('[line-accounts] failed to auto-enroll into main pool', err);
     }
 
-    return c.json({ success: true, data: serializeLineAccountFull(account) }, 201);
+    const blockSetup = await initializeBlockSetup(c.env.DB, account.id);
+    return c.json({ success: true, data: serializeLineAccountFull(account), blockSetup }, 201);
   } catch (err) {
     // D1 surfaces UNIQUE-constraint violations as a thrown error. Surface
     // those as 409 so idempotent callers (e.g. create-line-harness retry
@@ -426,9 +450,9 @@ lineAccounts.patch(
       const liffId = normalizeOptionalString(body.liffId);
 
       // Pre-validate Login pair + uniqueness against the existing row so the
-      // caller gets a clean error before we mutate. Skip the lookup entirely
-      // if the request doesn't touch any of the fields we'd validate, to
-      // avoid a wasted SELECT on the toggle-isActive hot path.
+      // caller gets a clean error before we mutate. Skip this validation
+      // lookup if the request doesn't touch any relevant fields; activation
+      // separately reads the current row to detect a transition below.
       //
       // The pair check only runs when the request itself touches Login
       // fields. That matters because the setup CLI (packages/create-line-
@@ -439,8 +463,14 @@ lineAccounts.patch(
       const touchesLogin =
         loginChannelId !== undefined || loginChannelSecret !== undefined;
       const touchesLoginOrLiff = touchesLogin || liffId !== undefined;
+      // Reactivation also retries setup for an account that may have been
+      // registered while inactive. Metadata-only edits do not contact LINE.
+      const currentForActivation = body.isActive === true
+        ? await getLineAccountById(c.env.DB, id)
+        : null;
+      const reactivating = body.isActive === true && currentForActivation?.is_active === 0;
       if (touchesLoginOrLiff) {
-        const current = await getLineAccountById(c.env.DB, id);
+        const current = currentForActivation ?? await getLineAccountById(c.env.DB, id);
         if (!current) return c.json({ success: false, error: 'not found' }, 404);
         if (touchesLogin) {
           const pairError = validateLoginChannelPair(
@@ -474,7 +504,10 @@ lineAccounts.patch(
           liffId,
         });
         if (!updated) return c.json({ success: false, error: 'not found' }, 404);
-        return c.json({ success: true, data: serializeLineAccount(updated) });
+        const blockSetup = reactivating && updated.is_active
+          ? await initializeBlockSetup(c.env.DB, updated.id)
+          : undefined;
+        return c.json({ success: true, data: serializeLineAccount(updated), ...(blockSetup ? { blockSetup } : {}) });
       }
 
       // name is present — use the full updateLineAccount path
@@ -486,7 +519,10 @@ lineAccounts.patch(
         liff_id: liffId,
       });
       if (!updated) return c.json({ success: false, error: 'LINE account not found' }, 404);
-      return c.json({ success: true, data: serializeLineAccount(updated) });
+      const blockSetup = reactivating && updated.is_active
+        ? await initializeBlockSetup(c.env.DB, updated.id)
+        : undefined;
+      return c.json({ success: true, data: serializeLineAccount(updated), ...(blockSetup ? { blockSetup } : {}) });
     } catch (err) {
       console.error('PATCH /api/line-accounts/:id error:', err);
       return c.json({ success: false, error: 'Internal server error' }, 500);
@@ -584,7 +620,12 @@ lineAccounts.put('/api/line-accounts/:id', requireRole('owner'), async (c) => {
       }
     }
 
-    return c.json({ success: true, data: serializeLineAccountFull(updated) });
+    const shouldSetupBlockMenu = body.channelAccessToken !== undefined ||
+      body.channelSecret !== undefined || body.isActive === true;
+    const blockSetup = shouldSetupBlockMenu
+      ? await initializeBlockSetup(c.env.DB, updated.id)
+      : undefined;
+    return c.json({ success: true, data: serializeLineAccountFull(updated), ...(blockSetup ? { blockSetup } : {}) });
   } catch (err) {
     console.error('PUT /api/line-accounts/:id error:', err);
     return c.json({ success: false, error: 'Internal server error' }, 500);

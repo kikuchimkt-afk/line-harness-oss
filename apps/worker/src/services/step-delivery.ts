@@ -1,4 +1,5 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import { isFriendBlocked, stopBlockedFriendWork } from './friend-block-policy.js';
 import {
   getFriendScenariosDueForDelivery,
   getScenarioSteps,
@@ -9,12 +10,12 @@ import {
   jstNow,
   computeNextDeliveryAt,
   resolveStepContent,
-  addTagToFriend,
   type DeliveryMode,
 } from '@line-crm/db';
 import type { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
 import { jitterDeliveryTime, addJitter, sleep } from './stealth.js';
+import { addTagWithBlockEnforcement } from './block-tag-attach.js';
 import {
   createIndividualNotificationBudget,
   type IndividualNotificationBudget,
@@ -178,6 +179,10 @@ async function processSingleDelivery(
     await completeFriendScenario(db, fs.id);
     return false;
   }
+  if (await isFriendBlocked(db, friend.id)) {
+    await stopBlockedFriendWork(db, friend.id);
+    return false;
+  }
 
   // Fetch scenario row for delivery_mode (needed by computeNextDeliveryAt below)
   const scenarioRow = await db
@@ -272,6 +277,10 @@ async function processSingleDelivery(
   }
   // The scenario is already claimed in D1. Commit the shared Cron slot only
   // when an outbound LINE request is actually about to be attempted.
+  if (await isFriendBlocked(db, friend.id)) {
+    await stopBlockedFriendWork(db, friend.id);
+    return false;
+  }
   reservation?.commit();
   try {
     await deliveryClient.pushMessage(friend.line_user_id, [message]);
@@ -317,7 +326,7 @@ async function processSingleDelivery(
   // 失敗してもログに残すだけで配信フローは止めない。
   if (currentStep.on_reach_tag_id) {
     try {
-      await addTagToFriend(db, friend.id, currentStep.on_reach_tag_id);
+      await addTagWithBlockEnforcement(db, friend.id, currentStep.on_reach_tag_id);
     } catch (err) {
       console.error(`[scenario] tag attach failed step=${currentStep.id}:`, err);
     }

@@ -1,4 +1,6 @@
 import { LineClient } from '@line-crm/line-sdk';
+import { assertFriendNotBlocked, isFriendBlocked } from './friend-block-policy.js';
+import { BLOCKED_OUTBOUND_REASON } from './blocked-outbound.js';
 import type { Message } from '@line-crm/line-sdk';
 import { jstNow } from '@line-crm/db';
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
@@ -20,6 +22,7 @@ export async function enqueueScheduledChatMessage(
   db: D1Database,
   input: EnqueueScheduledChatMessageInput,
 ): Promise<string> {
+  await assertFriendNotBlocked(db, input.friendId);
   const id = crypto.randomUUID();
   await db
     .prepare(
@@ -90,7 +93,7 @@ export async function processDueScheduledChatMessages(
     defaultChannelAccessToken: string;
     budget?: IndividualNotificationBudget;
   },
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; skipped?: number }> {
   const due = await db
     .prepare(
       `SELECT q.id, q.chat_id, q.friend_id, q.line_account_id,
@@ -109,12 +112,18 @@ export async function processDueScheduledChatMessages(
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const row of due.results ?? []) {
     const reservation = params.budget?.reserve();
     if (params.budget && !reservation) break;
     let claimedRetry: number | null = null;
     try {
+      if (await isFriendBlocked(db, row.friend_id)) {
+        await db.prepare(`UPDATE scheduled_chat_messages SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       const claim = await db
         .prepare(
           `UPDATE scheduled_chat_messages
@@ -130,6 +139,11 @@ export async function processDueScheduledChatMessages(
         row.channel_access_token || params.defaultChannelAccessToken,
       );
       const message = buildLineMessage(row.message_type, row.content);
+      if (await isFriendBlocked(db, row.friend_id)) {
+        await db.prepare(`UPDATE scheduled_chat_messages SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       reservation?.commit();
       await client.pushMessage(
         row.line_user_id,
@@ -194,7 +208,7 @@ export async function processDueScheduledChatMessages(
     }
   }
 
-  return { sent, failed };
+  return { sent, failed, ...(skipped ? { skipped } : {}) };
 }
 
 export const _internals = { MAX_RETRY, buildLineMessage };

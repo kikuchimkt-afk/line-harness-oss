@@ -4,6 +4,7 @@ import type { BookingNotificationSender } from './booking-notifier.js';
 import { purgeExpiredIdempotency } from './booking-idempotency.js';
 import { REQUEST_TTL_HOURS } from './booking-types.js';
 import type { IndividualNotificationBudget } from './individual-notification-budget.js';
+import { isBlockedNotificationTarget } from './blocked-outbound.js';
 
 interface StaleRow {
   id: string;
@@ -73,6 +74,7 @@ export async function runExpirer(
         )
         .bind(row.id)
         .run();
+      if (await isBlockedNotificationTarget(db, row)) { expired += 1; continue; }
       reservation?.commit();
       try {
         await params.sender({

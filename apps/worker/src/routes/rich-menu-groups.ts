@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { filterUnblockedLineUserIds } from '../services/friend-block-policy.js';
+import { containsProtectedBlockMenu, isProtectedBlockMenu } from '../services/blocked-menu-protection.js';
 import {
   getRichMenuGroups,
   getRichMenuGroupById,
@@ -275,6 +277,9 @@ richMenuGroups.post('/api/rich-menu-groups/import', async (c) => {
   if (!accountId || !richMenuId) {
     return c.json({ success: false, error: 'accountId and richMenuId query params required' }, 400);
   }
+  if (await isProtectedBlockMenu(c.env.DB, richMenuId)) {
+    return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューは通常の編集対象に取り込めません。' }, 403);
+  }
   const account = await getLineAccountById(c.env.DB, accountId);
   if (!account) return c.json({ success: false, error: 'line account not found' }, 404);
 
@@ -542,6 +547,9 @@ richMenuGroups.delete('/api/rich-menu-groups/external/:richMenuId', async (c) =>
   const richMenuId = c.req.param('richMenuId');
   const accountId = c.req.query('accountId');
   if (!accountId) return c.json({ success: false, error: 'accountId query param required' }, 400);
+  if (await isProtectedBlockMenu(c.env.DB, richMenuId)) {
+    return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューは削除できません。' }, 403);
+  }
   const account = await getLineAccountById(c.env.DB, accountId);
   if (!account) return c.json({ success: false, error: 'line account not found' }, 404);
 
@@ -840,6 +848,9 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/publish', async (c) => {
   const groupId = c.req.param('groupId');
   const group = await getRichMenuGroupWithPages(c.env.DB, groupId);
   if (!group) return c.json({ success: false, error: 'not found' }, 404);
+  if (await containsProtectedBlockMenu(c.env.DB, group.pages.map(p => p.line_richmenu_id))) {
+    return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューを含むグループは公開できません。' }, 403);
+  }
   if (group.publishing_at) return c.json({ success: false, error: 'already publishing' }, 409);
 
   const account = await getLineAccountById(c.env.DB, group.account_id);
@@ -898,6 +909,9 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/unpublish', async (c) => {
   const groupId = c.req.param('groupId');
   const group = await getRichMenuGroupWithPages(c.env.DB, groupId);
   if (!group) return c.json({ success: false, error: 'not found' }, 404);
+  if (await containsProtectedBlockMenu(c.env.DB, group.pages.map(p => p.line_richmenu_id))) {
+    return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューを含むグループは取り下げできません。' }, 403);
+  }
 
   const account = await getLineAccountById(c.env.DB, group.account_id);
   if (!account) return c.json({ success: false, error: 'line account not found' }, 500);
@@ -980,6 +994,10 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
     );
   }
 
+  if (await containsProtectedBlockMenu(c.env.DB, group.pages.map(p => p.line_richmenu_id))) {
+    return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューを通常のメニューとして適用できません。' }, 403);
+  }
+
   const account = await getLineAccountById(c.env.DB, group.account_id);
   if (!account) return c.json({ success: false, error: 'line account not found' }, 500);
 
@@ -1028,12 +1046,19 @@ richMenuGroups.post('/api/rich-menu-groups/:groupId/apply-to-tag', async (c) => 
 
   try {
     const line = createLineClient(account.channel_access_token);
-    const result = await linkRichMenuBulkChunked(
-      line,
-      targetPage.line_richmenu_id,
-      userIds,
-    );
-    return c.json({ success: true, data: result });
+    let chunks = 0;
+    let total = 0;
+    let skipped = 0;
+    for (let offset = 0; offset < userIds.length; offset += 500) {
+      const sourceBatch = userIds.slice(offset, offset + 500);
+      const allowed = await filterUnblockedLineUserIds(c.env.DB, sourceBatch, group.account_id);
+      skipped += sourceBatch.length - allowed.length;
+      if (!allowed.length) continue;
+      await line.linkRichMenuBulk(targetPage.line_richmenu_id, allowed);
+      chunks += 1;
+      total += allowed.length;
+    }
+    return c.json({ success: true, data: { chunks, total, skipped } });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return c.json({ success: false, error: message }, 500);

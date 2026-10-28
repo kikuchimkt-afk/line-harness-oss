@@ -26,6 +26,7 @@ import { sendEventBookingNotification } from './services/event-booking-notifier.
 import { sendBookingNotification } from './services/booking-notifier.js';
 import { DEFAULT_ACCOUNT_SETTINGS } from './services/booking-types.js';
 import { createIndividualNotificationBudget } from './services/individual-notification-budget.js';
+import { processBlockedMenuMaintenance } from './services/blocked-menu-maintenance.js';
 import {
   processDueRichMenuAssignments,
   reconcileRichMenuAssignments,
@@ -668,6 +669,18 @@ async function scheduled(
   jobs.push(cleanupExpiredPendingRefs(env.DB, now.getTime()));
 
   await Promise.allSettled(jobs);
+
+  // Account creation is not restricted to the admin UI (the installer also
+  // writes D1 directly). Recover missing setup after token refresh has settled.
+  // These operations never send messages and do not spend the 40-push budget.
+  try {
+    const result = await processBlockedMenuMaintenance(env.DB, { now });
+    if (result.setup.attempted + result.setup.failed + result.repair.attempted + result.restore.attempted + result.restore.failed > 0) {
+      console.log(`[blocked-menu-maintenance] setup_ready=${result.setup.ready} setup_deferred=${result.setup.deferred} setup_failed=${result.setup.failed} friend_repaired=${result.repair.repaired} friend_failed=${result.repair.failed} unblock_restored=${result.restore.repaired} unblock_failed=${result.restore.failed}`);
+    }
+  } catch {
+    console.error('blocked-menu-maintenance error: recovery deferred');
+  }
 
   // Rich-menu switching is idempotent and has its own durable desired-state
   // queue. Process it before message deliveries so a temporary LINE failure

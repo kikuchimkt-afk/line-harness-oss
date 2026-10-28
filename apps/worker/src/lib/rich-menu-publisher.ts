@@ -10,6 +10,7 @@
 //   4. 旧 richmenu があれば DELETE
 // 最後に isDefaultForAll なら 1 ページ目を全友だち default に。
 
+import { filterUnblockedLineUserIds } from '../services/friend-block-policy.js';
 export type Bounds = { x: number; y: number; width: number; height: number };
 
 export type ActionType = 'uri' | 'message' | 'postback' | 'richmenuswitch';
@@ -267,15 +268,20 @@ export async function linkRichMenuBulkChunked(
   line: LineRichMenuClient,
   richMenuId: string,
   userIds: string[],
+  policy: { db: D1Database; accountId: string },
 ): Promise<{ chunks: number; total: number }> {
   const CHUNK = 500;
-  const total = userIds.length;
-  if (total === 0) return { chunks: 0, total: 0 };
+  if (!policy?.db || !policy.accountId) throw new Error('Account-scoped block policy is required for bulk menu linking');
+  const candidateCount = userIds.length;
+  if (candidateCount === 0) return { chunks: 0, total: 0 };
+  let total = 0;
   let chunks = 0;
-  for (let i = 0; i < total; i += CHUNK) {
-    const slice = userIds.slice(i, i + CHUNK);
+  for (let i = 0; i < candidateCount; i += CHUNK) {
+    const slice = await filterUnblockedLineUserIds(policy.db, userIds.slice(i, i + CHUNK), policy.accountId);
+    if (!slice.length) continue;
     await line.linkRichMenuBulk(richMenuId, slice);
     chunks++;
+    total += slice.length;
   }
   return { chunks, total };
 }

@@ -11,10 +11,11 @@ vi.mock('@line-crm/line-sdk', () => ({
 import { sendBookingNotification } from './booking-notifier.js';
 import { sendEventBookingNotification } from './event-booking-notifier.js';
 
-function historyDb(records: unknown[][]): D1Database {
+function historyDb(records: unknown[][], blocked = false): D1Database {
   return {
     prepare: vi.fn(() => ({
       bind: (...values: unknown[]) => ({
+        all: async () => ({ results: blocked ? [{ name: 'ブロック' }] : [] }),
         run: async () => {
           records.push(values);
           return { success: true };
@@ -27,6 +28,16 @@ function historyDb(records: unknown[][]): D1Database {
 describe('notification message history', () => {
   beforeEach(() => {
     pushMessage.mockClear();
+  });
+
+  test.each(['booking', 'event'])('blocked %s notices never push or invent outgoing history', async (kind) => {
+    const records: unknown[][] = [];
+    const common = { channelAccessToken: 'synthetic-token', toLineUserId: 'U-synthetic', db: historyDb(records, true), friendId: 'synthetic-friend', lineAccountId: 'synthetic-account' };
+    const notice = kind === 'booking'
+      ? sendBookingNotification({ ...common, kind: 'approved', ctx: { menuName: '相談', staffName: '講師', startsAtJst: '2099-01-01 15:00', hoursBefore: 0 } })
+      : sendEventBookingNotification({ ...common, kind: 'confirmed', ctx: { eventName: '勉強会', startsAtJst: '2099-01-01 15:00' } });
+    await expect(notice).rejects.toMatchObject({ code: 'FRIEND_BLOCKED' });
+    expect(pushMessage).not.toHaveBeenCalled(); expect(records).toEqual([]);
   });
 
   test('stores a normal booking notice after sending it to LINE', async () => {

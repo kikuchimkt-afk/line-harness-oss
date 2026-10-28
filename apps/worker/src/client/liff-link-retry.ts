@@ -4,6 +4,7 @@ export type LiffLinkAttemptResult = {
   // Server-owned classification, never a client/query-param assertion.
   // false keeps modern tracked-link/affiliate pre-follow flows compatible.
   entryRefRequired?: boolean;
+  errorCode?: string;
 };
 
 type RetryOptions = {

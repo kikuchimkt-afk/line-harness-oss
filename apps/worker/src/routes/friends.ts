@@ -27,6 +27,7 @@ import {
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
 import { resolveMessageSource } from '../utils/message-source.js';
+import { BLOCKED_FRIEND_MESSAGE, isBlockTagName, isFriendBlocked, stopBlockedFriendWork } from '../services/friend-block-policy.js';
 
 const friends = new Hono<Env>();
 
@@ -578,6 +579,22 @@ friends.post('/api/friends/:id/tags', async (c) => {
     const denied = await denyIfCannotAccessFriendId(c, friendId);
     if (denied) return denied;
     await addTagToFriend(db, friendId, body.tagId);
+    if (await isFriendBlocked(db, friendId)) {
+      await stopBlockedFriendWork(db, friendId);
+      const { cancelBlockedFriendOutboundWork } = await import('../services/blocked-outbound.js');
+      await cancelBlockedFriendOutboundWork(db, friendId);
+      const { applyBlockedRichMenuForFriend } = await import('../services/rich-menu-assignment.js');
+      try {
+        await applyBlockedRichMenuForFriend(db, friendId);
+      } catch {
+        const stillBlocked = await isFriendBlocked(db, friendId);
+        return c.json({ success: true, data: null,
+          code: stillBlocked ? 'BLOCK_MENU_RETRY_PENDING' : 'BLOCK_STATE_CHANGED',
+          notice: stillBlocked ? 'タグは保存済みです。メニューの切り替えは自動で再試行します。'
+            : 'タグの状態が変更されました。現在の状態を確認してください。' }, 202);
+      }
+      return c.json({ success: true, data: null }, 201);
+    }
 
     // Enroll in tag_added scenarios that match this tag
     const allScenarios = await getScenarios(db);
@@ -611,7 +628,26 @@ friends.delete('/api/friends/:id/tags/:tagId', async (c) => {
     const denied = await denyIfCannotAccessFriendId(c, friendId);
     if (denied) return denied;
 
+    const wasBlocked = await isFriendBlocked(c.env.DB, friendId);
+    const removedTag = await c.env.DB.prepare('SELECT name FROM tags WHERE id = ?').bind(tagId).first<{ name: string }>();
     await removeTagFromFriend(c.env.DB, friendId, tagId);
+    if (wasBlocked || isBlockTagName(removedTag?.name)) {
+      if (!(await isFriendBlocked(c.env.DB, friendId))) {
+        const { restoreRichMenuAfterUnblock } = await import('../services/rich-menu-assignment.js');
+        try {
+          await restoreRichMenuAfterUnblock(c.env.DB, friendId);
+        } catch {
+          const blockedAgain = await isFriendBlocked(c.env.DB, friendId);
+          return c.json({ success: true, data: null,
+            code: blockedAgain ? 'BLOCK_STATE_CHANGED' : 'BLOCK_MENU_RETRY_PENDING',
+            notice: blockedAgain ? '再度ブロックされています。停止状態を維持します。'
+              : 'タグは保存済みです。メニューの切り替えは自動で再試行します。' }, 202);
+        }
+      }
+      // Staff can remove the tag, but no automation/scenario or old message
+      // is resumed merely by unblocking. Only menu presentation is restored.
+      return c.json({ success: true, data: null });
+    }
 
     // イベントバス発火: tag_change
     await fireEvent(c.env.DB, 'tag_change', { friendId, eventData: { tagId, action: 'remove' } });
@@ -780,6 +816,9 @@ friends.post('/api/friends/:id/messages', async (c) => {
     if (denied) return denied;
 
     const { LineClient } = await import('@line-crm/line-sdk');
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     // Resolve access token from friend's account (multi-account support)
     let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
     const preferredLineAccountId = lineAccountId || ((friend as unknown as Record<string, unknown>).line_account_id as string | undefined);
@@ -799,6 +838,9 @@ friends.post('/api/friends/:id/messages', async (c) => {
     );
 
     const message = buildMessage(tracked.messageType, tracked.content, body.altText);
+    if (await isFriendBlocked(db, friend.id, friend.line_account_id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     await lineClient.pushMessage(friend.line_user_id, [message]);
 
     // Log outgoing message

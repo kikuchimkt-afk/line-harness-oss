@@ -412,10 +412,11 @@ describe('unpublishRichMenuGroup', () => {
 });
 
 describe('linkRichMenuBulkChunked', () => {
+  const policy = { accountId: 'synthetic-account', db: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) } as unknown as D1Database };
   it('500 以下は 1 chunk', async () => {
     const line = makeMockLineClient();
     const ids = Array.from({ length: 300 }, (_, i) => `U${i}`);
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids, policy);
     expect(result).toEqual({ chunks: 1, total: 300 });
     expect(line.calls).toEqual(['link-bulk-300']);
   });
@@ -423,14 +424,14 @@ describe('linkRichMenuBulkChunked', () => {
   it('500 超は分割', async () => {
     const line = makeMockLineClient();
     const ids = Array.from({ length: 1100 }, (_, i) => `U${i}`);
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', ids, policy);
     expect(result).toEqual({ chunks: 3, total: 1100 });
     expect(line.calls).toEqual(['link-bulk-500', 'link-bulk-500', 'link-bulk-100']);
   });
 
   it('空配列は no-op', async () => {
     const line = makeMockLineClient();
-    const result = await linkRichMenuBulkChunked(line, 'lm-1', []);
+    const result = await linkRichMenuBulkChunked(line, 'lm-1', [], policy);
     expect(result).toEqual({ chunks: 0, total: 0 });
     expect(line.calls).toEqual([]);
   });

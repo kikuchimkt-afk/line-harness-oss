@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { BlockedFriendError, isFriendBlocked } from '../services/friend-block-policy.js';
+import { isProtectedBlockMenu } from '../services/blocked-menu-protection.js';
 import { LineClient } from '@line-crm/line-sdk';
 import { getFriendById, getLineAccountById } from '@line-crm/db';
 import type { Env } from '../index.js';
@@ -50,6 +52,7 @@ richMenus.post('/api/rich-menus', async (c) => {
 richMenus.delete('/api/rich-menus/:id', async (c) => {
   try {
     const richMenuId = c.req.param('id');
+    if (await isProtectedBlockMenu(c.env.DB, richMenuId)) return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューは削除できません。' }, 403);
     const lineClient = await resolveLineClient(c);
     await lineClient.deleteRichMenu(richMenuId);
     return c.json({ success: true, data: null });
@@ -64,6 +67,7 @@ richMenus.delete('/api/rich-menus/:id', async (c) => {
 richMenus.post('/api/rich-menus/:id/default', async (c) => {
   try {
     const richMenuId = c.req.param('id');
+    if (await isProtectedBlockMenu(c.env.DB, richMenuId)) return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューは全員の既定にできません。' }, 403);
     const lineClient = await resolveLineClient(c);
     await lineClient.setDefaultRichMenu(richMenuId);
     return c.json({ success: true, data: null });
@@ -108,6 +112,7 @@ richMenus.post('/api/friends/:friendId/rich-menu', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('POST /api/friends/:friendId/rich-menu error:', message);
+    if (err instanceof BlockedFriendError) return c.json({ success: false, error: message, code: err.code }, 403);
     return c.json({ success: false, error: `Failed to link rich menu to friend: ${message}` }, 500);
   }
 });
@@ -133,12 +138,14 @@ richMenus.delete('/api/friends/:friendId/rich-menu', async (c) => {
     // cannot re-link a menu that an operator explicitly removed.
     await clearDesiredRichMenuAssignment(db, friendId);
     const lineClient = new LineClient(accessToken);
+    if (await isFriendBlocked(db, friendId)) throw new BlockedFriendError();
     await lineClient.unlinkRichMenuFromUser(friend.line_user_id);
 
     return c.json({ success: true, data: null });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('DELETE /api/friends/:friendId/rich-menu error:', message);
+    if (err instanceof BlockedFriendError) return c.json({ success: false, error: message, code: err.code }, 403);
     return c.json({ success: false, error: `Failed to unlink rich menu from friend: ${message}` }, 500);
   }
 });
@@ -216,6 +223,7 @@ export { richMenus };
 richMenus.post('/api/rich-menus/:id/image', async (c) => {
   try {
     const richMenuId = c.req.param('id');
+    if (await isProtectedBlockMenu(c.env.DB, richMenuId)) return c.json({ success: false, code: 'BLOCK_MENU_PROTECTED', error: 'ブロック専用メニューの画像は変更できません。' }, 403);
     const contentType = c.req.header('content-type') ?? '';
 
     let imageData: ArrayBuffer;

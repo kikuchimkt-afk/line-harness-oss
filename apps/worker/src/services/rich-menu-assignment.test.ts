@@ -1,4 +1,5 @@
-import Database from '../../../../packages/db/node_modules/better-sqlite3';
+import { createRequire } from 'node:module';
+const { DatabaseSync: Database } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 import { describe, expect, test, vi } from 'vitest';
 import {
   applyDesiredRichMenu,
@@ -9,7 +10,7 @@ import {
 
 class SqliteD1Statement {
   private params: unknown[] = [];
-  constructor(private readonly sqlite: Database.Database, private readonly sql: string) {}
+  constructor(private readonly sqlite: import('node:sqlite').DatabaseSync, private readonly sql: string) {}
   bind(...params: unknown[]) { this.params = params; return this; }
   async first<T>(): Promise<T | null> {
     return (this.sqlite.prepare(this.sql).get(...this.params) as T | undefined) ?? null;
@@ -36,6 +37,9 @@ function setupDb() {
       line_account_id TEXT
     );
     CREATE TABLE automations (id TEXT PRIMARY KEY);
+    CREATE TABLE tags (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE friend_tags (friend_id TEXT, tag_id TEXT);
+    CREATE TABLE account_settings (id TEXT PRIMARY KEY, line_account_id TEXT, key TEXT, value TEXT, created_at TEXT, updated_at TEXT, UNIQUE(line_account_id,key));
     CREATE TABLE rich_menu_assignments (
       friend_id TEXT PRIMARY KEY,
       line_account_id TEXT,

@@ -1,5 +1,6 @@
 import { jstNow } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
+import { assertFriendNotBlocked, assertLineUserNotBlocked } from './friend-block-policy.js';
 
 export type EventNotificationKind =
   | 'received_pending'      // 受付（承認制ON、未承認段階）
@@ -96,6 +97,10 @@ export interface SendEventNotificationParams {
 export async function sendEventBookingNotification(
   params: SendEventNotificationParams,
 ): Promise<void> {
+  if (params.db) {
+    if (params.friendId) await assertFriendNotBlocked(params.db, params.friendId);
+    else await assertLineUserNotBlocked(params.db, params.toLineUserId, params.lineAccountId ?? null);
+  }
   const text = renderEventNotificationText(params.kind, params.ctx);
   const client = new LineClient(params.channelAccessToken);
   await client.pushMessage(

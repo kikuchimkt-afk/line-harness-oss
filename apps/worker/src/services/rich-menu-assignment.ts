@@ -1,5 +1,160 @@
 import { toJstString } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
+import { BlockedFriendError, isBlockTagName, isFriendBlocked } from './friend-block-policy.js';
+import { ensureBlockedMenuForAccount } from './blocked-menu-setup.js';
+
+const BLOCK_MENU_KEY = 'blocked_dedicated_rich_menu_id';
+// A durable desired *operation*, not a LINE rich-menu ID. Keeping the default
+// restoration in the same generation queue prevents stale blank calls from
+// winning after an unlink and makes transient unlink errors retryable.
+export const DEFAULT_RICH_MENU_ID = '__lineharness_account_default__';
+const previousMenuKey = (friendId: string) => `blocked_previous_rich_menu_id:${friendId}`;
+
+async function blockedMenuId(db: D1Database, accountId: string | null): Promise<string | null> {
+  if (!accountId) return null;
+  const row = await db.prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+    .bind(accountId, BLOCK_MENU_KEY).first<{ value: string }>();
+  return row?.value || null;
+}
+
+async function assertAllowedRichMenu(db: D1Database, friendId: string, richMenuId: string): Promise<void> {
+  const friend = await db.prepare(`SELECT line_account_id FROM friends WHERE id = ?`).bind(friendId).first<{ line_account_id: string | null }>();
+  const blank = await blockedMenuId(db, friend?.line_account_id ?? null);
+  const blocked = await isFriendBlocked(db, friendId);
+  if ((blocked && richMenuId !== blank) || (!blocked && richMenuId === blank)) throw new BlockedFriendError();
+}
+
+async function repairLateNormalMenu(db: D1Database, friendId: string, richMenuId: string, token: string, accountId?: string | null): Promise<boolean> {
+  const friend = await db.prepare(`SELECT line_account_id FROM friends WHERE id = ?`).bind(friendId).first<{ line_account_id: string | null }>();
+  const blank = await blockedMenuId(db, friend?.line_account_id ?? null);
+  if (!(await isFriendBlocked(db, friendId))) {
+    if (richMenuId !== blank) return false;
+    // A blocked-only link can finish after a successful unblock, including
+    // after its backup was consumed. Prefer the newest normal/default intent.
+    const desired = await db.prepare('SELECT desired_rich_menu_id FROM rich_menu_assignments WHERE friend_id = ?')
+      .bind(friendId).first<{ desired_rich_menu_id: string }>();
+    if (desired && desired.desired_rich_menu_id !== blank) {
+      await applyDesiredRichMenu(db, { friendId, richMenuId: desired.desired_rich_menu_id,
+        lineAccessToken: token, lineAccountId: friend?.line_account_id, source: 'manual' });
+    } else {
+      await restoreRichMenuAfterUnblock(db, friendId, token, accountId);
+      const latest = await db.prepare('SELECT desired_rich_menu_id FROM rich_menu_assignments WHERE friend_id = ?')
+        .bind(friendId).first<{ desired_rich_menu_id: string }>();
+      // Legacy/orphaned blank assignments have no backup to consume. Falling
+      // back to the account default is safer than leaving an unblocked blank.
+      if ((!latest || latest.desired_rich_menu_id === blank) && !(await isFriendBlocked(db, friendId))) {
+        await applyDesiredRichMenu(db, { friendId, richMenuId: DEFAULT_RICH_MENU_ID,
+          lineAccessToken: token, lineAccountId: friend?.line_account_id, source: 'manual' });
+      }
+    }
+    return true;
+  }
+  if (richMenuId === blank) return false;
+  // A pre-block LINE request may complete after the blank menu. Repair now,
+  // not only at the next Cron. Generation guards preserve the newest state.
+  await applyBlockedRichMenuForFriend(db, friendId, token, accountId);
+  return true;
+}
+
+/** Persist the old individual menu before the block-only blank menu replaces it. */
+export async function applyBlockedRichMenuForFriend(db: D1Database, friendId: string, token?: string, accountId?: string | null): Promise<void> {
+  const friend = await db.prepare(`SELECT line_user_id, line_account_id FROM friends WHERE id = ?`).bind(friendId).first<FriendTarget>();
+  if (!friend || !(await isFriendBlocked(db, friendId))) return;
+  if (accountId !== undefined && accountId !== friend.line_account_id) throw new BlockedFriendError();
+  const actualAccount = friend.line_account_id;
+  if (!actualAccount) throw new Error('Blocked-only rich menu account is unavailable');
+  let menu = await blockedMenuId(db, actualAccount);
+  if (!menu) {
+    // Ordinary accounts with an existing configuration do not make extra LINE
+    // calls. A newly-added account may be provisioned on the first block action;
+    // transient failures leave the saved tag intact for the bounded Cron repair.
+    try {
+      const setup = await ensureBlockedMenuForAccount(db, actualAccount);
+      if (setup.status === 'ready' && setup.richMenuId) menu = setup.richMenuId;
+    } catch {
+      // Credentials or raw LINE response bodies must never escape this boundary.
+    }
+    if (!menu) throw new Error('Blocked-only rich menu setup is pending');
+  }
+  if (!(await isFriendBlocked(db, friendId, actualAccount))) return;
+  if (!token) token = (await db.prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`).bind(actualAccount).first<{ channel_access_token: string }>())?.channel_access_token;
+  if (!token) throw new Error('LINE account token is unavailable for switch_rich_menu');
+  const key = previousMenuKey(friendId);
+  const saved = await db.prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`).bind(actualAccount, key).first();
+  if (!saved) {
+    const desired = await db.prepare(`SELECT desired_rich_menu_id FROM rich_menu_assignments WHERE friend_id = ?`).bind(friendId).first<{ desired_rich_menu_id: string }>();
+    let previous = desired?.desired_rich_menu_id === DEFAULT_RICH_MENU_ID ? null : desired?.desired_rich_menu_id ?? null;
+    if (!previous || previous === menu) {
+      try { previous = (await new LineClient(token).getRichMenuIdOfUser(friend.line_user_id)).richMenuId; }
+      catch (error) { if (lineStatus(error) !== 404) throw error; previous = null; }
+    }
+    if (previous === menu) previous = null;
+    await db.prepare(`INSERT INTO account_settings (id, line_account_id, key, value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(line_account_id,key) DO NOTHING`)
+      .bind(crypto.randomUUID(), actualAccount, key, JSON.stringify({ richMenuId: previous }), toJstString(new Date()), toJstString(new Date())).run();
+  }
+  if (!(await isFriendBlocked(db, friendId, actualAccount))) return;
+  await applyDesiredRichMenu(db, { friendId, richMenuId: menu, lineAccessToken: token, lineAccountId: actualAccount, source: 'manual' });
+}
+
+/** Tag removal restores only the menu, never previously cancelled jobs. */
+export async function restoreRichMenuAfterUnblock(db: D1Database, friendId: string, token?: string, accountId?: string | null): Promise<void> {
+  if (await isFriendBlocked(db, friendId)) throw new BlockedFriendError();
+  const friend = await db.prepare(`SELECT line_user_id, line_account_id FROM friends WHERE id = ?`).bind(friendId).first<FriendTarget>();
+  if (!friend?.line_account_id) return;
+  if (accountId !== undefined && accountId !== friend.line_account_id) throw new BlockedFriendError();
+  const key = previousMenuKey(friendId);
+  const saved = await db.prepare(`SELECT id, value FROM account_settings WHERE line_account_id = ? AND key = ?`).bind(friend.line_account_id, key).first<{ id: string; value: string }>();
+  if (!saved) return;
+  if (!token) token = (await db.prepare(`SELECT channel_access_token FROM line_accounts WHERE id = ?`).bind(friend.line_account_id).first<{ channel_access_token: string }>())?.channel_access_token;
+  if (!token) throw new Error('LINE account token is unavailable for switch_rich_menu');
+  const previous = JSON.parse(saved.value) as { richMenuId: string | null };
+  const desired = await db.prepare('SELECT desired_rich_menu_id, status, generation FROM rich_menu_assignments WHERE friend_id = ?')
+    .bind(friendId).first<{ desired_rich_menu_id: string; status: string; generation: number }>();
+  const blank = await blockedMenuId(db, friend.line_account_id);
+  if (desired && desired.desired_rich_menu_id !== blank) {
+    // A previous restoration or a newer manual/menu selection already owns the
+    // queue. Never reset its backoff or resurrect an older campaign menu.
+    if (desired.status === 'applied') {
+      await cleanupRestoredMenuBackup(db, friendId, friend.line_account_id, desired.desired_rich_menu_id, desired.generation);
+      return;
+    }
+    if (['pending', 'retry_wait', 'processing'].includes(desired.status)) return;
+  }
+  let target = desired && desired.desired_rich_menu_id !== blank ? desired.desired_rich_menu_id : previous.richMenuId || DEFAULT_RICH_MENU_ID;
+  if (target !== DEFAULT_RICH_MENU_ID && target === previous.richMenuId) {
+    const client = new LineClient(token);
+    if (typeof client.request === 'function') {
+      try { await client.request('GET', `/v2/bot/richmenu/${encodeURIComponent(target)}`); }
+      catch (error) {
+        // This endpoint identifies the MENU resource, unlike the user-link
+        // endpoint's ambiguous 404. Only confirmed deleted resources fall back.
+        if (lineStatus(error) !== 404) throw error;
+        target = DEFAULT_RICH_MENU_ID;
+      }
+    }
+  }
+  await applyDesiredRichMenu(db, { friendId, richMenuId: target,
+    lineAccountId: friend.line_account_id, lineAccessToken: token, source: 'manual' });
+}
+
+/** Consume a backup only after the latest successful operation and while the
+ * authoritative tag is still absent at the database mutation itself. */
+async function cleanupRestoredMenuBackup(db: D1Database, friendId: string, accountId: string | null,
+  richMenuId: string, generation: number): Promise<void> {
+  if (!accountId || richMenuId === await blockedMenuId(db, accountId)) return;
+  const saved = await db.prepare('SELECT id, value FROM account_settings WHERE line_account_id = ? AND key = ?')
+    .bind(accountId, previousMenuKey(friendId)).first<{ id: string; value: string }>();
+  if (!saved?.id) return;
+  const tags = await db.prepare('SELECT id, name FROM tags').all<{ id: string; name: string }>();
+  const blockTagIds = tags.results.filter(t => isBlockTagName(t.name)).map(t => t.id);
+  await db.prepare(`DELETE FROM account_settings WHERE id = ? AND line_account_id = ? AND key = ? AND value = ?
+      AND EXISTS (SELECT 1 FROM rich_menu_assignments r WHERE r.friend_id = ? AND r.line_account_id IS ?
+        AND r.generation = ? AND r.desired_rich_menu_id = ? AND r.status = 'applied')
+      AND NOT EXISTS (SELECT 1 FROM friend_tags ft WHERE ft.friend_id = ?
+        AND ft.tag_id IN (SELECT value FROM json_each(?)))`)
+    .bind(saved.id, accountId, previousMenuKey(friendId), saved.value, friendId, accountId,
+      generation, richMenuId, friendId, JSON.stringify(blockTagIds)).run();
+}
 
 export type RichMenuAssignmentSource = 'automation' | 'manual' | 'backfill';
 export type RichMenuAssignmentStatus =
@@ -9,7 +164,8 @@ export type RichMenuAssignmentStatus =
   | 'applied'
   | 'failed_permanent';
 
-type RichMenuClient = Pick<LineClient, 'linkRichMenuToUser' | 'getRichMenuIdOfUser'>;
+type RichMenuClient = Pick<LineClient, 'linkRichMenuToUser' | 'getRichMenuIdOfUser'> &
+  Partial<Pick<LineClient, 'unlinkRichMenuFromUser' | 'request'>>;
 
 interface FriendTarget {
   line_user_id: string;
@@ -64,6 +220,7 @@ function lineStatus(error: unknown): number | null {
 
 /** Network errors, rate limits and LINE 5xx are safe to retry. */
 export function isRetryableRichMenuError(error: unknown): boolean {
+  if (error instanceof BlockedFriendError) return false;
   const status = lineStatus(error);
   if (status === null) {
     const message = errorMessage(error);
@@ -89,6 +246,47 @@ function clientFor(
   factory?: (token: string) => RichMenuClient,
 ): RichMenuClient {
   return factory ? factory(token) : new LineClient(token);
+}
+
+async function applyMenuOperation(client: RichMenuClient, lineUserId: string, richMenuId: string): Promise<void> {
+  if (richMenuId === DEFAULT_RICH_MENU_ID) {
+    if (!client.unlinkRichMenuFromUser) throw new Error('LINE client cannot restore the account default');
+    await client.unlinkRichMenuFromUser(lineUserId);
+  } else {
+    await client.linkRichMenuToUser(lineUserId, richMenuId);
+  }
+}
+
+/** A menu may be deleted after the preflight, or during a queued retry. Replace
+ * only this exact restore generation; a newer operator choice or a reblock wins. */
+async function recoverDeletedRestoreMenu(db: D1Database, friendId: string, accountId: string | null,
+  richMenuId: string, generation: number, client: RichMenuClient, error: unknown,
+  now: Date): Promise<{ queued: boolean; error: unknown }> {
+  if (![400, 404].includes(lineStatus(error) ?? 0) || richMenuId === DEFAULT_RICH_MENU_ID || !accountId || !client.request) {
+    return { queued: false, error };
+  }
+  const saved = await db.prepare('SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?')
+    .bind(accountId, previousMenuKey(friendId)).first<{ value: string }>();
+  if (!saved || (JSON.parse(saved.value) as { richMenuId: string | null }).richMenuId !== richMenuId) return { queued: false, error };
+  try {
+    await client.request('GET', `/v2/bot/richmenu/${encodeURIComponent(richMenuId)}`);
+    return { queued: false, error }; // Resource exists: never confuse a user 404.
+  } catch (resourceError) {
+    if (lineStatus(resourceError) !== 404) return { queued: false, error: resourceError };
+  }
+  const tags = await db.prepare('SELECT id, name FROM tags').all<{ id: string; name: string }>();
+  const blockTagIds = tags.results.filter(t => isBlockTagName(t.name)).map(t => t.id);
+  const nowIso = toJstString(now);
+  await db.prepare(`UPDATE rich_menu_assignments
+      SET desired_rich_menu_id = ?, generation = generation + 1, status = 'retry_wait',
+        retry_count = 0, next_attempt_at = ?, verified_at = NULL,
+        last_error = '元の個別メニューが削除されたため既定メニューへ戻します', updated_at = ?
+    WHERE friend_id = ? AND line_account_id IS ? AND generation = ? AND desired_rich_menu_id = ?
+      AND NOT EXISTS (SELECT 1 FROM friend_tags ft WHERE ft.friend_id = ?
+        AND ft.tag_id IN (SELECT value FROM json_each(?)))`)
+    .bind(DEFAULT_RICH_MENU_ID, nowIso, nowIso, friendId, accountId, generation, richMenuId,
+      friendId, JSON.stringify(blockTagIds)).run();
+  return { queued: true, error };
 }
 
 async function updateCurrentGeneration(
@@ -134,6 +332,8 @@ export async function applyDesiredRichMenu(
     .bind(input.friendId)
     .first<FriendTarget>();
   if (!friend?.line_user_id) throw new Error('LINE user not found for switch_rich_menu');
+  if (input.lineAccountId !== undefined && input.lineAccountId !== friend.line_account_id) throw new BlockedFriendError();
+  await assertAllowedRichMenu(db, input.friendId, input.richMenuId);
 
   const now = input.now ?? new Date();
   const nowIso = toJstString(now);
@@ -175,10 +375,9 @@ export async function applyDesiredRichMenu(
     if (!input.lineAccessToken) {
       throw new Error('LINE account token is unavailable for switch_rich_menu');
     }
-    await clientFor(input.lineAccessToken, input.clientFactory).linkRichMenuToUser(
-      friend.line_user_id,
-      input.richMenuId,
-    );
+    await assertAllowedRichMenu(db, input.friendId, input.richMenuId);
+    await applyMenuOperation(clientFor(input.lineAccessToken, input.clientFactory), friend.line_user_id, input.richMenuId);
+    if (await repairLateNormalMenu(db, input.friendId, input.richMenuId, input.lineAccessToken, lineAccountId)) return;
     const changed = await updateCurrentGeneration(
       db,
       `UPDATE rich_menu_assignments
@@ -189,9 +388,15 @@ export async function applyDesiredRichMenu(
     );
     if (changed === 0) {
       await markStaleCompletionForRetry(db, input.friendId, generation, nowIso);
+    } else {
+      await cleanupRestoredMenuBackup(db, input.friendId, lineAccountId, input.richMenuId, generation);
+      await repairLateNormalMenu(db, input.friendId, input.richMenuId, input.lineAccessToken, lineAccountId);
     }
   } catch (error) {
-    const retryable = isRetryableRichMenuError(error);
+    const recovery = input.lineAccessToken ? await recoverDeletedRestoreMenu(db, input.friendId, lineAccountId,
+      input.richMenuId, generation, clientFor(input.lineAccessToken, input.clientFactory), error, now) : { queued: false, error };
+    if (recovery.queued) throw error;
+    const retryable = isRetryableRichMenuError(recovery.error);
     await updateCurrentGeneration(
       db,
       `UPDATE rich_menu_assignments
@@ -200,7 +405,7 @@ export async function applyDesiredRichMenu(
       [
         retryable ? 'retry_wait' : 'failed_permanent',
         retryable ? retryAt(now, 1) : null,
-        errorMessage(error).slice(0, 1000),
+        errorMessage(recovery.error).slice(0, 1000),
         nowIso,
         input.friendId,
         generation,
@@ -272,10 +477,9 @@ export async function processDueRichMenuAssignments(
       if (!row.channel_access_token) {
         throw new Error('LINE account token is unavailable for switch_rich_menu');
       }
-      await clientFor(row.channel_access_token, params.clientFactory).linkRichMenuToUser(
-        row.line_user_id,
-        row.desired_rich_menu_id,
-      );
+      await assertAllowedRichMenu(db, row.friend_id, row.desired_rich_menu_id);
+      await applyMenuOperation(clientFor(row.channel_access_token, params.clientFactory), row.line_user_id, row.desired_rich_menu_id);
+      if (await repairLateNormalMenu(db, row.friend_id, row.desired_rich_menu_id, row.channel_access_token, row.line_account_id)) { deferred += 1; continue; }
       const changed = await updateCurrentGeneration(
         db,
         `UPDATE rich_menu_assignments
@@ -287,10 +491,15 @@ export async function processDueRichMenuAssignments(
       if (changed === 0) {
         await markStaleCompletionForRetry(db, row.friend_id, row.generation, nowIso);
       } else {
+        await cleanupRestoredMenuBackup(db, row.friend_id, row.line_account_id, row.desired_rich_menu_id, row.generation);
+        if (await repairLateNormalMenu(db, row.friend_id, row.desired_rich_menu_id, row.channel_access_token, row.line_account_id)) { deferred += 1; continue; }
         applied += 1;
       }
     } catch (error) {
-      const retryable = isRetryableRichMenuError(error);
+      const recovery = row.channel_access_token ? await recoverDeletedRestoreMenu(db, row.friend_id, row.line_account_id,
+        row.desired_rich_menu_id, row.generation, clientFor(row.channel_access_token, params.clientFactory), error, params.now) : { queued: false, error };
+      if (recovery.queued) { deferred += 1; continue; }
+      const retryable = isRetryableRichMenuError(recovery.error);
       const exhausted = nextAttempt >= row.max_retries;
       const terminal = !retryable || exhausted;
       await updateCurrentGeneration(
@@ -301,7 +510,7 @@ export async function processDueRichMenuAssignments(
         [
           terminal ? 'failed_permanent' : 'retry_wait',
           terminal ? null : retryAt(params.now, nextAttempt),
-          errorMessage(error).slice(0, 1000),
+          errorMessage(recovery.error).slice(0, 1000),
           nowIso,
           row.friend_id,
           row.generation,
@@ -351,13 +560,19 @@ export async function reconcileRichMenuAssignments(
   let unavailable = 0;
   for (const row of rows.results ?? []) {
     try {
+      await assertAllowedRichMenu(db, row.friend_id, row.desired_rich_menu_id);
       if (!row.channel_access_token) {
         throw new Error('LINE account token is unavailable for switch_rich_menu');
       }
-      const current = await clientFor(
-        row.channel_access_token,
-        params.clientFactory,
-      ).getRichMenuIdOfUser(row.line_user_id);
+      let current: { richMenuId: string };
+      try {
+        current = await clientFor(row.channel_access_token, params.clientFactory).getRichMenuIdOfUser(row.line_user_id);
+      } catch (error) {
+        // For a desired unlink, a missing *individual* assignment is success.
+        // For normal menu IDs the existing 404 repair path is preserved.
+        if (row.desired_rich_menu_id !== DEFAULT_RICH_MENU_ID || lineStatus(error) !== 404) throw error;
+        current = { richMenuId: DEFAULT_RICH_MENU_ID };
+      }
       if (current.richMenuId === row.desired_rich_menu_id) {
         await updateCurrentGeneration(
           db,
@@ -380,6 +595,13 @@ export async function reconcileRichMenuAssignments(
         requeued += 1;
       }
     } catch (error) {
+      if (error instanceof BlockedFriendError) {
+        await updateCurrentGeneration(db,
+          `UPDATE rich_menu_assignments SET status = 'failed_permanent', next_attempt_at = NULL, last_error = 'FRIEND_BLOCKED', updated_at = ? WHERE friend_id = ? AND generation = ?`,
+          [nowIso, row.friend_id, row.generation]);
+        unavailable += 1;
+        continue;
+      }
       const status = lineStatus(error);
       if (status === 404) {
         await updateCurrentGeneration(
@@ -452,6 +674,7 @@ export async function clearDesiredRichMenuAssignment(
   db: D1Database,
   friendId: string,
 ): Promise<void> {
+  if (await isFriendBlocked(db, friendId)) throw new BlockedFriendError();
   await db.prepare('DELETE FROM rich_menu_assignments WHERE friend_id = ?').bind(friendId).run();
 }
 

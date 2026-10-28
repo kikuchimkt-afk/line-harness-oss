@@ -1,4 +1,5 @@
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
+import { isFriendBlocked } from './friend-block-policy.js';
 
 /**
  * リマインダ配信処理 — cronトリガーで定期実行
@@ -40,6 +41,10 @@ export async function processReminderDeliveries(
       if (!friend || !friend.is_following) {
         continue;
       }
+      if (await isFriendBlocked(db, friend.id)) {
+        await db.prepare(`UPDATE friend_reminders SET status = 'cancelled' WHERE id = ? AND status = 'active'`).bind(fr.id).run();
+        continue;
+      }
 
       // Resolve correct lineClient for this friend's account
       let deliveryClient = lineClient;
@@ -58,6 +63,10 @@ export async function processReminderDeliveries(
         const reservation = budget?.reserve();
         if (budget && !reservation) break deliveryLoop;
         try {
+          if (await isFriendBlocked(db, friend.id)) {
+            await db.prepare(`UPDATE friend_reminders SET status = 'cancelled' WHERE id = ? AND status = 'active'`).bind(fr.id).run();
+            break;
+          }
           // All eligibility checks are complete; this step is now claimed by
           // this invocation for an immediate outbound attempt.
           reservation?.commit();

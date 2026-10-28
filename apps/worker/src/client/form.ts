@@ -89,10 +89,14 @@ function escapeHtml(str: string): string {
 }
 
 function apiCall(path: string, options?: RequestInit): Promise<Response> {
+  // Only send the ID token to same-origin customer form-write endpoints.
+  const customerWrite = /^\/api\/forms\/[^/]+\/(opened|partial|submit)$/.test(path);
+  const token = customerWrite ? liff.getIDToken() : null;
   return fetch(path, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
@@ -1170,6 +1174,14 @@ export async function initForm(formId: string | null): Promise<void> {
   renderLoading();
 
   try {
+    if (!liff.isLoggedIn()) {
+      liff.login({ redirectUri: window.location.href });
+      return;
+    }
+    if (!liff.getIDToken()) {
+      renderFormError('LINEのログイン情報を確認できませんでした。公式LINEのフォームから開き直してください。');
+      return;
+    }
     // Fetch profile and form definition in parallel
     const [profile, res] = await Promise.all([
       liff.getProfile(),
@@ -1199,6 +1211,10 @@ export async function initForm(formId: string | null): Promise<void> {
             existingUuid: state.userId,
           }),
         });
+        if (linkRes.status === 403) {
+          renderFormError('現在、この機能はご利用いただけません。');
+          return;
+        }
         if (linkRes.ok) {
           const data = await linkRes.json() as {
             success: boolean;

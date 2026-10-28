@@ -29,6 +29,7 @@ import {
 } from '../services/event-booking-types.js';
 import { getSlotsWithRemaining } from '../services/event-availability.js';
 import { verifyCallerLineUserId } from '../services/liff-auth.js';
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked, isLineUserBlocked } from '../services/friend-block-policy.js';
 import { computeIdentityKey } from '../lib/identity-key.js';
 import {
   reserveEventIdempotency,
@@ -1147,6 +1148,9 @@ events.post('/api/liff/events/me/:bookingId/cancel', async (c) => {
     .bind(callerLineUserId, account_id)
     .first<{ id: string }>();
   if (!friend) return bad(c, 'friend_not_found', 404);
+  if (await isFriendBlocked(c.env.DB, friend.id, account_id)) {
+    return c.json({ error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+  }
 
   const row = await c.env.DB
     .prepare(
@@ -1514,6 +1518,9 @@ events.post('/api/liff/events/:id/bookings/summary', async (c) => {
   if (!account_id) return bad(c, 'liff_account_resolution_failed', 400);
   const callerLineUserId = await verifyCallerLineUserId(c.req.header('Authorization'), c.env);
   if (!callerLineUserId) return bad(c, 'unauthorized', 401);
+  if (await isLineUserBlocked(c.env.DB, callerLineUserId, account_id)) {
+    return c.json({ error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+  }
 
   const body = (await c.req.json().catch(() => ({}))) as { booking_ids?: unknown };
   const bookingIds = normalizeBookingIdList(body.booking_ids);
@@ -1633,6 +1640,9 @@ events.post('/api/liff/events/:id/bookings', async (c) => {
       display_name: string | null;
     }>();
   if (!friend) return bad(c, 'friend_not_found', 404);
+  if (await isFriendBlocked(c.env.DB, friend.id, account_id)) {
+    return c.json({ error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+  }
   const bookingFriend = friend;
   const bookingLineUserId = callerLineUserId;
 

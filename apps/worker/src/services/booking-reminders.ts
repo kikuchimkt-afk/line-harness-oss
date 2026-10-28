@@ -5,6 +5,8 @@
 import type { BookingNotificationSender, NotificationKind } from './booking-notifier.js';
 import { REMINDER_MAX_RETRY } from './booking-types.js';
 import type { IndividualNotificationBudget } from './individual-notification-budget.js';
+import { BlockedFriendError } from './friend-block-policy.js';
+import { BLOCKED_OUTBOUND_REASON, isBlockedNotificationTarget } from './blocked-outbound.js';
 
 interface DueRow {
   id: string;
@@ -37,7 +39,7 @@ function startsAtJst(utcIso: string): string {
 export async function processDueReminders(
   db: D1Database,
   params: ProcessRemindersParams,
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; skipped?: number }> {
   // status は 'pending' に加え 'failed'（一時エラーで失敗、retry 残あり）も拾う。
   // 'failed_permanent' / 'sent' / 'cancelled' は再送対象外。
   const due = await db
@@ -67,12 +69,18 @@ export async function processDueReminders(
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
   for (const row of due.results) {
     const reservation = params.budget?.reserve();
     if (params.budget && !reservation) break;
     const kind: NotificationKind = row.kind;
     let claimedRetry: number | null = null;
     try {
+      if (await isBlockedNotificationTarget(db, row)) {
+        await db.prepare(`UPDATE booking_reminders SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       const claim = await db
         .prepare(
           `UPDATE booking_reminders
@@ -107,6 +115,11 @@ export async function processDueReminders(
         .run();
       sent++;
     } catch (e) {
+      if (e instanceof BlockedFriendError) {
+        await db.prepare(`UPDATE booking_reminders SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       if (claimedRetry === null) throw e;
       const newStatus = claimedRetry >= REMINDER_MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
@@ -120,5 +133,5 @@ export async function processDueReminders(
       reservation?.release();
     }
   }
-  return { sent, failed };
+  return { sent, failed, ...(skipped ? { skipped } : {}) };
 }

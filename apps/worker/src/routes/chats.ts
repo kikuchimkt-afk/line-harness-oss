@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { isFriendBlocked, BLOCKED_FRIEND_MESSAGE } from '../services/friend-block-policy.js';
 import type { Message } from '@line-crm/line-sdk';
 import { extractFlexAltText } from '../utils/flex-alt-text.js';
 import {
@@ -646,6 +647,9 @@ chats.post('/api/chats/:id/loading', async (c) => {
     );
     if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
 
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     await startLoadingAnimation(
       accessToken,
       friend.line_user_id,
@@ -708,6 +712,9 @@ chats.post('/api/chats/:id/send', async (c) => {
     );
     if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
 
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     // LINE APIでメッセージ送信
     const { LineClient } = await import('@line-crm/line-sdk');
     const lineClient = new LineClient(accessToken);
@@ -747,6 +754,9 @@ chats.post('/api/chats/:id/send', async (c) => {
       });
     }
 
+    if (await isFriendBlocked(c.env.DB, friend.id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     await lineClient.pushMessage(
       friend.line_user_id,
       [lineMessage],

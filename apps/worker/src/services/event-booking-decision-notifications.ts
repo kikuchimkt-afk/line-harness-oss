@@ -3,6 +3,8 @@ import type {
   EventNotificationContext,
 } from './event-booking-notifier.js';
 import type { IndividualNotificationBudget } from './individual-notification-budget.js';
+import { assertFriendNotBlocked, BlockedFriendError } from './friend-block-policy.js';
+import { BLOCKED_OUTBOUND_REASON, isBlockedNotificationTarget } from './blocked-outbound.js';
 
 export type EventBookingDecisionNotificationKind = 'confirmed' | 'rejected';
 
@@ -20,6 +22,7 @@ export async function enqueueEventBookingDecisionNotification(
   db: D1Database,
   input: QueueEventBookingDecisionNotificationInput,
 ): Promise<void> {
+  await assertFriendNotBlocked(db, input.friendId);
   await db
     .prepare(
       `INSERT INTO event_booking_decision_notifications
@@ -63,7 +66,7 @@ export interface ProcessDueDecisionNotificationsParams {
 export async function processDueEventBookingDecisionNotifications(
   db: D1Database,
   params: ProcessDueDecisionNotificationsParams,
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; skipped?: number }> {
   const due = await db
     .prepare(
       `SELECT n.id, n.line_account_id, n.friend_id, n.kind, n.context_json,
@@ -82,12 +85,18 @@ export async function processDueEventBookingDecisionNotifications(
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const row of due.results ?? []) {
     const reservation = params.budget?.reserve();
     if (params.budget && !reservation) break;
     let claimedRetry: number | null = null;
     try {
+      if (await isBlockedNotificationTarget(db, row)) {
+        await db.prepare(`UPDATE event_booking_decision_notifications SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       const claim = await db
         .prepare(
           `UPDATE event_booking_decision_notifications
@@ -121,6 +130,11 @@ export async function processDueEventBookingDecisionNotifications(
         .run();
       sent += 1;
     } catch (error) {
+      if (error instanceof BlockedFriendError) {
+        await db.prepare(`UPDATE event_booking_decision_notifications SET status = 'cancelled', last_error = ? WHERE id = ? AND status IN ('pending','failed')`).bind(BLOCKED_OUTBOUND_REASON, row.id).run();
+        skipped += 1;
+        continue;
+      }
       if (claimedRetry === null) throw error;
       const nextStatus = claimedRetry >= MAX_RETRY ? 'failed_permanent' : 'failed';
       await db
@@ -141,7 +155,7 @@ export async function processDueEventBookingDecisionNotifications(
     }
   }
 
-  return { sent, failed };
+  return { sent, failed, ...(skipped ? { skipped } : {}) };
 }
 
 export const _internals = { MAX_RETRY };

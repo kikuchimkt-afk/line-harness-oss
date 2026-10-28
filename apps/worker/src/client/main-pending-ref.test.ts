@@ -99,4 +99,18 @@ describe('campaign LIFF pre-follow UI', () => {
     expect(app.innerHTML).not.toContain('登録完了');
     expect(app.innerHTML).not.toContain('友だち追加して始める');
   });
+
+  it.each([true, false])('stops on server-authoritative blocking rather than showing completion/retry/add-friend (ref=%s)', async (withRef) => {
+    if (!withRef) {
+      window.location.search = '?liffId=synthetic-liff';
+      window.location.href = 'https://worker.example.com/?liffId=synthetic-liff';
+    }
+    await import('./main.js');
+    resolveLink(new Response(JSON.stringify({ success: false, code: 'FRIEND_BLOCKED' }), { status: 403 }));
+    await flushFlow();
+    expect(app.innerHTML).toContain('現在、この機能はご利用いただけません。');
+    expect(app.innerHTML).not.toContain('登録完了');
+    expect(app.innerHTML).not.toContain('もう一度確認する');
+    expect(app.innerHTML).not.toContain('友だち追加して始める');
+  });
 });

@@ -30,6 +30,7 @@ import {
   getAllowedLineAccountIds,
 } from '../middleware/account-access.js';
 
+import { BLOCKED_FRIEND_MESSAGE, isFriendBlocked } from '../services/friend-block-policy.js';
 const scenarios = new Hono<Env>();
 
 function makePlaceholders(count: number): string {
@@ -817,7 +818,12 @@ scenarios.post('/api/scenarios/:id/enroll/:friendId', async (c) => {
     if (!friend) {
       return c.json({ success: false, error: 'Friend not found' }, 404);
     }
+    const friendDenied = await denyIfLineAccountOutsideScope(c, friend.line_account_id);
+    if (friendDenied) return friendDenied;
 
+    if (await isFriendBlocked(db, friendId, friend.line_account_id)) {
+      return c.json({ success: false, error: BLOCKED_FRIEND_MESSAGE, code: 'FRIEND_BLOCKED' }, 403);
+    }
     const enrollment = await enrollFriendInScenario(db, friendId, scenarioId);
     if (!enrollment) {
       return c.json({ success: false, error: 'Already enrolled in this scenario' }, 409);

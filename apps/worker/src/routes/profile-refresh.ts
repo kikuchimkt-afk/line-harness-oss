@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { LineClient } from '@line-crm/line-sdk';
 import type { Env } from '../index.js';
+import { isBlockTagName } from '../services/friend-block-policy.js';
 
 const profileRefresh = new Hono<Env>();
 
@@ -391,6 +392,9 @@ profileRefresh.post('/api/admin/broadcast-coverage', async (c) => {
  */
 profileRefresh.post('/api/admin/tag-remove-content-dups', async (c) => {
   const body = await c.req.json<{ tagName: string; contentSubstring: string }>();
+  if (isBlockTagName(body.tagName)) {
+    return c.json({ success: false, code: 'BLOCK_TAG_PROTECTED', error: '「ブロック」タグは一括整理の対象にできません。解除は友だちのプロフィールから行ってください。' }, 403);
+  }
   const db = c.env.DB;
 
   const idCol = `COALESCE(

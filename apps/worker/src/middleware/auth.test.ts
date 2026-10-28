@@ -52,6 +52,9 @@ function app() {
   a.route('/', adminAuth);
   a.get('/api/protected', (c) => c.json({ success: true, data: c.get('staff') }));
   a.post('/api/protected', (c) => c.json({ success: true, data: c.get('staff') }));
+  a.get('/api/forms/form-1', (c) => c.json({ success: true }));
+  a.put('/api/forms/form-1', (c) => c.json({ success: true, data: c.get('staff') }));
+  a.delete('/api/forms/form-1', (c) => c.json({ success: true, data: c.get('staff') }));
   return a;
 }
 
@@ -155,6 +158,20 @@ describe('topology guard', () => {
 });
 
 describe('protected API access', () => {
+  test('public form definitions remain readable without credentials', async () => {
+    expect((await app().request('/api/forms/form-1', {}, crossSiteEnv())).status).toBe(200);
+  });
+
+  test.each(['PUT', 'DELETE'])('form admin %s does not bypass authentication', async (method) => {
+    expect((await app().request('/api/forms/form-1', { method }, crossSiteEnv())).status).toBe(401);
+    expect((await app().request('/api/forms/form-1', {
+      method, headers: { Authorization: 'Bearer env-key' },
+    }, crossSiteEnv())).status).toBe(200);
+    expect((await app().request('/api/forms/form-1', {
+      method, headers: { Cookie: 'lh_admin_session=staff-key; lh_csrf=token-abc' },
+    }, crossSiteEnv())).status).toBe(403);
+  });
+
   test('accepts the admin session cookie (GET, no CSRF needed)', async () => {
     const res = await app().request('/api/protected', {
       headers: { Cookie: 'lh_admin_session=staff-key' },

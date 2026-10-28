@@ -1,5 +1,6 @@
 import { jstNow } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
+import { assertFriendNotBlocked, assertLineUserNotBlocked } from './friend-block-policy.js';
 
 export type NotificationKind =
   | 'requested'
@@ -48,6 +49,10 @@ export interface SendNotificationParams {
 }
 
 export async function sendBookingNotification(params: SendNotificationParams): Promise<void> {
+  if (params.db) {
+    if (params.friendId) await assertFriendNotBlocked(params.db, params.friendId);
+    else await assertLineUserNotBlocked(params.db, params.toLineUserId, params.lineAccountId ?? null);
+  }
   const text = renderNotificationText(params.kind, params.ctx);
   const client = new LineClient(params.channelAccessToken);
   await client.pushMessage(params.toLineUserId, [{ type: 'text', text }]);

@@ -21,6 +21,15 @@ vi.mock('../services/friend-tag-attach.js', () => ({ attachTagAndFireSideEffects
 
 const { trackedLinks } = await import('./tracked-links.js');
 
+function makePolicyDb(blocked: () => boolean = () => false): D1Database {
+  return { prepare() {
+    const statement = { bind() { return statement; }, async all() {
+      return { results: blocked() ? [{ name: 'ブロック' }] : [] };
+    } };
+    return statement;
+  } } as unknown as D1Database;
+}
+
 describe('GET /t/:linkId tag attribution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -29,7 +38,7 @@ describe('GET /t/:linkId tag attribution', () => {
   });
 
   it('uses the idempotent tag helper for an identified friend', async () => {
-    const db = {} as D1Database;
+    const db = makePolicyDb();
     dbMocks.getTrackedLinkById.mockResolvedValue({
       id: 'link-1',
       name: 'LP',
@@ -61,5 +70,31 @@ describe('GET /t/:linkId tag attribution', () => {
     expect(response.headers.get('location')).toBe('https://example.com/lp');
     expect(dbMocks.recordLinkClick).toHaveBeenCalledWith(db, 'link-1', 'friend-1');
     expect(attachTagAndFireSideEffects).toHaveBeenCalledWith(db, 'friend-1', 'tag-1');
+  });
+
+  it('keeps anonymous/public redirect but skips all identified blocked-friend actions', async () => {
+    const waits: Promise<unknown>[] = [];
+    dbMocks.getTrackedLinkById.mockResolvedValue({ id: 'link-1', original_url: 'https://example.com/lp',
+      is_active: 1, tag_id: 'tag-1', scenario_id: 'scenario-1' });
+    const response = await trackedLinks.request('https://worker.example.com/t/link-1?f=blocked-friend', undefined,
+      { DB: makePolicyDb(() => true) }, { waitUntil: (p: Promise<unknown>) => waits.push(p), passThroughOnException() {} } as ExecutionContext);
+    await Promise.all(waits);
+    expect(response.status).toBe(302);
+    expect(dbMocks.recordLinkClick).not.toHaveBeenCalled();
+    expect(attachTagAndFireSideEffects).not.toHaveBeenCalled();
+    expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
+  });
+
+  it('does not enroll concurrently after the click action attaches the control tag', async () => {
+    let blocked = false;
+    const waits: Promise<unknown>[] = [];
+    dbMocks.getTrackedLinkById.mockResolvedValue({ id: 'link-1', original_url: 'https://example.com/lp',
+      is_active: 1, tag_id: 'block-tag', scenario_id: 'scenario-1' });
+    attachTagAndFireSideEffects.mockImplementation(async () => { blocked = true; return { added: true }; });
+    await trackedLinks.request('https://worker.example.com/t/link-1?f=friend-1', undefined,
+      { DB: makePolicyDb(() => blocked) }, { waitUntil: (p: Promise<unknown>) => waits.push(p), passThroughOnException() {} } as ExecutionContext);
+    await Promise.all(waits);
+    expect(attachTagAndFireSideEffects).toHaveBeenCalledOnce();
+    expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
   });
 });

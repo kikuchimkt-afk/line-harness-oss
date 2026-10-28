@@ -15,8 +15,16 @@ const dbMocks = {
   deleteLineAccount: vi.fn(),
   getStaffAccountIds: vi.fn(),
   staffCanAccessLineAccount: vi.fn(),
+  getTrafficPoolBySlug: vi.fn(),
+  createTrafficPool: vi.fn(),
+  addPoolAccount: vi.fn(),
 };
 vi.mock('@line-crm/db', () => dbMocks);
+
+const blockSetupMocks = { ensure: vi.fn() };
+vi.mock('../services/blocked-menu-setup.js', () => ({
+  ensureBlockedMenuForAccount: blockSetupMocks.ensure,
+}));
 
 const lineClientMocks = {
   getFollowersInsight: vi.fn(),
@@ -83,6 +91,8 @@ beforeEach(() => {
   lineClientMocks.getFollowersInsight.mockReset();
   dbMocks.getStaffAccountIds.mockResolvedValue([]);
   dbMocks.staffCanAccessLineAccount.mockResolvedValue(true);
+  dbMocks.getTrafficPoolBySlug.mockResolvedValue({ id: 'main-pool' });
+  blockSetupMocks.ensure.mockReset().mockResolvedValue({ status: 'ready' });
 });
 
 describe('account access scoping', () => {

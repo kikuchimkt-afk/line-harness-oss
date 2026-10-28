@@ -17,6 +17,7 @@ function fakeDb(opts: {
   friend?: { line_user_id: string; line_account_id?: string | null };
   account?: { channel_access_token: string };
   capturedInserts: CapturedInsert[];
+  blocked?: boolean | (() => boolean);
 }): D1Database {
   return {
     prepare(sql: string) {
@@ -28,6 +29,9 @@ function fakeDb(opts: {
           return this;
         },
         async all<T>(): Promise<{ results: T[] }> {
+          if (sql.includes('JOIN friend_tags') && (typeof opts.blocked === 'function' ? opts.blocked() : opts.blocked)) {
+            return { results: [{ name: 'ブロック' }] as T[] };
+          }
           return { results: [] };
         },
         async first<T>(): Promise<T | null> {
@@ -110,6 +114,30 @@ describe('fireEvent — send_message action logging', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('suppresses every event side effect for an authoritative block tag', async () => {
+    const exports = await import('@line-crm/db');
+    const blockedDb = fakeDb({ capturedInserts: captured, blocked: true });
+    await fireEvent(blockedDb, 'message_received', { friendId: 'blocked-fixture',
+      eventData: { text: 'コスト比較' }, conversionEventName: 'synthetic-conversion' }, 'synthetic-token', 'acc-1');
+    expect(exports.applyScoring).not.toHaveBeenCalled();
+    expect(exports.getActiveOutgoingWebhooksByEvent).not.toHaveBeenCalled();
+    expect(exports.getActiveAutomationsByEvent).not.toHaveBeenCalled();
+    expect(lineSdkMocks.replyMessage).not.toHaveBeenCalled();
+    expect(lineSdkMocks.pushMessage).not.toHaveBeenCalled();
+    expect(captured).toEqual([]);
+  });
+
+  it('rechecks the tag immediately before sending when blocking arrives during action preparation', async () => {
+    let policyReads = 0;
+    const blockedDb = fakeDb({ capturedInserts: captured, friend: { line_user_id: 'U_synthetic' },
+      blocked: () => ++policyReads >= 3 });
+    await fireEvent(blockedDb, 'message_received', { friendId: 'synthetic-friend',
+      eventData: { text: 'コスト比較' }, replyToken: 'synthetic-reply' }, 'synthetic-token', 'acc-1');
+    expect(lineSdkMocks.replyMessage).not.toHaveBeenCalled();
+    expect(lineSdkMocks.pushMessage).not.toHaveBeenCalled();
+    expect(captured).toEqual([]);
   });
 
   it('logs flex outgoing message to messages_log when send_message fires via reply', async () => {

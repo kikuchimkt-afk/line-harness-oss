@@ -26,6 +26,9 @@ function makeDb(changes: number): D1Database {
         async first() {
           return null;
         },
+        async all() {
+          return { results: [] };
+        },
       };
       return statement;
     },

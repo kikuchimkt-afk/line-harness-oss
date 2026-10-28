@@ -25,6 +25,27 @@ vi.mock('../services/scenario-stats.js', () => ({
 
 const { scenarios: scenariosModule } = await import('./scenarios.js');
 
+describe('manual scenario enrollment respects application blocking', () => {
+  test.each([true, false])('authoritative blocked=%s controls enrollment, not caller flags', async (blocked) => {
+    vi.clearAllMocks();
+    dbMocks.getScenarioById.mockResolvedValue({ id: 'synthetic-scenario', line_account_id: 'acc-a' });
+    dbMocks.getFriendById.mockResolvedValue({ id: 'synthetic-friend', line_account_id: 'acc-a' });
+    dbMocks.enrollFriendInScenario.mockResolvedValue({ id: 'synthetic-run', friend_id: 'synthetic-friend',
+      scenario_id: 'synthetic-scenario', current_step_order: -1, status: 'active' });
+    const db = { prepare() {
+      const statement = { bind() { return statement; }, async first() { return { line_account_id: 'acc-a' }; },
+        async all() { return { results: blocked ? [{ name: 'ブロック' }] : [] }; } };
+      return statement;
+    } } as unknown as D1Database;
+    const response = await setupApp(db).request('/api/scenarios/synthetic-scenario/enroll/synthetic-friend', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked: false }),
+    });
+    expect(response.status).toBe(blocked ? 403 : 201);
+    if (blocked) expect(dbMocks.enrollFriendInScenario).not.toHaveBeenCalled();
+    else expect(dbMocks.enrollFriendInScenario).toHaveBeenCalledOnce();
+  });
+});
+
 interface ScenarioRow {
   id: string;
   name: string;

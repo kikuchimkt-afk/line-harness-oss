@@ -110,11 +110,11 @@ async function linkCurrentFriend(
   });
 
   const data = await response.json().catch(() => null) as {
-    success?: boolean; data?: { userId?: string; entryRefRequired?: boolean };
+    success?: boolean; code?: string; data?: { userId?: string; entryRefRequired?: boolean };
   } | null;
   const ok = response.ok && data?.success === true;
   if (ok && data?.data?.userId) saveUuid(data.data.userId);
-  return { ok, status: response.status, entryRefRequired: data?.data?.entryRefRequired };
+  return { ok, status: response.status, entryRefRequired: data?.data?.entryRefRequired, errorCode: data?.code };
 }
 
 function escapeHtml(str: string): string {
@@ -163,6 +163,10 @@ function showFriendAdd(profile: { displayName: string; pictureUrl?: string }) {
       const linkResult = await retryLiffLinkAfterFriendAdd(
         () => linkCurrentFriend(profile),
       );
+      if (linkResult?.errorCode === 'FRIEND_BLOCKED') {
+        showError('現在、この機能はご利用いただけません。');
+        return;
+      }
       if (requiresLinkRetry(linkResult)) {
         showEntryRefRetry();
         return;
@@ -319,10 +323,14 @@ async function linkAndAddFlow() {
 
     // 3. Redirect flow (for wrapped URLs)
     if (redirectUrl) {
-      await Promise.race([
+      const redirectLinkResult = await Promise.race([
         linkPromise,
         new Promise((r) => setTimeout(r, 500)),
       ]);
+      if ((redirectLinkResult as LiffLinkAttemptResult | undefined)?.errorCode === 'FRIEND_BLOCKED') {
+        showError('現在、この機能はご利用いただけません。');
+        return;
+      }
       // Append LINE userId to tracking links so clicks are attributed
       if (redirectUrl.includes('/t/')) {
         const sep = redirectUrl.includes('?') ? '&' : '?';
@@ -335,6 +343,10 @@ async function linkAndAddFlow() {
 
     // 4. Wait for UUID linking to complete
     const linkResult = await linkPromise;
+    if (linkResult?.errorCode === 'FRIEND_BLOCKED') {
+      showError('現在、この機能はご利用いただけません。');
+      return;
+    }
 
     // 5. Friendship check — the key decision point
     if (!friendship.friendFlag) {
