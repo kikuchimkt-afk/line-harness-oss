@@ -28,8 +28,13 @@ if (!['check', 'worker', 'admin', 'all'].includes(mode)) {
   process.exit(2);
 }
 
+const WIN = process.platform === 'win32';
+// npx is a .cmd on Windows, so commands go through the shell there; quote
+// arguments so a commit message with spaces stays one argument.
+const quote = (arg) => (WIN && /[\s"&|<>^()]/.test(arg) ?`"${String(arg).replace(/"/g, '\\"')}"` : arg);
+// stdio: 'inherit' returns null, so fall back to ''.
 const sh = (cmd, args, opts = {}) =>
-  execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 64 * 1024 * 1024, ...opts }).trimEnd();
+  execFileSync(cmd, args.map(quote), { cwd: ROOT, encoding: 'utf8', shell: WIN, maxBuffer: 64 * 1024 * 1024, ...opts })?.trimEnd() ?? '';
 const git = (...args) => sh('git', args);
 const wrangler = (args, cwd = WORKER_DIR) => sh('npx', ['wrangler', ...args], { cwd });
 const fail = (message) => { console.error(`\n停止しました: ${message}\n`); process.exit(1); };
