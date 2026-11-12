@@ -1,10 +1,4 @@
-"""あいことば 英検第3回の案内を、ボタン付きの Flex カードにする SQL を作る。
-
-使い方: python -I scripts/build-eiken-2026-round3-flex.py
-出力:   scripts/update-eiken-2026-round3-aikotoba-flex.sql
-前提:   setup-eiken-2026-round3-aikotoba.sql と update-eiken-2026-round3-aikotoba-keyword.sql 適用済み
-カードの型は「つながるベストワン」の案内カード（クリーム色の本文＋緑のボタン）にそろえる。
-"""
+"""あいことば 英検第3回の案内を、ボタン付きの Flex カードにする SQL を作る。\n\n使い方: python -I scripts/build-eiken-2026-round3-flex.py\n出力:   scripts/update-eiken-2026-round3-aikotoba-flex.sql\n前提:   setup-eiken-2026-round3-aikotoba.sql と update-eiken-2026-round3-aikotoba-keyword.sql 適用済み\nカードの型は「つながるベストワン」の案内カード（クリーム色の本文＋緑のボタン）にそろえる。\n"""
 import json
 from pathlib import Path
 
@@ -59,16 +53,21 @@ def row(*buttons):
     return {"type": "box", "layout": "horizontal", "spacing": "sm", "margin": "sm", "contents": list(buttons)}
 
 
-def bubble(title, paragraphs, footer):
+def bubble(title, paragraphs, footer, note=None):
     return {
         "type": "bubble",
         "size": "mega",
         "body": {
             "type": "box",
             "layout": "vertical",
-            "spacing": "md",
+            "spacing": "sm",
             "backgroundColor": BODY_BG,
-            "contents": [text("あいことば｜英検®のご案内", size="xs", color=LABEL), text(title, size="lg", bold=True, color=PLUM), *[text(p) for p in paragraphs]],
+            "contents": [
+                text("あいことば｜英検®のご案内", size="xs", color=LABEL),
+                text(title, size="lg", bold=True, color=PLUM),
+                *[text(p) for p in paragraphs],
+                *([text(note, size="xxs", color="#8A7F88")] if note else []),
+            ],
         },
         "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "backgroundColor": "#FFFFFF", "contents": footer},
     }
@@ -81,33 +80,30 @@ def level_button(level):
 MENU = bubble(
     "第3回 英検®のお申し込み",
     [
-        "一次試験：2027年1月23日（土）\n会場：ECCジュニア・ベストワン北島中央校\n申込締切：12月4日（金）",
-        "受験する級を選んでください。級ごとの試験時間・検定料と、お申し込みページをご案内します。ごきょうだいで受験される場合は、それぞれの級を選んでください。",
+        "一次 1月23日（土）・北島中央校\n申込締切 12月4日（金）",
+        "受験する級を選んでください。",
     ],
     [
         row(level_button("5級"), level_button("4級"), level_button("3級")),
         row(level_button("準2級"), level_button("2級")),
-        button("日程・検定料を見る", message="英検日程", primary=False),
-        button("冬期講習と英検アプリ", message="英検アプリ", primary=False),
+        row(button("日程・検定料", message="英検日程", primary=False), button("英検アプリ", message="英検アプリ", primary=False)),
     ],
 )
 
 
 def level_card(level, event_id, time, fee, needs_id):
     lines = [
-        f"一次試験：2027年1月23日（土）{time}\n検定料：{fee}（税込）＋事務手数料100円\n会場：ECCジュニア・ベストワン北島中央校",
-        "下のボタンから、受験者のお名前・電話番号・学校・学年などを入力してお申し込みください（12月4日（金）まで）。",
-        "各級の定員は10名程度です。教室で確認してから確定のご連絡をします。",
+        f"一次 1月23日（土）{time.split('（')[0]}" + ("\n二次 3月7日（日）" if needs_id else "")
+        + f"\n検定料 {fee}＋事務手数料100円\n会場 北島中央校",
+        "締切は12月4日（金）。定員10名程度で、教室で確認してから確定します。"
+        + ("\n※当日は顔写真付きの身分証（原本）が必要です。" if needs_id else ""),
     ]
-    if needs_id:
-        lines.insert(1, "二次試験：3月7日（日）\n※3級以上は、顔写真付きの身分証明書（原本）が必要です。")
     return bubble(
         f"{level}のお申し込み",
         lines,
         [
             button(f"{level}に申し込む", uri=f"https://liff.line.me/{LIFF}/?page=event&id={event_id}"),
-            button("冬期講習と英検アプリ", message="英検アプリ", primary=False),
-            button("級を選び直す", message="英検申込", primary=False),
+            row(button("英検アプリ", message="英検アプリ", primary=False), button("級を選び直す", message="英検申込", primary=False)),
         ],
     )
 
@@ -115,9 +111,8 @@ def level_card(level, event_id, time, fee, needs_id):
 SCHEDULE = bubble(
     "第3回 英検®の日程・検定料",
     [
-        "一次試験：2027年1月23日（土）\n5級　11:20〜12:10　2,400円\n4級　13:00〜14:10　2,800円\n3級　14:40〜16:10　4,900円\n準2級　17:00〜18:45　6,000円\n2級　19:15〜21:05　6,800円",
-        "二次試験：3月7日（日）\n結果発表：一次 2月15日（月）／二次 3月16日（火）\n会場：ECCジュニア・ベストワン北島中央校",
-        "検定料（税込）は、12月15日（火）に事務手数料100円と合わせて口座から引き落とします。試験時間は10〜15分前後する場合があります。",
+        "一次 1月23日（土）北島中央校\n5級　11:20〜　2,400円\n4級　13:00〜　2,800円\n3級　14:40〜　4,900円\n準2級　17:00〜　6,000円\n2級　19:15〜　6,800円",
+        "二次 3月7日（日）\n12月15日（火）に検定料＋事務手数料100円を引き落とします。",
     ],
     [
         button("級を選んで申し込む", message="英検申込"),
@@ -128,8 +123,7 @@ SCHEDULE = bubble(
 CONFIRM = bubble(
     "お申し込みの確認",
     [
-        "お申し込み内容は、下のボタンから確認できます。",
-        "「承認待ち」は教室で確認中です。確定したら、このトークでお知らせします。取り消しや変更は、このトークへご連絡ください。",
+        "「承認待ち」は教室で確認中です。確定したら、このトークでお知らせします。取り消し・変更はこのトークへどうぞ。",
     ],
     [
         button("申込状況を確認する", uri=f"https://liff.line.me/{LIFF}/?page=event-me"),
@@ -140,15 +134,14 @@ CONFIRM = bubble(
 APP = bubble(
     "冬期講習で英検®アプリが使えます",
     [
-        "ECCベストワンの冬期講習を受講すると、英検®対策アプリ「ReadPass」（長文読解）と「AudiPass」（リスニング）をご利用いただけます。",
-        "体験版で、使い心地をお試しいただけます。冬期講習の内容・料金は、講習のご案内ページをご覧ください。",
-        "※英検®は、公益財団法人 日本英語検定協会の登録商標です。このコンテンツは、公益財団法人 日本英語検定協会の承認や推奨、その他の検討を受けたものではありません。",
+        "ECCベストワンの冬期講習を受講すると、英検®対策アプリ「ReadPass」（長文読解）と「AudiPass」（リスニング）をご利用いただけます。体験版もお試しください。",
     ],
     [
         button("アプリの体験版を試す", uri=TRIAL_URL),
         button("冬期講習のご案内を見る", uri=WINTER_LP),
         button("英検®の申込に戻る", message="英検申込", primary=False),
     ],
+    note="※英検®は、公益財団法人 日本英語検定協会の登録商標です。このコンテンツは、公益財団法人 日本英語検定協会の承認や推奨、その他の検討を受けたものではありません。",
 )
 
 
@@ -160,10 +153,6 @@ def flex_json(card):
     return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
 
 
-def send_flex(card, alt):
-    return {"type": "send_message", "params": {"messageType": "flex", "content": flex_json(card), "altText": alt}}
-
-
 def automation_update(auto_id, actions):
     return (
         f"UPDATE automations SET actions = {q(json.dumps(actions, ensure_ascii=False, separators=(',', ':')))},\n"
@@ -171,7 +160,33 @@ def automation_update(auto_id, actions):
     )
 
 
+MENU_REPLY_IDS = [
+    ("b02e9a04-2433-4107-9e48-e28a6ce9c900", "英検申込"),
+    ("bfee1a19-db9a-4622-8235-c99f4e00ff1b", "英検"),
+]
+LEVEL_REPLY_IDS = {
+    "5級": "2416f4e3-0f4e-401a-a0e9-f9c060ac648e",
+    "4級": "0342aa50-fe7d-46f6-baaa-6bbd65ab0012",
+    "3級": "56b96824-b0f0-48e2-91b5-ed858d4627d9",
+    "準2級": "5aae4be1-4ce6-48f0-88d9-31aa9c6e3efd",
+    "2級": "dd22ba96-7b55-4e6f-8eb4-34d8598d179c",
+}
+
+
+def reply_upsert(reply_id, keyword, card):
+    return (
+        "INSERT INTO auto_replies (id, keyword, match_type, response_type, response_content, template_id, line_account_id, is_active)\n"
+        f"VALUES ({q(reply_id)}, {q(keyword)}, 'exact', 'flex', {q(flex_json(card))}, NULL, {q(ACCOUNT)}, 1)\n"
+        "ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.match_type,\n"
+        "  response_type = excluded.response_type, response_content = excluded.response_content,\n"
+        "  template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;\n"
+    )
+
+
 def main():
+    # カードは自動応答の「その場の返信」（replyMessage）で返す。後からのプッシュだと
+    # 届くのが遅れ、LINE が「新着メッセージ」の帯を出して下へのスクロールが必要になるため。
+    # タグ付け・プロフィール記録は、これまでどおりオートメーションが裏で行う。
     out = [
         "-- 生成: scripts/build-eiken-2026-round3-flex.py（手で直さず、生成元を直して作り直す）",
         "-- あいことば 英検第3回の案内を、ボタン付きの Flex カードにする。再実行可。",
@@ -179,35 +194,28 @@ def main():
         "-- 流入シナリオ（友だち追加直後）",
         f"UPDATE scenario_steps SET message_type = 'flex', message_content = {q(flex_json(MENU))}\nWHERE id = 'e2b36bb1-6f05-4b98-b084-1fe21cc7d7e3';",
         "",
-        "-- 「英検申込」「英検」→ 級を選ぶカード",
+        "-- 「英検申込」「英検」→ 級を選ぶカード（その場の返信）",
     ]
-    menu_actions = [{"type": "add_tag", "params": {"tagId": TAG_INFLOW}}, send_flex(MENU, "第3回 英検®のお申し込み：受験する級を選んでください")]
+    for reply_id, keyword in MENU_REPLY_IDS:
+        out.append(reply_upsert(reply_id, keyword, MENU))
     for auto_id in ("546d6fdf-fd89-4d14-8c7c-88a376dae27d", "5d5c3b49-adff-4bd3-ae5a-9ead3a47e877"):
-        out.append(automation_update(auto_id, menu_actions))
-    out.append("-- 級を選んだとき → 級の申込カード")
+        out.append(automation_update(auto_id, [{"type": "add_tag", "params": {"tagId": TAG_INFLOW}}]))
+    out.append("-- 級を選んだとき → 級の申込カード（その場の返信）＋タグ・記録（オートメーション）")
     for level, event_id, time, fee, auto_id, tag_id, needs_id in LEVELS:
-        actions = [
+        out.append(reply_upsert(LEVEL_REPLY_IDS[level], level, level_card(level, event_id, time, fee, needs_id)))
+        out.append(automation_update(auto_id, [
             {"type": "add_tag", "params": {"tagId": TAG_INFLOW}},
             {"type": "add_tag", "params": {"tagId": tag_id}},
             {"type": "set_metadata", "params": {"data": json.dumps({"eiken_2026_3_grade": level}, ensure_ascii=False)}},
-            send_flex(level_card(level, event_id, time, fee, needs_id), f"英検®{level}のお申し込み（12月4日まで）"),
-        ]
-        out.append(automation_update(auto_id, actions))
+        ]))
     out.append("-- 日程・確認・アプリの合言葉 → カード")
-    replies = [
+    for reply_id, keyword, card in [
         ("5e5915e9-a622-4d94-aff4-51c4ad5c88ab", "英検日程", SCHEDULE),
         ("5e92b82e-af95-4105-b225-013452f24d35", "英検料金", SCHEDULE),
         ("91d80313-35e2-497e-ad65-d8277c88e0b5", "英検申込確認", CONFIRM),
         ("ae1796fe-8a83-48dc-8706-ca6157ef8ecb", "英検アプリ", APP),
-    ]
-    for reply_id, keyword, card in replies:
-        out.append(
-            "INSERT INTO auto_replies (id, keyword, match_type, response_type, response_content, template_id, line_account_id, is_active)\n"
-            f"VALUES ({q(reply_id)}, {q(keyword)}, 'exact', 'flex', {q(flex_json(card))}, NULL, {q(ACCOUNT)}, 1)\n"
-            "ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.match_type,\n"
-            "  response_type = excluded.response_type, response_content = excluded.response_content,\n"
-            "  template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;\n"
-        )
+    ]:
+        out.append(reply_upsert(reply_id, keyword, card))
     path = Path(__file__).with_name("update-eiken-2026-round3-aikotoba-flex.sql")
     path.write_text("\n".join(out), encoding="utf-8", newline="\n")
     print(path)
