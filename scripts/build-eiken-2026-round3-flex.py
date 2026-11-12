@@ -95,7 +95,7 @@ def level_card(level, event_id, time, fee, needs_id):
     lines = [
         f"一次 1月23日（土）{time.split('（')[0]}" + ("\n二次 3月7日（日）" if needs_id else "")
         + f"\n検定料 {fee}＋事務手数料100円\n会場 北島中央校",
-        "締切は12月4日（金）。定員10名程度で、教室で確認してから確定します。"
+        "締切は12月4日（金）。定員12名で、教室で確認してから確定します。"
         + ("\n※当日は顔写真付きの身分証（原本）が必要です。" if needs_id else ""),
     ]
     return bubble(
@@ -163,6 +163,26 @@ def automation_update(auto_id, actions):
     )
 
 
+NOTICE_PDF = "https://eiken-2026-round3-manager.vercel.app/docs/eiken-2026-3-notice.pdf"
+HERO_PHOTO = "https://eiken-2026-round3-manager.vercel.app/images/eiken-r3-3kyu.jpg"
+
+# 一斉配信用。URL は本文に出さず、ボタンで開く。
+BROADCAST = bubble(
+    "第3回 英検®のお申し込み",
+    [
+        "一次 2027年1月23日（土）\n二次 3月7日（日）※3級以上\n会場 ECCジュニア・ベストワン北島中央校",
+        "検定料（税込）\n5級 2,400円／4級 2,800円／3級 4,900円\n準2級 6,000円／2級 6,800円\n※別途、事務手数料100円",
+        "⏰ 締切 12月4日（金）\n各級の定員は12名です。当校で英検®対策を受講している生徒を優先し、その後は先着順とさせていただきます。",
+        "検定料は12月15日（火）に口座から引き落とします。12月4日（金）までは、LINEの申込履歴からキャンセルできます。",
+    ],
+    [
+        button("お申し込みはここから", message="英検申込"),
+        row(button("日程・検定料", message="英検日程", primary=False), button("案内（PDF）", uri=NOTICE_PDF, primary=False)),
+    ],
+    note="※英検®は、公益財団法人 日本英語検定協会の登録商標です。このコンテンツは、公益財団法人 日本英語検定協会の承認や推奨、その他の検討を受けたものではありません。",
+)
+BROADCAST["hero"] = {"type": "image", "url": HERO_PHOTO, "size": "full", "aspectRatio": "16:9", "aspectMode": "cover"}
+
 MENU_REPLY_IDS = [
     ("b02e9a04-2433-4107-9e48-e28a6ce9c900", "英検申込"),
     ("bfee1a19-db9a-4622-8235-c99f4e00ff1b", "英検"),
@@ -228,6 +248,10 @@ def main():
     path = Path(__file__).with_name("update-eiken-2026-round3-aikotoba-flex.sql")
     path.write_text("\n".join(out), encoding="utf-8", newline="\n")
     print(path)
+    # 一斉配信用のカード（配信はしない。L Harness の配信画面に Flex として貼る）
+    broadcast_path = Path(__file__).with_name("eiken-2026-round3-broadcast-flex.json")
+    broadcast_path.write_text(json.dumps(BROADCAST, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    print(broadcast_path)
 
 
 if __name__ == "__main__":
