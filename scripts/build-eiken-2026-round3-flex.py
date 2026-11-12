@@ -132,12 +132,14 @@ CONFIRM = bubble(
 )
 
 APP = bubble(
-    "冬期講習で英検®アプリが使えます",
+    "ReadPass × AudiPass で、英検®学習の新体験",
     [
-        "ECCベストワンの冬期講習を受講すると、英検®対策アプリ「ReadPass」（長文読解）と「AudiPass」（リスニング）をご利用いただけます。体験版もお試しください。",
+        "ECCベストワンの冬期講習を受講すると、リーディングの「ReadPass」とリスニングの「AudiPass」が使えます。",
+        "📖 長文も 🎧 リスニングも、級ごとの形式で。プリントの準備なしに、スマホやタブレットで自分のペースで続けられます。",
+        "体験版は登録不要で、各級1回分をお試しいただけます。",
     ],
     [
-        button("アプリの体験版を試す", uri=TRIAL_URL),
+        button("体験版を試す（登録不要）", uri=TRIAL_URL),
         button("冬期講習のご案内を見る", uri=WINTER_LP),
         button("英検®の申込に戻る", message="英検申込", primary=False),
     ],
