@@ -173,6 +173,11 @@ LEVEL_REPLY_IDS = {
 }
 
 
+# 冬期講習のご案内シナリオ（setup-eiken-2026-round3-winter-followup.sql）。
+# オートメーションの add_tag は tag_added シナリオを起動しないため、ここで明示的に開始する（重複は起きない）。
+START_WINTER = {"type": "start_scenario", "params": {"scenarioId": "63dac895-828e-4ebc-b955-dfce7cff8b10"}}
+
+
 def reply_upsert(reply_id, keyword, card):
     return (
         "INSERT INTO auto_replies (id, keyword, match_type, response_type, response_content, template_id, line_account_id, is_active)\n"
@@ -199,7 +204,7 @@ def main():
     for reply_id, keyword in MENU_REPLY_IDS:
         out.append(reply_upsert(reply_id, keyword, MENU))
     for auto_id in ("546d6fdf-fd89-4d14-8c7c-88a376dae27d", "5d5c3b49-adff-4bd3-ae5a-9ead3a47e877"):
-        out.append(automation_update(auto_id, [{"type": "add_tag", "params": {"tagId": TAG_INFLOW}}]))
+        out.append(automation_update(auto_id, [{"type": "add_tag", "params": {"tagId": TAG_INFLOW}}, START_WINTER]))
     out.append("-- 級を選んだとき → 級の申込カード（その場の返信）＋タグ・記録（オートメーション）")
     for level, event_id, time, fee, auto_id, tag_id, needs_id in LEVELS:
         out.append(reply_upsert(LEVEL_REPLY_IDS[level], level, level_card(level, event_id, time, fee, needs_id)))
@@ -207,6 +212,7 @@ def main():
             {"type": "add_tag", "params": {"tagId": TAG_INFLOW}},
             {"type": "add_tag", "params": {"tagId": tag_id}},
             {"type": "set_metadata", "params": {"data": json.dumps({"eiken_2026_3_grade": level}, ensure_ascii=False)}},
+            START_WINTER,
         ]))
     out.append("-- 日程・確認・アプリの合言葉 → カード")
     for reply_id, keyword, card in [
