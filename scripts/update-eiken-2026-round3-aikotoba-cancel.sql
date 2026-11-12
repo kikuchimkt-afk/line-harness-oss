@@ -26,4 +26,4 @@ SET description = REPLACE(
     ),
     updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id IN ('eiken-2026-r3-5kyu', 'eiken-2026-r3-4kyu', 'eiken-2026-r3-3kyu', 'eiken-2026-r3-p2kyu', 'eiken-2026-r3-2kyu')
-  AND description NOT LIKE '%申込履歴からご自身でキャンセルできます%';
+  AND instr(description, 'ご自身でキャンセル') = 0;  -- D1 は長い LIKE パターンを受け付けない
