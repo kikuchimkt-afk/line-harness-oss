@@ -3,6 +3,16 @@ import type { EventBookingFormField, EventBookingItem, EventDetail } from './api
 export const EIKEN_MANAGER_MESSAGE_TYPE = 'l-harness:eiken-course-reservations:v1'
 export const EVENT_BOOKINGS_MESSAGE_TYPE = 'l-harness:event-bookings:v1'
 export const EIKEN_MANAGER_READY_MESSAGE = 'eiken-course-manager:ready:v1'
+export const EIKEN_EXAM_MESSAGE_TYPE = 'l-harness:eiken-exam-applications:v1'
+
+/** 2026年度第3回英検（あいことば）の級別申込ページ。eiken-2026-round3-manager へ送る。 */
+export const EIKEN_EXAM_EVENT_IDS = new Set([
+  'eiken-2026-r3-5kyu',
+  'eiken-2026-r3-4kyu',
+  'eiken-2026-r3-3kyu',
+  'eiken-2026-r3-p2kyu',
+  'eiken-2026-r3-2kyu',
+])
 
 export const PICTURE_BOOK_EVENT_IDS = new Set([
   '887d5545-7b60-425d-9c24-91d36e84d1ed',
@@ -24,6 +34,7 @@ const EIKEN_MANAGER_ALLOWED_ORIGINS = new Set([
   'https://tokushima-elementary-english-presentation-2026.vercel.app',
   'https://ecc-preschool-autumn-events.vercel.app',
   'https://eiken-intensive-course-manager-2026.makoto-keitai-list.chatgpt.site',
+  'https://eiken-2026-round3-manager.vercel.app',
   'http://localhost:3000',
 ])
 
@@ -80,7 +91,16 @@ export type EventBookingsSyncPayload = {
   rows: unknown[][]
 }
 
-export type ManagerSyncPayload = EikenManagerSyncPayload | EventBookingsSyncPayload
+export type EikenExamSyncPayload = {
+  type: typeof EIKEN_EXAM_MESSAGE_TYPE
+  version: 1
+  eventId: string
+  eventName: string
+  exportedAt: string
+  rows: unknown[][]
+}
+
+export type ManagerSyncPayload = EikenManagerSyncPayload | EventBookingsSyncPayload | EikenExamSyncPayload
 
 function parseAnswers(raw: EventBookingItem['form_answers']): Record<string, string | string[]> {
   if (raw == null) return {}
@@ -344,12 +364,61 @@ export function buildEventBookingsSyncPayload(
  * 既存の英検管理画面は従来形式のまま維持し、指定した絵本イベントだけ
  * 汎用予約形式へ切り替える。
  */
+/**
+ * 英検第3回の申込を、申込管理ダッシュボードへ渡す形式に整える。
+ * LINE user id は含めず、申込の確認と連絡に必要な回答だけを渡す。
+ */
+export function buildEikenExamSyncPayload(
+  event: EventDetail,
+  bookings: EventBookingItem[],
+  fields: EventBookingFormField[],
+  exportedAt = new Date().toISOString(),
+): EikenExamSyncPayload {
+  const headers = [
+    '予約ID',
+    '状態',
+    '受験者氏名',
+    '電話番号',
+    '学校名',
+    '学年',
+    '在籍教室',
+    '連絡事項',
+    'LINE表示名',
+    '受付日時',
+  ]
+  const rows = bookings
+    .slice()
+    .sort((a, b) => new Date(a.requested_at).getTime() - new Date(b.requested_at).getTime())
+    .map((booking) => [
+      booking.id,
+      STATUS_LABELS[booking.status] ?? booking.status,
+      answerByIdsOrLabels(booking, fields, ['student_name'], ['受験者氏名']),
+      answerByIdsOrLabels(booking, fields, ['phone'], ['電話番号']),
+      answerByIdsOrLabels(booking, fields, ['school_name'], ['学校名']),
+      answerByIdsOrLabels(booking, fields, ['grade'], ['学年']),
+      answerByIdsOrLabels(booking, fields, ['enrolled_class'], ['在籍教室（当グループに在籍している場合）', '在籍教室']),
+      answerByIdsOrLabels(booking, fields, ['note'], ['教室へ伝えておきたいこと']),
+      booking.friend_display_name ?? '',
+      dateTimeFormatter.format(new Date(booking.requested_at)),
+    ])
+
+  return {
+    type: EIKEN_EXAM_MESSAGE_TYPE,
+    version: 1,
+    eventId: event.id,
+    eventName: event.name,
+    exportedAt,
+    rows: [headers, ...rows],
+  }
+}
+
 export function buildManagerSyncPayload(
   event: EventDetail,
   bookings: EventBookingItem[],
   fields: EventBookingFormField[],
   exportedAt = new Date().toISOString(),
 ): ManagerSyncPayload {
+  if (EIKEN_EXAM_EVENT_IDS.has(event.id)) return buildEikenExamSyncPayload(event, bookings, fields, exportedAt)
   return PICTURE_BOOK_EVENT_IDS.has(event.id)
     ? buildEventBookingsSyncPayload(event, bookings, fields, exportedAt)
     : buildEikenManagerSyncPayload(event, bookings, fields, exportedAt)

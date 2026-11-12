@@ -4,6 +4,7 @@ import {
   buildEventBookingsSyncPayload,
   buildEikenManagerSyncPayload,
   buildManagerSyncPayload,
+  EIKEN_EXAM_MESSAGE_TYPE,
   EIKEN_MANAGER_MESSAGE_TYPE,
   EVENT_BOOKINGS_MESSAGE_TYPE,
   friendAnswerText,
@@ -287,5 +288,37 @@ describe('Eiken course manager sync', () => {
     expect(friendAnswerText('')).toBe('')
     // 壊れた JSON でも中身を捨てない
     expect(friendAnswerText('[壊れています')).toBe('[壊れています')
+  })
+  it('sends 2026 round 3 Eiken applications to the exam manager without LINE ids', () => {
+    expect(resolveEikenManagerOrigin('https://eiken-2026-round3-manager.vercel.app/admin'))
+      .toBe('https://eiken-2026-round3-manager.vercel.app')
+    const examEvent = { id: 'eiken-2026-r3-3kyu', name: '英検2026第3回｜3級 申込', venue_name: '北島中央校' } as EventDetail
+    const examFields: EventBookingFormField[] = [
+      { id: 'student_name', label: '受験者氏名', type: 'text', required: true },
+      { id: 'phone', label: '電話番号', type: 'text', required: true },
+      { id: 'school_name', label: '学校名', type: 'text', required: true },
+      { id: 'grade', label: '学年', type: 'select', required: true },
+      { id: 'enrolled_class', label: '在籍教室（当グループに在籍している場合）', type: 'select', required: true },
+      { id: 'note', label: '教室へ伝えておきたいこと', type: 'textarea', required: false },
+    ]
+    const examBooking = {
+      ...booking,
+      id: 'exam-1',
+      event_id: examEvent.id,
+      status: 'requested',
+      form_answers: JSON.stringify({
+        student_name: '山田 花子',
+        phone: '090-1111-2222',
+        school_name: '北島中学校',
+        grade: '中学2年生',
+        enrolled_class: '在籍していない',
+        note: '',
+      }),
+    } satisfies EventBookingItem
+    const payload = buildManagerSyncPayload(examEvent, [examBooking], examFields)
+    expect(payload.type).toBe(EIKEN_EXAM_MESSAGE_TYPE)
+    expect(payload.rows[0]).toEqual(['予約ID', '状態', '受験者氏名', '電話番号', '学校名', '学年', '在籍教室', '連絡事項', 'LINE表示名', '受付日時'])
+    expect(payload.rows[1].slice(0, 7)).toEqual(['exam-1', '承認待ち', '山田 花子', '090-1111-2222', '北島中学校', '中学2年生', '在籍していない'])
+    expect(JSON.stringify(payload)).not.toContain('U1')
   })
 })
