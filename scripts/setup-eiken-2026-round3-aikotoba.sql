@@ -121,20 +121,17 @@ FROM (
          '2026年度 第3回 英検 3級のお申し込みページです。
 
 【一次試験】2027年1月23日（土）14:40〜16:10（90分）
-【検定料】4,900円（税込）
-※3級以上は、顔写真付きの身分証明書（原本）が必要です。'
+【検定料】4,900円（税込）'
   UNION ALL SELECT 'eiken-2026-r3-p2kyu', '英検2026第3回｜準2級 申込', 4,
          '2026年度 第3回 英検 準2級のお申し込みページです。
 
 【一次試験】2027年1月23日（土）17:00〜18:45（105分）
-【検定料】6,000円（税込）
-※3級以上は、顔写真付きの身分証明書（原本）が必要です。'
+【検定料】6,000円（税込）'
   UNION ALL SELECT 'eiken-2026-r3-2kyu', '英検2026第3回｜2級 申込', 5,
          '2026年度 第3回 英検 2級のお申し込みページです。
 
 【一次試験】2027年1月23日（土）19:15〜21:05（110分）
-【検定料】6,800円（税込）
-※3級以上は、顔写真付きの身分証明書（原本）が必要です。'
+【検定料】6,800円（税込）'
 ) AS v
 WHERE true
 ON CONFLICT(id) DO UPDATE SET
@@ -179,17 +176,17 @@ INSERT INTO automations (id, name, description, event_type, conditions, actions,
   ('c6ee79eb-6d89-456e-a189-ff05c9c9aeca', '英検2026第3回｜3級回答→申込案内',
    '3級と回答した方に、級タグとプロフィールを記録し、3級の申込ページを送ります。',
    'message_received', '{"keyword_exact":"3級"}',
-   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"67ac89e8-148d-4c3f-9470-759c925ee6aa"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"3級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"3級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）14:40〜16:10（90分）\n【二次試験】3月7日（日）\n【検定料】4,900円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n※3級以上は、顔写真付きの身分証明書（原本）が必要です。\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼3級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-3kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
+   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"67ac89e8-148d-4c3f-9470-759c925ee6aa"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"3級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"3級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）14:40〜16:10（90分）\n【二次試験】3月7日（日）\n【検定料】4,900円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼3級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-3kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
    1, 100, '0797696f-e377-4132-bb17-77bc1db29b0a'),
   ('fc15ceff-1511-4d5e-88a3-b324ddf80d40', '英検2026第3回｜準2級回答→申込案内',
    '準2級と回答した方に、級タグとプロフィールを記録し、準2級の申込ページを送ります。',
    'message_received', '{"keyword_exact":"準2級"}',
-   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"9b1882b2-3106-4f0b-a4c9-94fb100fc8a7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"準2級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"準2級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）17:00〜18:45（105分）\n【二次試験】3月7日（日）\n【検定料】6,000円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n※3級以上は、顔写真付きの身分証明書（原本）が必要です。\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼準2級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-p2kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
+   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"9b1882b2-3106-4f0b-a4c9-94fb100fc8a7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"準2級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"準2級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）17:00〜18:45（105分）\n【二次試験】3月7日（日）\n【検定料】6,000円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼準2級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-p2kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
    1, 100, '0797696f-e377-4132-bb17-77bc1db29b0a'),
   ('7af9a1c6-eb2f-490f-91d1-6b39dcf3b71d', '英検2026第3回｜2級回答→申込案内',
    '2級と回答した方に、級タグとプロフィールを記録し、2級の申込ページを送ります。',
    'message_received', '{"keyword_exact":"2級"}',
-   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"ad727121-3722-4b86-a147-6c53f0109e28"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"2級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"2級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）19:15〜21:05（110分）\n【二次試験】3月7日（日）\n【検定料】6,800円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n※3級以上は、顔写真付きの身分証明書（原本）が必要です。\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼2級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-2kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
+   '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"ad727121-3722-4b86-a147-6c53f0109e28"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\":\"2級\"}"}},{"type":"send_message","params":{"messageType":"text","content":"2級ですね。ありがとうございます。\n\n【一次試験】2027年1月23日（土）19:15〜21:05（110分）\n【二次試験】3月7日（日）\n【検定料】6,800円（税込）＋事務手数料100円\n【会場】ECCジュニア・ベストワン北島中央校\n\n次のページで、受験者のプロフィールを入力してお申し込みください（12月4日（金）まで）。\n\n▼2級 お申し込み\nhttps://liff.line.me/2010714049-6L0KFjN7/?page=event&id=eiken-2026-r3-2kyu\n\n各級の定員は12名です。教室で確認してから確定のご連絡をします。"}}]',
    1, 100, '0797696f-e377-4132-bb17-77bc1db29b0a')
 ON CONFLICT(id) DO UPDATE SET
   name = excluded.name, description = excluded.description, event_type = excluded.event_type,
