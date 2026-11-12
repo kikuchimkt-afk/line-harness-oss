@@ -1,0 +1,121 @@
+{
+  "type": "bubble",
+  "size": "mega",
+  "body": {
+    "type": "box",
+    "layout": "vertical",
+    "spacing": "sm",
+    "backgroundColor": "#FFF5F9",
+    "contents": [
+      {
+        "type": "text",
+        "text": "あいことば｜英検®のご案内",
+        "size": "xs",
+        "wrap": true,
+        "color": "#B07A9A"
+      },
+      {
+        "type": "text",
+        "text": "第3回 英検®のお申し込み",
+        "size": "lg",
+        "wrap": true,
+        "color": "#5B3350",
+        "weight": "bold"
+      },
+      {
+        "type": "text",
+        "text": "一次 2027年1月23日（土）\n二次 3月7日（日）※3級以上\n会場 ECCジュニア・ベストワン北島中央校",
+        "size": "sm",
+        "wrap": true,
+        "color": "#4A4048"
+      },
+      {
+        "type": "text",
+        "text": "検定料（税込）\n5級 2,400円／4級 2,800円／3級 4,900円\n準2級 6,000円／2級 6,800円\n※別途、事務手数料100円",
+        "size": "sm",
+        "wrap": true,
+        "color": "#4A4048"
+      },
+      {
+        "type": "text",
+        "text": "⏰ 締切 12月4日（金）\n各級の定員は12名です。当校で英検®対策を受講している生徒を優先し、その後は先着順とさせていただきます。",
+        "size": "sm",
+        "wrap": true,
+        "color": "#4A4048"
+      },
+      {
+        "type": "text",
+        "text": "検定料は12月15日（火）に口座から引き落とします。12月4日（金）までは、LINEの申込履歴からキャンセルできます。",
+        "size": "sm",
+        "wrap": true,
+        "color": "#4A4048"
+      },
+      {
+        "type": "text",
+        "text": "※英検®は、公益財団法人 日本英語検定協会の登録商標です。このコンテンツは、公益財団法人 日本英語検定協会の承認や推奨、その他の検討を受けたものではありません。",
+        "size": "xxs",
+        "wrap": true,
+        "color": "#8A7F88"
+      }
+    ]
+  },
+  "footer": {
+    "type": "box",
+    "layout": "vertical",
+    "spacing": "sm",
+    "backgroundColor": "#FFFFFF",
+    "contents": [
+      {
+        "type": "button",
+        "style": "secondary",
+        "color": "#F6D3E3",
+        "height": "sm",
+        "action": {
+          "type": "message",
+          "label": "お申し込みはここから",
+          "text": "英検申込"
+        },
+        "margin": "sm"
+      },
+      {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "margin": "sm",
+        "contents": [
+          {
+            "type": "button",
+            "style": "secondary",
+            "color": "#EEE7EC",
+            "height": "sm",
+            "action": {
+              "type": "message",
+              "label": "日程・検定料",
+              "text": "英検日程"
+            },
+            "flex": 1
+          },
+          {
+            "type": "button",
+            "style": "secondary",
+            "color": "#EEE7EC",
+            "height": "sm",
+            "action": {
+              "type": "uri",
+              "label": "案内（PDF）",
+              "uri": "https://eiken-2026-round3-manager.vercel.app/docs/eiken-2026-3-notice.pdf"
+            },
+            "flex": 1
+          }
+        ]
+      }
+    ]
+  },
+  "hero": {
+    "type": "image",
+    "url": "https://eiken-2026-round3-manager.vercel.app/images/eiken-r3-3kyu.jpg",
+    "size": "full",
+    "aspectRatio": "16:9",
+    "aspectMode": "cover"
+  }
+}
