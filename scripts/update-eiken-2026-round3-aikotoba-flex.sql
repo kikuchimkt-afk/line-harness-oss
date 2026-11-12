@@ -18,11 +18,11 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = '546d6fdf-fd89-4d14-8c7c-88a376dae27d';
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = '5d5c3b49-adff-4bd3-ae5a-9ead3a47e877';
 
@@ -33,7 +33,7 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"1dfc22ef-500a-40fd-afea-f559c6d003ab"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"5級\"}"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"1dfc22ef-500a-40fd-afea-f559c6d003ab"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"5級\"}"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = '96542795-8434-49f0-b676-323d68b762ad';
 
@@ -43,7 +43,7 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"19c8e5f5-70fa-4db7-8543-ee75c468bba7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"4級\"}"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"19c8e5f5-70fa-4db7-8543-ee75c468bba7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"4級\"}"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = 'eb1bb6dc-b128-4aec-a593-d2bc1cc05984';
 
@@ -53,7 +53,7 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"67ac89e8-148d-4c3f-9470-759c925ee6aa"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"3級\"}"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"67ac89e8-148d-4c3f-9470-759c925ee6aa"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"3級\"}"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = 'c6ee79eb-6d89-456e-a189-ff05c9c9aeca';
 
@@ -63,7 +63,7 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"9b1882b2-3106-4f0b-a4c9-94fb100fc8a7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"準2級\"}"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"9b1882b2-3106-4f0b-a4c9-94fb100fc8a7"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"準2級\"}"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = 'fc15ceff-1511-4d5e-88a3-b324ddf80d40';
 
@@ -73,7 +73,7 @@ ON CONFLICT(id) DO UPDATE SET keyword = excluded.keyword, match_type = excluded.
   response_type = excluded.response_type, response_content = excluded.response_content,
   template_id = NULL, line_account_id = excluded.line_account_id, is_active = 1;
 
-UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"ad727121-3722-4b86-a147-6c53f0109e28"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"2級\"}"}}]',
+UPDATE automations SET actions = '[{"type":"add_tag","params":{"tagId":"9fcad10e-5bdf-407a-9b2c-cebc39ffbbd4"}},{"type":"add_tag","params":{"tagId":"ad727121-3722-4b86-a147-6c53f0109e28"}},{"type":"set_metadata","params":{"data":"{\"eiken_2026_3_grade\": \"2級\"}"}},{"type":"start_scenario","params":{"scenarioId":"63dac895-828e-4ebc-b955-dfce7cff8b10"}}]',
   updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
 WHERE id = '7af9a1c6-eb2f-490f-91d1-6b39dcf3b71d';
 
