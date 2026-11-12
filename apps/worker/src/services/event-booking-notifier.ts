@@ -71,7 +71,7 @@ export function renderEventNotificationText(
     case 'confirmed':
       return `イベント予約が確定しました。${detail}${approvalCommentLine}\n\n変更・キャンセルは予約履歴画面からお願いします。${historyLine}`;
     case 'rejected':
-      return `申し訳ございません、今回のイベント予約はお受けできませんでした。${detail}`;
+      return `申し訳ございません。今回のお申し込みは、定員などの都合によりお受けできませんでした。${detail}`;
     case 'cancelled_by_admin':
       return `運営側でイベント予約をキャンセルさせていただきました。${detail}\n\n詳細は LINE にてご連絡ください。`;
     case 'reminder_day_before':

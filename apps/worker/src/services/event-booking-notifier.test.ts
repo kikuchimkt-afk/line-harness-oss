@@ -105,7 +105,7 @@ describe('renderEventNotificationText', () => {
 
   test('拒否は固定文面（reason は含まない）', () => {
     const text = renderEventNotificationText('rejected', baseCtx);
-    expect(text).toContain('お受けできませんでした');
+    expect(text.startsWith('申し訳ございません。今回のお申し込みは、定員などの都合によりお受けできませんでした。')).toBe(true);
     expect(text).not.toContain('reason');
   });
 
