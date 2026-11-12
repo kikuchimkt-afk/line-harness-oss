@@ -123,10 +123,10 @@ SCHEDULE = bubble(
 CONFIRM = bubble(
     "お申し込みの確認",
     [
-        "「承認待ち」は教室で確認中です。確定したら、このトークでお知らせします。取り消し・変更はこのトークへどうぞ。",
+        "「承認待ち」は教室で確認中です。確定したら、このトークでお知らせします。12月4日（金）までは、確定後も下のボタンからキャンセルできます。",
     ],
     [
-        button("申込状況を確認する", uri=f"https://liff.line.me/{LIFF}/?page=event-me"),
+        button("申込状況の確認・キャンセル", uri=f"https://liff.line.me/{LIFF}/?page=event-me"),
         button("級を選んで申し込む", message="英検申込", primary=False),
     ],
 )
